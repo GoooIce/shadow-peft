@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ShadowPEFT · 3D 架构交互讲解</title>
+<style>
+  :root{
+    --bg:#0b1020; --panel:#111a2ecc; --border:#243049; --txt:#dbe4f0; --dim:#8fa1bd;
+    --blue:#3b82f6; --green:#22c55e; --red:#ef4444; --teal:#14b8a6; --orange:#f97316;
+    --purple:#a855f7; --yellow:#eab308; --lime:#84cc16; --slate:#64748b;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html,body{height:100%; overflow:hidden; background:var(--bg); color:var(--txt);
+    font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",-apple-system,"Segoe UI",sans-serif;}
+  #app{display:flex; height:100%;}
+  #stage{flex:1; position:relative; min-width:0;}
+  #scene{width:100%; height:100%; display:block; cursor:grab;}
+  #scene:active{cursor:grabbing;}
+
+  /* 顶部标题 */
+  #title{position:absolute; top:14px; left:16px; z-index:5; pointer-events:none;}
+  #title h1{font-size:19px; font-weight:700; letter-spacing:.5px;}
+  #title h1 b{color:var(--blue);}
+  #title p{font-size:12px; color:var(--dim); margin-top:4px;}
+  #title .tag{display:inline-block; background:#16324f; color:#7dd3fc; border:1px solid #1e4a73;
+    border-radius:4px; padding:1px 7px; font-size:11px; margin-right:6px;}
+
+  /* 图例 */
+  #legend{position:absolute; top:14px; right:16px; z-index:5; background:var(--panel);
+    border:1px solid var(--border); border-radius:10px; padding:10px 12px; font-size:12px;
+    backdrop-filter:blur(6px); max-width:210px;}
+  #legend h3{font-size:12px; color:var(--dim); margin-bottom:6px; font-weight:600;}
+  #legend .row{display:flex; align-items:center; gap:7px; margin:3px 0;}
+  #legend .chip{width:12px; height:12px; border-radius:3px; flex:none;}
+
+  /* 底部控制条 */
+  #controls{position:absolute; left:16px; right:16px; bottom:14px; z-index:5;
+    background:var(--panel); border:1px solid var(--border); border-radius:12px;
+    padding:10px 14px; backdrop-filter:blur(8px);}
+  #btnrow{display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+  button{background:#1b2947; color:var(--txt); border:1px solid #2c3d63; border-radius:8px;
+    padding:6px 14px; font-size:13px; cursor:pointer; transition:all .15s; font-family:inherit;}
+  button:hover{background:#25355f; border-color:#3d5385;}
+  button.active{background:var(--blue); border-color:var(--blue); color:#fff;}
+  button.warn{border-color:#7c2d12; color:#fca5a5;}
+  #speedwrap{display:flex; align-items:center; gap:6px; font-size:12px; color:var(--dim); margin-left:auto;}
+  #speed{width:110px; accent-color:var(--blue);}
+  #caption{margin-top:9px; font-size:13.5px; line-height:1.65; color:#eaf1fb; min-height:44px;}
+  #caption b{color:#7dd3fc;} #caption code{background:#0d1526;
+    border:1px solid #26334f; border-radius:4px; padding:0 5px; font-size:12px; color:#fbbf24;
+    font-family:"SF Mono",Menlo,Consolas,monospace;}
+  #stepbar{display:flex; gap:4px; margin-top:8px;}
+  #stepbar i{flex:1; height:3px; background:#22304e; border-radius:2px;}
+  #stepbar i.done{background:var(--blue);}
+  #stepbar i.cur{background:#7dd3fc;}
+
+  /* 右侧信息面板 */
+  #panel{width:392px; flex:none; border-left:1px solid var(--border); background:#0d1426;
+    display:flex; flex-direction:column; overflow:hidden;}
+  #panelhead{padding:14px 16px 10px; border-bottom:1px solid var(--border);}
+  #panelhead h2{font-size:15px;}
+  #panelhead p{font-size:11.5px; color:var(--dim); margin-top:3px;}
+  #panelbody{flex:1; overflow-y:auto; padding:14px 16px 20px;}
+  #panelbody::-webkit-scrollbar{width:8px;}
+  #panelbody::-webkit-scrollbar-thumb{background:#26334f; border-radius:4px;}
+  .card h3{font-size:15px; margin-bottom:8px; color:#fff;}
+  .card .sub{font-size:11px; color:var(--dim); margin-bottom:10px; font-family:Menlo,monospace;}
+  .card p{font-size:13px; line-height:1.75; margin:8px 0; color:var(--txt);}
+  .card ul{margin:8px 0 8px 18px;}
+  .card li{font-size:12.5px; line-height:1.7; margin:4px 0; color:var(--txt);}
+  .card code{background:#131f3a; border:1px solid #26334f; border-radius:4px; padding:0 5px;
+    font-size:11.5px; color:#fbbf24; font-family:"SF Mono",Menlo,Consolas,monospace;}
+  .formula{display:block; background:#0a1120; border:1px solid #22304e; border-left:3px solid var(--blue);
+    border-radius:6px; padding:9px 12px; margin:10px 0; font-size:12.5px;
+    font-family:"SF Mono",Menlo,Consolas,monospace; color:#a5f3fc; line-height:1.8; overflow-x:auto;}
+  .note{background:#1c1307; border:1px solid #4a2f0b; border-left:3px solid var(--orange);
+    border-radius:6px; padding:8px 11px; margin:10px 0; font-size:12px; line-height:1.7; color:#fcd9a8;}
+  .navchips{display:flex; flex-wrap:wrap; gap:6px; margin-top:12px;}
+  .navchips button{font-size:11.5px; padding:4px 10px; border-radius:20px;}
+  .hl{color:#7dd3fc; font-weight:600;}
+  .files{margin-top:16px; border-top:1px dashed var(--border); padding-top:10px;}
+  .files h4{font-size:12px; color:var(--dim); margin-bottom:6px;}
+  .files div{font-size:11.5px; color:var(--dim); line-height:1.8; font-family:Menlo,monospace;}
+
+  @media (max-width:900px){
+    #app{flex-direction:column;}
+    #panel{width:100%; height:44%; border-left:none; border-top:1px solid var(--border);}
+    #legend{display:none;}
+  }
+</style>
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <canvas id="scene"></canvas>
+    <div id="title">
+      <h1><b>ShadowPEFT</b> · 3D 架构交互讲解</h1>
+      <p><span class="tag">main @ e221900</span><span class="tag">KV-Cache 增量解码已合并</span><br>
+         拖动旋转 · 滚轮缩放 · 点击任意组件查看详解</p>
+    </div>
+    <div id="legend">
+      <h3>图例</h3>
+      <div class="row"><i class="chip" style="background:#3b82f6"></i>Base 层（冻结）</div>
+      <div class="row"><i class="chip" style="background:#22c55e"></i>Shadow Backbone（可训练）</div>
+      <div class="row"><i class="chip" style="background:#ef4444"></i>ShadowInjectionModel（层前注入）</div>
+      <div class="row"><i class="chip" style="background:#14b8a6"></i>ShadowUpdateModel（层后更新）</div>
+      <div class="row"><i class="chip" style="background:#eab308"></i>shadow_hidden_projection</div>
+      <div class="row"><i class="chip" style="background:#a855f7"></i>共享嵌入层</div>
+      <div class="row"><i class="chip" style="background:#f97316"></i>Norm + LM Head（冻结）</div>
+      <div class="row"><i class="chip" style="background:#84cc16"></i>shadow_lm_head</div>
+      <div class="row"><i class="chip" style="background:#64748b"></i>KV Cache（DynamicCache）</div>
+    </div>
+    <div id="controls">
+      <div id="btnrow">
+        <button id="scFull" class="active">① 全序列前向（训练 / 无缓存）</button>
+        <button id="scKv">② KV-Cache 增量解码</button>
+        <span style="width:10px"></span>
+        <button id="play">▶ 播放</button>
+        <button id="step">单步 ›</button>
+        <button id="reset" class="warn">↺ 重置</button>
+        <div id="speedwrap">速度 <input id="speed" type="range" min="0.5" max="3" step="0.1" value="1"></div>
+      </div>
+      <div id="caption">正在加载 3D 场景…</div>
+      <div id="stepbar"></div>
+    </div>
+  </div>
+  <div id="panel">
+    <div id="panelhead">
+      <h2 id="ptitle">总览</h2>
+      <p id="psub">点击左侧 3D 组件或下方导航切换主题</p>
+    </div>
+    <div id="panelbody">
+      <div class="card" id="card"></div>
+      <div class="navchips" id="chips"></div>
+      <div class="files">
+        <h4>关键源文件</h4>
+        <div>src/shadow_peft/modules.py — 注入 / 更新适配器（数学核心）</div>
+        <div>src/shadow_peft/peft_model.py — ShadowPeftModel 编排器 + KV-Cache</div>
+        <div>src/shadow_peft/task_models.py — CausalLM / 分类任务头</div>
+        <div>src/shadow_peft/projected_causal_lm.py — 可独立分发的投影版 Shadow</div>
+        <div>src/shadow_peft/model_utils.py — 骨干探测 / 隐式 Shadow 构建</div>
+        <div>src/shadow_peft/config.py — ShadowConfig 配置</div>
+        <div>tests/test_cached_decode.py — KV-Cache 等价性测试</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+/* ================================================================
+   0. 基础场景
+================================================================ */
+const canvas = document.getElementById('scene');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b1020);
+scene.fog = new THREE.Fog(0x0b1020, 34, 78);
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 200);
+camera.position.set(11.5, 9.0, 16.5);
+const controls = new OrbitControls(camera, canvas);
+controls.target.set(-0.6, 4.4, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+const dir = new THREE.DirectionalLight(0xffffff, 1.1);
+dir.position.set(8, 16, 10);
+scene.add(dir);
+const dir2 = new THREE.DirectionalLight(0x88aaff, 0.35);
+dir2.position.set(-10, 6, -8);
+scene.add(dir2);
+
+const grid = new THREE.GridHelper(30, 30, 0x1c2a45, 0x131d33);
+grid.position.y = -1.05;
+scene.add(grid);
+
+/* ================================================================
+   1. 工具函数：方块 / 文字标签 / 管线 / 补间动画
+================================================================ */
+const clickable = [];   // {mesh, key}
+const tweens = [];
+const state = { speed:1, playing:false, step:-1, scenario:'full', running:false };
+
+function ease(k){ return k<0.5 ? 2*k*k : 1-Math.pow(-2*k+2,2)/2; }
+function tw(dur, fn){ return new Promise(res => tweens.push({ t:0, dur, fn, res })); }
+const wait = s => tw(s, ()=>{});
+
+function box(w, h, d, color, opacity=0.92){
+  const m = new THREE.Mesh(
+    new THREE.BoxGeometry(w, h, d),
+    new THREE.MeshStandardMaterial({ color, transparent:true, opacity, roughness:0.42, metalness:0.12 })
+  );
+  scene.add(m);
+  return m;
+}
+function mark(mesh, key){ mesh.userData.key = key; clickable.push(mesh); return mesh; }
+
+function makeLabel(text, { px=44, color='#e5e7eb', scale=1, bold=true } = {}){
+  const c = document.createElement('canvas');
+  const ctx = c.getContext('2d');
+  ctx.font = `${bold?'700':'400'} ${px}px "PingFang SC","Microsoft YaHei",sans-serif`;
+  const wText = Math.ceil(ctx.measureText(text).width) + 28;
+  c.width = wText; c.height = px + 26;
+  const ctx2 = c.getContext('2d');
+  ctx2.font = `${bold?'700':'400'} ${px}px "PingFang SC","Microsoft YaHei",sans-serif`;
+  ctx2.textAlign='center'; ctx2.textBaseline='middle';
+  ctx2.shadowColor='rgba(0,0,0,.85)'; ctx2.shadowBlur=10;
+  ctx2.fillStyle = color;
+  ctx2.fillText(text, c.width/2, c.height/2);
+  const tex = new THREE.CanvasTexture(c);
+  tex.anisotropy = 4;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map:tex, transparent:true, depthWrite:false }));
+  const hWorld = 0.42 * scale;
+  sp.scale.set(hWorld * c.width / c.height, hWorld, 1);
+  return sp;
+}
+function addLabel(text, pos, opt){ const s = makeLabel(text, opt); s.position.set(...pos); scene.add(s); return s; }
+
+function pipe(points, color, { radius=0.035, opacity=0.55, dashed=false } = {}){
+  const v = points.map(p => new THREE.Vector3(...p));
+  if (dashed){
+    const g = new THREE.BufferGeometry().setFromPoints(v);
+    const m = new THREE.Line(g, new THREE.LineDashedMaterial({ color, dashSize:0.22, gapSize:0.14, transparent:true, opacity }));
+    m.computeLineDistances(); scene.add(m); return m;
+  }
+  const curve = new THREE.CatmullRomCurve3(v);
+  const mesh = new THREE.Mesh(
+    new THREE.TubeGeometry(curve, Math.max(8, v.length*6), radius, 8, false),
+    new THREE.MeshStandardMaterial({ color, transparent:true, opacity, roughness:0.6 })
+  );
+  scene.add(mesh); return mesh;
+}
+
+function pulse(mesh, dur=0.9, imax=0.95){
+  const m = mesh.material;
+  m.emissive = new THREE.Color(m.color.getHex());
+  return tw(dur, k => { m.emissiveIntensity = Math.sin(k*Math.PI) * imax; });
+}
+function dimGroup(meshes, opacity){
+  meshes.forEach(m => tw(0.5, k => { m.material.opacity = m.userData.op0 + (opacity - m.userData.op0) * k; }));
+}
+
+function moveAlong(obj, pts, speed=6){
+  const v = pts.map(p => new THREE.Vector3(...p));
+  const lens = []; let total = 0;
+  for (let i=1; i<v.length; i++){ const l = v[i].distanceTo(v[i-1]); lens.push(l); total += l; }
+  if (total === 0) return Promise.resolve();
+  return tw(total/speed, k => {
+    let d = k*total, i = 0;
+    while (i < lens.length-1 && d > lens[i]){ d -= lens[i]; i++; }
+    const f = lens[i] > 0 ? Math.min(1, d/lens[i]) : 1;
+    obj.position.lerpVectors(v[i], v[i+1], f);
+  });
+}
+
+/* 发光粒子（token） */
+function makeToken(color, r=0.17){
+  const s = new THREE.Mesh(
+    new THREE.SphereGeometry(r, 20, 20),
+    new THREE.MeshStandardMaterial({ color, emissive:color, emissiveIntensity:1.4, roughness:0.2 })
+  );
+  s.visible = false; scene.add(s); return s;
+}
+
+/* ================================================================
+   2. 架构布局（示意：6 层 Base + 2 层 Shadow，层数可配置此处仅作演示）
+   对应代码：
+   - 层定位      model_utils.py:34-55  (_get_decoder_layers)
+   - 注入/更新   modules.py            (ShadowInjectionModel / ShadowUpdateModel)
+   - 逐层包裹    peft_model.py:103-200 (_ShadowLayerWrapper)
+================================================================ */
+const L = 6;              // Base 层数（演示）
+const SL = 2;             // Shadow 层数（演示，ShadowConfig.num_shadow_layers 默认 1）
+const EMB_Y = 0.55;       // 嵌入层高度
+const BY = i => 1.5 + i * 1.3;                 // Base 第 i 层 y
+const SH_Y = j => 1.5 + j * 1.0;               // Shadow 第 j 层 y
+const PROJ_Y = SH_Y(SL - 1) + 1.1;             // 投影层 y
+const SHEAD_Y = PROJ_Y + 1.15;                 // shadow_lm_head y
+const HEAD_Y = BY(L - 1) + 1.55;               // base lm_head y
+const HWY_X = -3.5;                            // shadow 隐藏态“总线”的 x
+const INJ_X = -2.5, UPD_X = 2.5;               // 注入 / 更新盒子的 x
+
+const layBox = [], injBox = [], updBox = [], shBox = [];
+const baseCacheGrp = [], shCacheGrp = [];
+
+/* ---- 共享嵌入（隐式 shadow 删除自身 embed_tokens，复用 base 嵌入表） ---- */
+const embedBox = mark(box(2.6, 0.6, 2.6, 0xa855f7), 'embed');
+embedBox.position.set(0, EMB_Y, 0);
+addLabel('共享嵌入 embed_tokens', [-2.7, EMB_Y - 0.32, 0.7], { color:'#d8b4fe', scale:0.9 });
+
+/* ---- Base 层栈（冻结） ---- */
+for (let i = 0; i < L; i++){
+  const b = mark(box(2.2, 0.72, 2.2, 0x3b82f6, 0.9), 'base');
+  b.position.set(0, BY(i), 0);
+  b.userData.op0 = 0.9;
+  layBox.push(b);
+  addLabel('L' + i, [-1.55, BY(i), 0.9], { px:36, color:'#93c5fd', scale:0.7, bold:false });
+}
+addLabel('Base Model（冻结）', [2.75, 0.62, 1.35], { color:'#93c5fd', scale:1.0 });
+
+/* ---- 顶部 Norm + LM Head（冻结） ---- */
+const headBox = mark(box(2.6, 0.7, 2.6, 0xf97316), 'head');
+headBox.position.set(0, HEAD_Y, 0);
+addLabel('Final Norm + LM Head（冻结）', [0, HEAD_Y + 0.72, 0], { color:'#fdba74', scale:1.0 });
+const logitsLabel = addLabel('logits', [0, HEAD_Y + 1.45, 0], { color:'#fff7ed', scale:1.05 });
+
+/* ---- Shadow Backbone（可训练，绿色） ---- */
+for (let j = 0; j < SL; j++){
+  const s = mark(box(1.7, 0.55, 1.7, 0x22c55e), 'shadow');
+  s.position.set(-5, SH_Y(j), 0);
+  s.userData.op0 = 0.92;
+  shBox.push(s);
+}
+addLabel('Shadow Backbone（可训练）', [-5, SH_Y(0) - 0.62, 0], { color:'#86efac', scale:0.9 });
+
+/* ---- shadow_hidden_projection（黄色） ---- */
+const projBox = mark(box(1.5, 0.5, 1.5, 0xeab308), 'projection');
+projBox.position.set(-5, PROJ_Y, 0);
+addLabel('shadow_hidden_projection', [-5, PROJ_Y + 0.55, 0], { color:'#fde047', scale:0.85 });
+
+/* ---- shadow_lm_head（黄绿） ---- */
+const shHeadBox = mark(box(1.5, 0.5, 1.5, 0x84cc16), 'shadowHead');
+shHeadBox.position.set(-5, SHEAD_Y, 0);
+addLabel('shadow_lm_head', [-5, SHEAD_Y + 0.55, 0], { color:'#d9f99d', scale:0.85 });
+
+/* ---- 层前注入（红）与层后更新（青）：从第 1 层开始，共 L-1 组 ---- */
+for (let i = 1; i < L; i++){
+  const inj = mark(box(1.05, 0.46, 1.05, 0xef4444), 'injection');
+  inj.position.set(INJ_X, BY(i), 0);
+  inj.userData.op0 = 0.92;
+  injBox[i] = inj;
+  const upd = mark(box(1.05, 0.46, 1.05, 0x14b8a6), 'update');
+  upd.position.set(UPD_X, BY(i), 0);
+  upd.userData.op0 = 0.92;
+  updBox[i] = upd;
+}
+addLabel('注入 Injection', [INJ_X, BY(1) - 0.6, 0], { color:'#fca5a5', scale:0.85 });
+addLabel('更新 Update', [UPD_X, BY(1) - 0.6, 0], { color:'#5eead4', scale:0.85 });
+
+/* ================================================================
+   3. 管线（数据通路）
+================================================================ */
+/* base 主通路：嵌入 → 逐层 → 头部 */
+pipe([[0, -0.9, 0], [0, EMB_Y, 0], [0, BY(0), 0]], 0x475569, { radius:0.05, opacity:0.7 });
+for (let i = 0; i < L - 1; i++) pipe([[0, BY(i), 0], [0, BY(i + 1), 0]], 0x475569, { radius:0.05, opacity:0.7 });
+pipe([[0, BY(L - 1), 0], [0, HEAD_Y, 0], [0, HEAD_Y + 1.2, 0]], 0x475569, { radius:0.05, opacity:0.7 });
+
+/* 嵌入共享（紫色虚线 → shadow） */
+pipe([[0, EMB_Y, 0], [-5, EMB_Y, 0], [-5, SH_Y(0), 0]], 0xa855f7, { dashed:true, opacity:0.65 });
+
+/* shadow 前向 → 投影 → shadow_lm_head */
+for (let j = 0; j < SL - 1; j++) pipe([[-5, SH_Y(j), 0], [-5, SH_Y(j + 1), 0]], 0x22c55e, { radius:0.045, opacity:0.65 });
+pipe([[-5, SH_Y(SL - 1), 0], [-5, PROJ_Y, 0]], 0x22c55e, { radius:0.045, opacity:0.65 });
+pipe([[-5, PROJ_Y, 0], [-5, SHEAD_Y, 0]], 0x84cc16, { radius:0.04, opacity:0.6, dashed:true });
+
+/* shadow 隐藏态“总线”（绿色）：s 从投影出发沿层上升 */
+const highway = pipe([[-5, PROJ_Y, 0], [HWY_X, PROJ_Y, 0], [HWY_X, BY(1) - 0.4, 0], [HWY_X, BY(L - 1) + 0.62, 0]],
+                     0x22c55e, { radius:0.05, opacity:0.45 });
+mark(highway, 'highway');
+addLabel('s（shadow 隐藏态）逐层演化', [HWY_X, BY(L - 1) + 1.05, 0], { color:'#86efac', scale:0.8 });
+
+/* 注入支路：总线 → 注入盒 → base 层输入 */
+for (let i = 1; i < L; i++){
+  pipe([[HWY_X, BY(i), 0], [INJ_X - 0.55, BY(i), 0]], 0xef4444, { radius:0.035, opacity:0.55 });
+  pipe([[INJ_X + 0.55, BY(i), 0], [-1.1, BY(i), 0]], 0xef4444, { radius:0.035, opacity:0.55 });
+}
+/* 更新支路：base 层输出 → 更新盒 →（背后弧线）回写总线 */
+for (let i = 1; i < L; i++){
+  pipe([[1.1, BY(i), 0], [UPD_X - 0.55, BY(i), 0]], 0x14b8a6, { radius:0.035, opacity:0.55 });
+  pipe([[UPD_X, BY(i), -0.5], [UPD_X, BY(i), -2.4], [HWY_X, BY(i) + 0.55, -2.4], [HWY_X, BY(i) + 0.55, 0]],
+       0x14b8a6, { radius:0.028, opacity:0.35, dashed:true });
+}
+
+/* ================================================================
+   4. KV-Cache 可视化（base 每层 + shadow 每层各一组 DynamicCache 槽位）
+================================================================ */
+for (let i = 0; i < L; i++){
+  const g = new THREE.Group();
+  g.position.set(0, BY(i), 1.55);
+  scene.add(g);
+  baseCacheGrp.push(g);
+}
+for (let j = 0; j < SL; j++){
+  const g = new THREE.Group();
+  g.position.set(-5, SH_Y(j), 1.25);
+  scene.add(g);
+  shCacheGrp.push(g);
+}
+const cacheLabel = addLabel('KV Cache（随 Decode 逐层增长）', [0, -0.5, 3.15], { color:'#cbd5e1', scale:0.8 });
+
+function addSlab(group, w, h, d, color){
+  const s = box(w, h, d, color, 0.62);
+  s.position.set(0, 0, group.children.length * (d + 0.07));
+  group.add(s);
+  s.scale.set(0.02, 1, 1);
+  tw(0.35, k => s.scale.set(Math.max(0.02, k), 1, 1));
+  return s;
+}
+const addBaseSlab = i => addSlab(baseCacheGrp[i], 1.7, 0.4, 0.16, 0x64748b);
+const addShSlab   = j => addSlab(shCacheGrp[j], 1.25, 0.3, 0.14, 0x64748b);
+function clearCaches(){
+  for (const g of [...baseCacheGrp, ...shCacheGrp]){
+    for (let n = g.children.length - 1; n >= 0; n--){
+      const c = g.children[n];
+      c.geometry.dispose(); c.material.dispose();
+      g.remove(c);
+    }
+  }
+}
+
+/* ================================================================
+   5. Token 粒子与完整路径
+================================================================ */
+const tokMain   = makeToken(0xe0f2fe);   // base 隐藏态 h
+const tokShadow = makeToken(0x4ade80, 0.14);  // shadow 隐藏态 s
+const tokPulse  = makeToken(0xf87171, 0.11);  // 注入脉冲
+const tokGate   = makeToken(0x2dd4bf, 0.11);  // 更新脉冲
+
+/* 单 token 完整路径（含注入/更新绕行点），同时记录关键节点下标 */
+const PATH = []; const marks = {};
+function push(p, key){ PATH.push(p); if (key) marks[key] = PATH.length - 1; }
+push([0, -0.9, 0], 'enter');
+push([0, EMB_Y, 0], 'embed');
+push([-5, EMB_Y, 0]);
+push([-5, SH_Y(0), 0], 'sh0');
+push([-5, SH_Y(SL - 1), 0], 'shTop');
+push([-5, PROJ_Y, 0], 'proj');
+push([HWY_X, PROJ_Y, 0], 'hwyJoin');
+push([HWY_X, BY(0), 0], 'hwyDown');
+push([0, BY(0), 0], 'L0');
+for (let i = 1; i < L; i++){
+  if (i > 1) push([0, BY(i - 1) + 0.66, 1.5]);          // 前弧绕行
+  push([-2.5, BY(i), i > 1 ? 0.8 : 0]);
+  push([-1.2, BY(i), 0], 'inj' + i);
+  push([0, BY(i), 0], 'L' + i);
+  push([1.2, BY(i), 0]);
+  push([UPD_X, BY(i), 0], 'upd' + i);
+}
+push([0, BY(L - 1) + 0.8, 1.3]);
+push([0, HEAD_Y, 0], 'head');
+push([0, HEAD_Y + 1.25, 0], 'logits');
+const seg = (a, b) => PATH.slice(marks[a], marks[b] + 1);
+
+/* s₀ 从投影沿总线下行到第 1 层（供首次注入），再逐层上升 */
+const SH_HIGHWAY = [
+  [HWY_X, PROJ_Y, 0], [HWY_X, BY(1), 0], [HWY_X, BY(2), 0],
+  [HWY_X, BY(3), 0], [HWY_X, BY(4), 0], [HWY_X, BY(5) + 0.55, 0]
+];
+
+/* ================================================================
+   6. 信息面板内容（与源码严格对应，行号基于 main @ e221900）
+================================================================ */
+const INFO = {
+  overview: { title:'总览：ShadowPEFT 是什么', html:`
+    <p>ShadowPEFT 是一种参数高效微调（PEFT）框架：把一个<b>轻量、可独立训练/部署的 Shadow 小模型</b>与<b>冻结的 Base 大模型</b>并行运行，在 Base 的每个 decoder 层注入修正量。</p>
+    <p>三个可训练组件（Base 权重全部冻结）：</p>
+    <ul>
+      <li><span class="hl">Shadow Backbone</span> — 小 transformer（随机初始化，或更小的预训练模型跨架构复用）</li>
+      <li><span class="hl">ShadowInjectionModel</span> — 每层<span class="hl">之前</span>把「base 与 shadow 隐藏态之差」低秩投影后注入</li>
+      <li><span class="hl">ShadowUpdateModel</span> — 每层<span class="hl">之后</span>用 GRU 式门控让 shadow 隐藏态随 base 演化</li>
+    </ul>
+    <p>示例规模：Qwen3-0.6B base + 1 层隐式 shadow ≈ <code>18M</code> 可训练 / <code>770M</code> 总参数（约 <b>2.3%</b>）。</p>
+    <ul>
+      <li>初始即恒等：注入分支零初始化 ⇒ 训练起点输出 == 原 base 输出</li>
+      <li>双推理模式：<code>base_shadow</code>（默认）/ <code>shadow_only</code>（完全不跑 base，轻量部署）</li>
+      <li>本页基于 <code>main @ e221900</code>：已合并 <b>KV-Cache 增量解码</b>支持</li>
+    </ul>` },
+  embed: { title:'共享嵌入层 embed_tokens', sub:'peft_model.py:455-504', html:`
+    <p>隐式 shadow 会<b>删除自己的嵌入表</b>、直接复用 base 的 <code>embed_tokens</code>（省显存且保证 token 表示一致）：</p>
+    <ul>
+      <li><code>_remove_embed_tokens()</code> — peft_model.py:455-463</li>
+      <li><code>_configure_shadow_embedding_sharing()</code> — 480-504：inspect shadow forward 签名后改走 <code>inputs_embeds</code> 路径</li>
+      <li>显式 shadow 默认保留自己的嵌入；<code>prepare_shadow_model(..., remove_embed_tokens=True)</code>（984-1008）可开启共享</li>
+    </ul>` },
+  shadow: { title:'Shadow Backbone（可训练）', sub:'model_utils.py:118-176 · config.py:9-61', html:`
+    <p>两种来源：</p>
+    <ul>
+      <li><b>隐式</b>：<code>build_implicit_shadow_model()</code> deepcopy base 的 backbone config、改层数（<code>num_shadow_layers</code>，默认 1），可用 <code>shadow_intermediate_size</code> 等覆盖宽度，<b>随机初始化</b></li>
+      <li><b>显式</b>：任意更小的预训练模型，<b>跨架构</b>亦可（如 Qwen3-0.6B 接 Qwen3-8B base，经投影对齐维度）</li>
+    </ul>
+    <p>Shadow 与 base <b>同步跑完整序列</b>，产出 <code>shadow_hidden_states</code>，像「影子」一样跟随 base 的逐层计算。训练时 shadow 内部强制 <code>use_cache=False</code>（model_utils.py:172）。</p>` },
+  projection: { title:'shadow_hidden_projection（维度对齐）', sub:'peft_model.py:290-316', html:`
+    <p>当 shadow 与 base 的 hidden size 不同（如 1024 → 4096）：</p>
+    <span class="formula">nn.Linear(D_shadow, D_base, bias=False)</span>
+    <ul>
+      <li>维度相同则为 <code>nn.Identity()</code>（恒存在，保证 state_dict 结构稳定）</li>
+      <li>显式 shadow 自带已训练投影时<b>克隆复用</b>，否则新建</li>
+      <li>预训练 shadow 时用<b>伪逆初始化</b>：<code>W_proj = pinv(W_lm_large) @ W_lm_small</code>（fp32 数值稳定，projected_causal_lm.py:353-383），让小模型直接对接大模型冻结的 lm_head 有个好起点</li>
+    </ul>` },
+  base: { title:'Base Model 层栈（冻结）与逐层包裹', sub:'model_utils.py:34-55 · peft_model.py:103-200', html:`
+    <p>架构无关的层栈探测：<code>model.model.layers</code>（LLaMA / Qwen / Gemma…）、<code>transformer.h</code>（GPT-2）、<code>model.decoder.layers</code>（嵌套）。要求 base <b>≥ 2 层</b>（注入从第 1 层开始，peft_model.py:229-231）。</p>
+    <ul>
+      <li>构造时冻结 base 全部参数（223-224）</li>
+      <li><code>_ShadowLayerWrapper</code> <b>就地替换</b> base 的层列表（348-354），weakref 存 adapter 避免循环注册</li>
+      <li>wrapper 内部：<b>层前注入 → 原层前向 → 层后更新</b>（143-200），第 0 层完全 no-op</li>
+      <li>适配器参数共 <code>L − 1</code> 组，第 i 层用第 i−1 组</li>
+    </ul>` },
+  injection: { title:'ShadowInjectionModel · 层前注入', sub:'modules.py:7-55', html:`
+    <span class="formula">h ← h + α · Upᵢ( Dropout( Downᵢ( h − s ) ) )</span>
+    <ul>
+      <li>每层一对<b>低秩瓶颈</b>投影：<code>Downᵢ (D→k)</code>、<code>Upᵢ (k→D)</code>，瓶颈 <code>k = injection_hidden_size = 16</code>（默认）</li>
+      <li>缩放 <code>α = 0.1</code>（<code>ShadowConfig.alpha</code>）</li>
+      <li>参数是裸 3D 张量 <code>(L−1, D, k)</code> / <code>(L−1, k, D)</code>，按层索引，einsum 计算（无 bias、无激活）</li>
+      <li><b>Up 全零初始化</b> ⇒ 初始注入为 0：训练起点上 ShadowPEFT 输出 == 原 base 输出（恒等）</li>
+    </ul>` },
+  update: { title:'ShadowUpdateModel · 层后门控更新', sub:'modules.py:58-116', html:`
+    <span class="formula">ĥ = LayerNorm(h)<br>g = σ( MLP_g(ĥ) )        # 逐维门控，Sigmoid<br>t = MLP_t(ĥ)           # 候选态，SiLU+Dropout<br>s ← s + g ⊙ ( t − s )    # GRU 式插值</span>
+    <ul>
+      <li>每层一个 <code>D→g→D</code> 门控 MLP 与变换 MLP，<code>g = gate_hidden_size = 10</code>（默认）</li>
+      <li>所有层<b>共享一个 LayerNorm</b>（105 行）</li>
+      <li>作用：让 shadow 隐藏态 s 随 base 的逐层输出持续演化，供下一层注入使用</li>
+    </ul>` },
+  head: { title:'Final Norm + LM Head → logits', sub:'task_models.py:118-427', html:`
+    <ul>
+      <li><code>lm_head</code> 直接复用 base 原输出头，<b>默认冻结</b></li>
+      <li><code>shadow_lm_head</code> = deepcopy(lm_head)，同样默认冻结；<code>ShadowConfig.modules_to_save</code> 含 <code>"lm_head"/"shadow_lm_head"</code> 时才放开训练并随 checkpoint 保存（163-179）</li>
+      <li>输出 <code>ShadowCausalLMOutputWithPast</code>：多一个 <code>shadow_logits</code> 字段</li>
+      <li><code>shadow_logits = shadow_lm_head(s₀)</code> — 注意用的是<b>初始</b> shadow 隐藏态（373 行），不是逐层更新后的最终态</li>
+    </ul>` },
+  shadowHead: { title:'shadow_lm_head → shadow_logits', sub:'task_models.py:373-380', html:`
+    <p>shadow _logits 提供<b>辅助监督信号</b>：</p>
+    <span class="formula">loss = CE(base_logits) + 0.05 · CE(shadow_logits)</span>
+    <p><code>shadow_loss_weight</code> 默认 <code>0.05</code>。<code>shadow_only</code> 模式下 <code>logits = shadow_logits</code>，loss 只含 shadow 项。</p>` },
+  highway: { title:'Shadow 隐藏态 s 的逐层演化', sub:'peft_model.py:339-558', html:`
+    <ul>
+      <li><code>_compute_initial_shadow_hidden()</code>（380-453）：shadow backbone 全序列前向 → 投影 → 初始态 <b>s₀</b></li>
+      <li>s 存于 <code>_shadow_hidden_states</code>，forward 期间被各层 wrapper 读写；<code>finally</code> 中清空（549-558）</li>
+      <li>每层：注入「读」s（计算 h − s），更新「写」s（门控插值）——s 沿层逐步向 base 对齐</li>
+      <li><code>forward_with_shadow()</code> 额外返回的是<b>初始</b> s₀（供 shadow_logits 使用），见 560-567 docstring</li>
+    </ul>` },
+  cache: { title:'KV-Cache 增量解码（e221900 新合并）', sub:'peft_model.py:341-345, 506-528 · task_models.py:323-427', html:`
+    <p><b>为什么可行</b>：注入与更新都是<b>逐 token 纯函数</b>，无跨 token 递归；跨 token 依赖只存在于注意力中——由 KV-cache 处理。此前禁用 cache 是实现限制而非数学限制。</p>
+    <ul>
+      <li>双缓存：base 用自己的 <code>past_key_values</code>，shadow 用内部 <code>_shadow_cache: DynamicCache</code>（peft_model.py:341）</li>
+      <li><code>_resolve_shadow_cache()</code>（506-528）：<code>use_cache=False</code> → 重置；prefill（past 为空）→ 新建；decode → 复用</li>
+      <li><code>prepare_inputs_for_generation</code>（392-420）：cached 时切 <code>input_ids[:, past_len:]</code> 与对应 <code>position_ids</code>，只送新 token</li>
+      <li>等价性：cached 与全量重算逐 bit 一致（测试阈值 1e-4，实测 maxdiff ≈ <b>1e-7</b>，tests/test_cached_decode.py）</li>
+      <li>API：<code>model.generate(..., use_cache=True)</code> 现已可用；<code>forward</code> 默认仍 <code>use_cache=False</code>（setdefault，向后兼容）</li>
+    </ul>
+    <div class="note">⚠️ README 中「KV cache is disabled / 必须 use_cache=False」的描述已<b>过时</b>，以代码为准。另：分类头 <code>ShadowForSequenceClassification</code> 仍恒 <code>use_cache=False</code>；跨独立序列复用同一实例时可 <code>peft_model._shadow_cache = None</code> 手动重置（新 prefill 也会自动重建）。</div>` },
+  train: { title:'训练：冻结 / 可训练划分与损失', sub:'peft_model.py:598-699 · task_models.py:375-380', html:`
+    <ul>
+      <li><b>冻结</b>：base 全部参数；<b>可训练</b>：shadow_model、shadow_hidden_projection、injection、update（+可选任务头）</li>
+      <li>损失：<code>loss = base_CE + 0.05 · shadow_CE</code>（CausalLM）；分类为普通 CE 加权</li>
+      <li>Trainer 兼容：<code>state_dict()</code> 被覆盖为 <b>adapter-only</b>（规避 tied weights 的 safetensors 冲突），gradient checkpointing 代理 base</li>
+      <li><code>save_pretrained</code> 只写 <code>shadow_config.json</code> + <code>shadow_adapter.safetensors</code>（设了 modules_to_save 再加 <code>shadow_modules.safetensors</code>），<b>不含 base 权重</b></li>
+      <li>伪逆预训练技巧：先在投影包装下预训练 shadow，再挂到大 base 上（examples/pretraining_shadow_via_pseudo_inverse.ipynb）</li>
+    </ul>` },
+  export: { title:'导出与部署', sub:'peft_model.py:701-921 · projected_causal_lm.py:124-486', html:`
+    <ul>
+      <li><code>export_shadow()</code>（701-833）：把训练好的 shadow 导出为<b>独立 HF 模型</b>——维度匹配时用 base 类重建任务模型并共享 embed/lm_head；不匹配时打包为 <code>AutoModelForCausalLMWithHiddenProjection</code>（backbone → 投影 → base lm_head）</li>
+      <li>投影版模型注册进 <code>AutoConfig</code>/<code>AutoModelForCausalLM</code>（__init__.py:24-33），可走标准 HF 保存/加载/Hub 流程（如 <code>shadow-llm/Qwen3-0.6B-H8B</code>）</li>
+      <li><code>shadow_only</code> 推理模式：完全不跑 base，轻量部署（task_models.py:344-363）</li>
+      <li><code>push_to_hub()</code>（894-921）直接发布 adapter</li>
+    </ul>` },
+};
+
+/* ================================================================
+   7. 分镜脚本（两个场景）
+================================================================ */
+function restoreOpacity(){
+  for (const m of [...layBox, ...injBox.filter(Boolean), ...updBox.filter(Boolean), ...shBox])
+    m.material.opacity = m.userData.op0;
+}
+function resetScene(){
+  clearCaches();
+  for (const t of [tokMain, tokShadow, tokPulse, tokGate]) t.visible = false;
+  restoreOpacity();
+  state.step = -1;
+  updateStepbar();
+}
+
+const CAP_FULL_INTRO = '点击 <b>▶ 播放</b> 或 <b>单步</b>：观看一次完整前向 —— token → 共享嵌入 → Shadow 前向 → Base 逐层「注入 → 前向 → 更新」→ logits。点击任意 3D 组件可查看源码级解析。';
+const CAP_KV_INTRO = '场景：已训练好的模型做生成。先 <b>Prefill</b> 建立双 KV-Cache，再逐 token <b>Decode</b>——注入/更新是逐 token 纯函数，与全量重算逐 bit 等价。点击 ▶ 播放。';
+
+const STEPS = {
+  full: [
+    { cap:'<b>① 输入嵌入</b>：token ids → base 的 <code>embed_tokens</code>。隐式 shadow 已删除自己的嵌入表，与 base <b>共享</b>（peft_model.py:480-504）。',
+      async run(){ tokMain.visible = true; tokMain.position.set(...PATH[0]);
+        await moveAlong(tokMain, seg('enter','embed'), 4); await pulse(embedBox); } },
+    { cap:'<b>② Shadow 前向</b>：嵌入经紫色虚线送入 Shadow Backbone（绿色，可训练；此处演示 2 层，<code>num_shadow_layers</code> 可配）。',
+      async run(){ await moveAlong(tokMain, seg('embed','shTop'), 5); pulse(shBox[0]); await pulse(shBox[SL-1]); } },
+    { cap:'<b>③ 维度投影</b>：shadow 输出经 <code>shadow_hidden_projection</code> 对齐到 base 维度（相同则 Identity），得到初始隐藏态 <b>s₀</b>；s₀ 沿绿色总线下行待命。',
+      async run(){ await moveAlong(tokMain, seg('shTop','proj'), 5); await pulse(projBox);
+        tokShadow.visible = true; tokShadow.position.set(-5, PROJ_Y, 0);
+        await moveAlong(tokShadow, SH_HIGHWAY.slice(0,2), 5); } },
+    { cap:'<b>④ Base 第 0 层</b>：原样前向——第 0 层<b>不做</b>注入/更新（注入从第 1 层开始，peft_model.py:165 的 <code>sidx = layer_idx − 1</code>）。',
+      async run(){ await moveAlong(tokMain, seg('proj','L0'), 6); await pulse(layBox[0]); } },
+    { cap:'<b>⑤ 层前注入</b>：<code>h ← h + α·Up(Dropout(Down(h − s₀)))</code>，低秩瓶颈 k=16、α=0.1；Up 零初始化 ⇒ 训练初始恒等（modules.py:45-55）。',
+      async run(){ tokPulse.visible = true; tokPulse.position.set(HWY_X, BY(1), 0);
+        moveAlong(tokPulse, [[HWY_X, BY(1), 0], [-1.15, BY(1), 0]], 6).then(()=> tokPulse.visible = false);
+        pulse(injBox[1]); await moveAlong(tokMain, seg('L0','inj1'), 6); } },
+    { cap:'<b>⑥ Base 第 1 层前向</b>：被注入修正后的 h 进入原（冻结的）decoder 层。',
+      async run(){ await moveAlong(tokMain, seg('inj1','L1'), 6); await pulse(layBox[1]); } },
+    { cap:'<b>⑦ 层后更新</b>：<code>s ← s + g⊙(t(LN(h)) − s)</code>——GRU 式门控让 s 随 base 输出演化（modules.py:107-116），写回绿色总线。',
+      async run(){ pulse(updBox[1]); await moveAlong(tokMain, seg('L1','upd1'), 6);
+        tokGate.visible = true; tokGate.position.set(1.15, BY(1), 0);
+        moveAlong(tokGate, [[1.15, BY(1), 0], [UPD_X, BY(1), -0.6], [UPD_X, BY(1), -2.4], [HWY_X, BY(1)+0.55, -2.4], [HWY_X, BY(1)+0.55, 0]], 6)
+          .then(()=> tokGate.visible = false);
+        moveAlong(tokShadow, [[HWY_X, BY(1), 0], [HWY_X, BY(1)+0.55, 0]], 5);
+        await wait(0.9); } },
+    { cap:'<b>⑧ 逐层重复</b>：第 2~5 层同样「注入 → 前向 → 更新」，s 沿总线逐层上升演化。',
+      async run(){ (async ()=>{ for (let i=2;i<L;i++){ pulse(injBox[i],0.6); pulse(layBox[i],0.6); pulse(updBox[i],0.6); await wait(0.55);} })();
+        moveAlong(tokShadow, [[HWY_X, BY(1)+0.55, 0], ...SH_HIGHWAY.slice(2)], 4);
+        await moveAlong(tokMain, seg('upd1','L5'), 7.5); } },
+    { cap:'<b>⑨ 输出头</b>：Final Norm + 冻结的 <code>lm_head</code> → <code>logits</code>；同时 <code>shadow_lm_head(s₀)</code> → <code>shadow_logits</code>（注意用初始 s₀，task_models.py:373）。',
+      async run(){ pulse(shHeadBox); await moveAlong(tokMain, seg('L5','logits'), 6); await pulse(headBox); } },
+    { cap:'<b>⑩ 训练</b>：<code>loss = CE(base) + 0.05·CE(shadow)</code>。base 全冻结（蓝），只有 shadow 三件套（绿/红/青，+可选任务头）可训练——示例仅约 2.3% 参数。',
+      async run(){ dimGroup(layBox, 0.28);
+        for (let i=1;i<L;i++){ pulse(injBox[i],1.2); pulse(updBox[i],1.2); }
+        pulse(projBox,1.2); pulse(shHeadBox,1.2);
+        for (const s of shBox) await pulse(s, 1.2); } },
+  ],
+  kv: [
+    { cap:'<b>Prefill</b>：prompt 全部 token 一次性走完整流程（与左场景相同），同时 <code>_resolve_shadow_cache</code> 为 base 每层与 shadow 各建 <code>DynamicCache</code>（peft_model.py:506-528）——灰色槽位即累积的 K/V。',
+      async run(){ tokMain.visible = true; tokMain.position.set(...PATH[0]);
+        tokShadow.visible = true; tokShadow.position.set(-5, PROJ_Y, 0);
+        moveAlong(tokShadow, SH_HIGHWAY, 10);
+        await moveAlong(tokMain, seg('enter','logits'), 13);
+        for (let n=0;n<4;n++){ for (let j=0;j<SL;j++) addShSlab(j); for (let i=0;i<L;i++) addBaseSlab(i); await wait(0.12); } } },
+    { cap:'<b>Decode 第 1 步</b>：只输入 <b>1 个新 token</b>（<code>input_ids[:, past_len:]</code>，task_models.py:401-404）；base 复用 <code>past_key_values</code>、shadow 复用 <code>_shadow_cache</code>，每层 cache +1。',
+      async run(){ tokMain.position.set(...PATH[0]);
+        (async ()=>{ for (let j=0;j<SL;j++) addShSlab(j); for (let i=0;i<L;i++){ addBaseSlab(i); await wait(0.4);} })();
+        moveAlong(tokShadow, SH_HIGHWAY, 11);
+        await moveAlong(tokMain, seg('enter','logits'), 9); } },
+    { cap:'<b>逐 bit 等价</b>：注入 <code>h+α·Up(Down(h−s))</code> 与更新 <code>s+g⊙(t−s)</code> 都是<b>逐 token 纯函数</b>，不依赖历史 token ⇒ cached 与全量重算输出一致（测试阈值 1e-4，实测 maxdiff ≈ 1e-7）。',
+      async run(){ for (let i=1;i<L;i++){ pulse(injBox[i],1.0); pulse(updBox[i],1.0); } await wait(1.1); } },
+    { cap:'<b>Decode 第 2、3 步</b>：cache 逐步增长，单步计算量与历史长度解耦——不再每步重算整个序列。',
+      async run(){ for (let r=0;r<2;r++){ tokMain.position.set(...PATH[0]);
+          (async ()=>{ for (let j=0;j<SL;j++) addShSlab(j); for (let i=0;i<L;i++){ addBaseSlab(i); await wait(0.3);} })();
+          moveAlong(tokShadow, SH_HIGHWAY, 13);
+          await moveAlong(tokMain, seg('enter','logits'), 11); await wait(0.3); } } },
+    { cap:'<b>API</b>：<code>model.generate(..., use_cache=True)</code> 现已可用；<code>forward</code> 默认仍 <code>use_cache=False</code> 保持向后兼容（task_models.py:330 的 setdefault）。⚠️ README「KV cache disabled」描述已过时。',
+      async run(){ await pulse(headBox, 1.4); } },
+  ],
+};
+
+/* ================================================================
+   8. 播放引擎与 UI
+================================================================ */
+const capEl = document.getElementById('caption');
+const stepbarEl = document.getElementById('stepbar');
+const playBtn = document.getElementById('play');
+
+function updateStepbar(){
+  const steps = STEPS[state.scenario];
+  stepbarEl.innerHTML = steps.map((_, i) =>
+    `<i class="${i < state.step ? 'done' : ''}${i === state.step ? 'cur' : ''}"></i>`).join('');
+}
+async function runStep(i){
+  if (state.running) return;
+  state.running = true;
+  state.step = i;
+  restoreOpacity();
+  const s = STEPS[state.scenario][i];
+  capEl.innerHTML = s.cap;
+  updateStepbar();
+  try { await s.run(); } catch(e){ console.error(e); }
+  state.running = false;
+  if (state.playing){
+    const n = STEPS[state.scenario].length;
+    if (i + 1 < n){ await wait(0.35); runStep(i + 1); }
+    else { state.playing = false; playBtn.textContent = '▶ 播放'; }
+  }
+}
+function setPlaying(v){
+  state.playing = v;
+  playBtn.textContent = v ? '⏸ 暂停' : '▶ 播放';
+  if (v && !state.running){
+    const n = STEPS[state.scenario].length;
+    runStep(state.step + 1 < n ? state.step + 1 : 0);
+  }
+}
+playBtn.onclick = () => setPlaying(!state.playing);
+document.getElementById('step').onclick = () => {
+  setPlaying(false);
+  const n = STEPS[state.scenario].length;
+  runStep(state.step + 1 < n ? state.step + 1 : 0);
+};
+document.getElementById('reset').onclick = () => {
+  setPlaying(false); resetScene();
+  capEl.innerHTML = state.scenario === 'full' ? CAP_FULL_INTRO : CAP_KV_INTRO;
+};
+function setScenario(name){
+  if (state.scenario === name) return;
+  setPlaying(false);
+  state.scenario = name;
+  resetScene();
+  document.getElementById('scFull').classList.toggle('active', name === 'full');
+  document.getElementById('scKv').classList.toggle('active', name === 'kv');
+  capEl.innerHTML = name === 'full' ? CAP_FULL_INTRO : CAP_KV_INTRO;
+  if (name === 'kv') showInfo('cache');
+}
+document.getElementById('scFull').onclick = () => setScenario('full');
+document.getElementById('scKv').onclick = () => setScenario('kv');
+document.getElementById('speed').oninput = e => state.speed = parseFloat(e.target.value);
+
+/* ---- 信息面板 ---- */
+const ptitle = document.getElementById('ptitle');
+const cardEl = document.getElementById('card');
+function showInfo(key){
+  const it = INFO[key]; if (!it) return;
+  ptitle.textContent = it.title;
+  cardEl.innerHTML = `<h3>${it.title}</h3>` +
+    (it.sub ? `<div class="sub">${it.sub}</div>` : '') + it.html;
+}
+const CHIPS = [['overview','总览'],['injection','注入'],['update','更新'],['shadow','Shadow 骨干'],
+  ['projection','投影'],['base','Base 与包裹'],['head','任务头'],['highway','s 演化'],
+  ['cache','KV-Cache'],['train','训练'],['export','导出部署'],['embed','共享嵌入']];
+document.getElementById('chips').innerHTML =
+  CHIPS.map(([k, t]) => `<button data-k="${k}">${t}</button>`).join('');
+document.getElementById('chips').onclick = e => { const k = e.target.dataset?.k; if (k) showInfo(k); };
+
+/* ---- 点击 3D 组件 ---- */
+const ray = new THREE.Raycaster();
+const ptr = new THREE.Vector2();
+let downX = 0, downY = 0;
+canvas.addEventListener('pointerdown', e => { downX = e.clientX; downY = e.clientY; });
+canvas.addEventListener('pointerup', e => {
+  if (Math.hypot(e.clientX - downX, e.clientY - downY) > 6) return;
+  const r = canvas.getBoundingClientRect();
+  ptr.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+  ptr.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+  ray.setFromCamera(ptr, camera);
+  const hits = ray.intersectObjects(clickable, false);
+  if (hits.length){
+    const key = hits[0].object.userData.key;
+    showInfo(key);
+    pulse(hits[0].object, 0.7);
+  }
+});
+
+/* ================================================================
+   9. 主循环与自适应
+================================================================ */
+const clock = new THREE.Clock();
+function resize(){
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== Math.floor(w * renderer.getPixelRatio()) || canvas.height !== Math.floor(h * renderer.getPixelRatio())){
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+}
+function loop(){
+  requestAnimationFrame(loop);
+  resize();
+  const dt = Math.min(0.05, clock.getDelta()) * state.speed;
+  for (let i = tweens.length - 1; i >= 0; i--){
+    const w = tweens[i];
+    w.t += dt;
+    const k = Math.min(1, w.t / w.dur);
+    w.fn(ease(k));
+    if (k >= 1){ tweens.splice(i, 1); w.res(); }
+  }
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+showInfo('overview');
+capEl.innerHTML = CAP_FULL_INTRO;
+updateStepbar();
+
+/* URL 参数：#kv 直接进入 KV-Cache 场景；#play 自动播放（便于分享/演示） */
+if (location.hash.includes('kv')) setScenario('kv');
+if (location.hash.includes('play')) setPlaying(true);
+
+loop();
+</script>
+</body>
+</html>
