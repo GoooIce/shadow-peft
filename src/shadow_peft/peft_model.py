@@ -13,7 +13,7 @@ import torch.nn as nn
 from safetensors.torch import load_file as safetensors_load_file
 from safetensors.torch import save_file as safetensors_save_file
 from torch.nn.modules.module import _IncompatibleKeys
-from transformers import PreTrainedModel
+from transformers import DynamicCache, PreTrainedModel
 
 from .config import ShadowConfig
 from .model_utils import (
@@ -338,6 +338,12 @@ class ShadowPeftModel(nn.Module):
         # Internal mutable state during forward.
         self._shadow_hidden_states: torch.Tensor | None = None
 
+        # Shadow backbone KV-cache for incremental decode.
+        # Created lazily on the first cached prefill; reused for subsequent decode steps.
+        # Lifecycle is tied to the base model's past_key_values: when the caller starts a
+        # new generation (past_key_values=None), the shadow cache is rebuilt from scratch.
+        self._shadow_cache: DynamicCache | None = None
+
         # Wrap base layers in-place.
         wrapped = nn.ModuleList([])
         for i, layer in enumerate(base_layers):
@@ -378,8 +384,16 @@ class ShadowPeftModel(nn.Module):
         attention_mask: torch.Tensor | None,
         position_ids: torch.Tensor | None,
         inputs_embeds: torch.Tensor | None,
+        shadow_cache: DynamicCache | None = None,
         **kwargs: Any,
     ) -> torch.Tensor:
+        """
+        Run the shadow backbone to produce per-token shadow hidden states.
+
+        When ``shadow_cache`` is provided, the shadow backbone runs in cached mode:
+        prefill (cache empty) or incremental decode (cache non-empty). When ``None``,
+        caching is disabled and the full sequence is recomputed (backward-compatible default).
+        """
         # We call the shadow *backbone* to get last_hidden_state (no logits needed).
         shadow_backbone = _get_backbone(self.shadow_model)
 
@@ -396,12 +410,18 @@ class ShadowPeftModel(nn.Module):
                 raise AttributeError("Base model does not expose input embeddings.")
             inputs_embeds = base_embed(input_ids)
 
-        # Make a best-effort to disable caching, since Shadow updates require full sequences.
         kwargs = dict(kwargs)
-        kwargs["use_cache"] = False
-        kwargs["past_key_values"] = None
         kwargs["output_hidden_states"] = False
         kwargs["return_dict"] = True
+
+        if shadow_cache is not None:
+            # Cached mode: let the shadow backbone use/update its KV-cache.
+            kwargs["use_cache"] = True
+            kwargs["past_key_values"] = shadow_cache
+        else:
+            # Full-sequence mode (backward-compatible): disable caching.
+            kwargs["use_cache"] = False
+            kwargs["past_key_values"] = None
 
         # If we have `inputs_embeds`, use it. Otherwise, fall back to `input_ids` so an explicit
         # shadow model can use its own embedding table.
@@ -483,23 +503,53 @@ class ShadowPeftModel(nn.Module):
                 self._remove_embed_tokens(shadow_backbone)
         return supports_inputs_embeds
 
+    def _resolve_shadow_cache(self, use_cache: bool | None, past_key_values: Any) -> DynamicCache | None:
+        """
+        Decide whether to use a shadow backbone cache for this forward call.
+
+        Returns the shadow cache to use (creating one on the first cached prefill), or ``None``
+        for full-sequence uncached mode.
+        """
+        if not use_cache:
+            # No caching requested — reset internal shadow cache for a clean state next time.
+            self._shadow_cache = None
+            return None
+
+        # Cached mode. If the base has no cache yet, this is a fresh prefill → create shadow cache.
+        # If the base already has a cache, reuse the existing shadow cache for incremental decode.
+        if past_key_values is None or (hasattr(past_key_values, "get_seq_length") and past_key_values.get_seq_length() == 0):
+            shadow_backbone = _get_backbone(self.shadow_model)
+            shadow_cfg = getattr(shadow_backbone, "config", None)
+            try:
+                self._shadow_cache = DynamicCache(config=shadow_cfg)
+            except Exception:
+                # Fallback: some non-standard configs may not support config-based cache init.
+                self._shadow_cache = DynamicCache()
+        return self._shadow_cache
+
     def forward(self, *args, **kwargs):
         # Initialize per-forward shadow state.
         input_ids = kwargs.get("input_ids")
         attention_mask = kwargs.get("attention_mask")
         position_ids = kwargs.get("position_ids")
         inputs_embeds = kwargs.get("inputs_embeds")
+        use_cache = kwargs.get("use_cache")
+        past_key_values = kwargs.get("past_key_values")
+
+        shadow_cache = self._resolve_shadow_cache(use_cache, past_key_values)
 
         self._shadow_hidden_states = self._compute_initial_shadow_hidden(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
+            shadow_cache=shadow_cache,
         )
 
-        # Force no-cache (same reason as raw implementation).
-        kwargs["use_cache"] = False
-        kwargs["past_key_values"] = None
+        if shadow_cache is None:
+            # Backward-compatible full-sequence mode.
+            kwargs["use_cache"] = False
+            kwargs["past_key_values"] = None
 
         try:
             return self.base_model(*args, **kwargs)
@@ -520,18 +570,24 @@ class ShadowPeftModel(nn.Module):
         attention_mask = kwargs.get("attention_mask")
         position_ids = kwargs.get("position_ids")
         inputs_embeds = kwargs.get("inputs_embeds")
+        use_cache = kwargs.get("use_cache")
+        past_key_values = kwargs.get("past_key_values")
+
+        shadow_cache = self._resolve_shadow_cache(use_cache, past_key_values)
 
         initial_shadow_hidden = self._compute_initial_shadow_hidden(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
+            shadow_cache=shadow_cache,
         )
         self._shadow_hidden_states = initial_shadow_hidden
 
-        # Force no-cache (same reason as raw implementation).
-        kwargs["use_cache"] = False
-        kwargs["past_key_values"] = None
+        if shadow_cache is None:
+            # Backward-compatible full-sequence mode.
+            kwargs["use_cache"] = False
+            kwargs["past_key_values"] = None
 
         try:
             outputs = self.base_model(*args, **kwargs)

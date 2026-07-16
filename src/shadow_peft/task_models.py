@@ -143,14 +143,10 @@ class ShadowForCausalLM(nn.Module, GenerationMixin):
 
         # Expose config/generation_config like a HF model.
         self.config = getattr(self.peft_model.base_model, "config", None)
-        if hasattr(self.config, "use_cache"):
-            self.config.use_cache = False
         base_gen_cfg = getattr(self.peft_model.base_model, "generation_config", None)
         self.generation_config = (
             base_gen_cfg if base_gen_cfg is not None else GenerationConfig.from_model_config(self.config)
         )
-        if hasattr(self.generation_config, "use_cache"):
-            self.generation_config.use_cache = False
 
         # Heads: use base model embeddings/head if available.
         self.lm_head = self.peft_model.base_model.get_output_embeddings()
@@ -311,15 +307,28 @@ class ShadowForCausalLM(nn.Module, GenerationMixin):
         if callable(fn):
             fn()
 
+    def get_experts_implementation(self) -> dict[str, str | None]:
+        """Delegate to base model (required by HF generate() in transformers >= 5.x)."""
+        fn = getattr(self.peft_model.base_model, "get_experts_implementation", None)
+        if callable(fn):
+            return fn()
+        return {}
+
+    def set_experts_implementation(self, experts_implementation: str | dict) -> None:
+        """Delegate to base model (required by HF generate() in transformers >= 5.x)."""
+        fn = getattr(self.peft_model.base_model, "set_experts_implementation", None)
+        if callable(fn):
+            fn(experts_implementation)
+
     def forward(
         self,
         *args,
         labels: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> ShadowCausalLMOutputWithPast:
-        # Force disable caching (Shadow requires full-seq processing).
-        kwargs["use_cache"] = False
-        kwargs["past_key_values"] = None
+        # Default to no-cache for backward compatibility (training / full-seq inference).
+        kwargs.setdefault("use_cache", False)
+        kwargs.setdefault("past_key_values", None)
 
         # Normalize common HF kwargs so we never pass them twice (e.g. generation sets return_dict=True).
         if "labels" in kwargs:
@@ -374,37 +383,47 @@ class ShadowForCausalLM(nn.Module, GenerationMixin):
             loss=loss,
             logits=base_logits,
             shadow_logits=shadow_logits,
-            past_key_values=None,
+            past_key_values=getattr(outputs, "past_key_values", None),
             hidden_states=getattr(outputs, "hidden_states", None),
             attentions=getattr(outputs, "attentions", None),
         )
 
-    # GenerationMixin hooks (ensure full-sequence forward, no cache).
+    # GenerationMixin hooks.
     def prepare_inputs_for_generation(
         self,
         input_ids: torch.LongTensor,
         attention_mask: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        past_key_values = kwargs.get("past_key_values")
+        use_cache = kwargs.get("use_cache", False)
+
+        # When caching, slice input_ids to only the new tokens (prefill: full, decode: last token).
+        if use_cache and past_key_values is not None:
+            past_len = past_key_values.get_seq_length()
+            input_ids = input_ids[:, past_len:]
+
         position_ids = kwargs.get("position_ids")
         if attention_mask is not None and position_ids is None:
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 1)
+            # In cached decode mode, only pass position_ids for the new tokens.
+            if use_cache and past_key_values is not None:
+                position_ids = position_ids[:, -(input_ids.shape[1]):]
 
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "position_ids": position_ids,
-            "use_cache": False,
-            "past_key_values": None,
+            "use_cache": use_cache,
+            "past_key_values": past_key_values,
         }
 
     def _update_model_kwargs_for_generation(self, outputs, model_kwargs, is_encoder_decoder=False):
+        # Let HF's default implementation propagate past_key_values from outputs.
         model_kwargs = super()._update_model_kwargs_for_generation(
             outputs, model_kwargs, is_encoder_decoder=is_encoder_decoder
         )
-        model_kwargs["past_key_values"] = None
-        model_kwargs["use_cache"] = False
         return model_kwargs
 
 
