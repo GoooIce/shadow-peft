@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import dataclasses
 from copy import deepcopy
+from pathlib import Path
 
+import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_flatten
 
@@ -62,6 +65,15 @@ def build_implicit_shadow_model(
     args = deepcopy(inner.args)
     args.num_hidden_layers = int(num_shadow_layers)
 
+    # Some archs (e.g. llama) build layers from `layer_types`, not `num_hidden_layers`.
+    # Truncate/pad it so the shadow actually gets the requested depth.
+    layer_types = getattr(args, "layer_types", None)
+    if layer_types is not None:
+        lt = list(layer_types) or ["full_attention"]
+        lt = lt[:num_shadow_layers]
+        lt += [lt[-1]] * (num_shadow_layers - len(lt))
+        args.layer_types = lt
+
     if shadow_intermediate_size is not None:
         args.intermediate_size = int(shadow_intermediate_size)
     if shadow_num_attention_heads is not None:
@@ -83,21 +95,42 @@ def build_implicit_shadow_model(
     return type(inner)(args)
 
 
+def dequantized_weight(module: nn.Module) -> mx.array:
+    """
+    Return the module's weight as a plain float array.
+
+    Quantized layers (`nn.QuantizedLinear` / `nn.QuantizedEmbedding`) store a packed
+    integer weight plus scales/biases; dequantize so the result can seed a regular
+    float layer.
+    """
+    if isinstance(module, (nn.QuantizedLinear, nn.QuantizedEmbedding)):
+        return mx.dequantize(
+            module.weight,
+            module.scales,
+            module.biases,
+            group_size=module.group_size,
+            bits=module.bits,
+        )
+    return module.weight
+
+
 def clone_linear(linear: nn.Linear) -> nn.Linear:
-    """Create an independent copy of an mlx Linear layer (no shared arrays)."""
+    """Create an independent float copy of an mlx Linear layer (no shared arrays)."""
     bias = getattr(linear, "bias", None)  # mlx Linear omits the attr when bias=False
-    out = nn.Linear(linear.weight.shape[1], linear.weight.shape[0], bias=bias is not None)
+    weight = dequantized_weight(linear)
+    out = nn.Linear(weight.shape[1], weight.shape[0], bias=bias is not None)
     # `w * 1` forces a new array object so the clone trains independently.
-    out.weight = linear.weight * 1
+    out.weight = weight * 1
     if bias is not None:
         out.bias = bias * 1
     return out
 
 
 def clone_embedding(embed: nn.Embedding) -> nn.Embedding:
-    """Create an independent copy of an mlx Embedding layer (no shared arrays)."""
-    out = nn.Embedding(embed.weight.shape[0], embed.weight.shape[1])
-    out.weight = embed.weight * 1
+    """Create an independent float copy of an mlx Embedding layer (no shared arrays)."""
+    weight = dequantized_weight(embed)
+    out = nn.Embedding(weight.shape[0], weight.shape[1])
+    out.weight = weight * 1
     return out
 
 
@@ -113,3 +146,22 @@ def print_trainable_parameters(module: nn.Module) -> None:
     print(
         f"Trainable params: {trainable:,} || Total params: {total:,} || Trainable%: {pct:.2f}%"
     )
+
+
+def save_servable_model(model: nn.Module, save_directory: str | Path) -> None:
+    """
+    Save a standalone mlx-lm model (e.g. from `ShadowPeftModel.export_shadow()`) in the
+    standard mlx-lm format — `config.json` + safetensors shards — loadable via
+    `mlx_lm.utils.load` / `mlx_lm.utils.load_model` and servable with `mlx_lm.server`.
+    """
+    from mlx_lm.utils import save_config, save_model
+
+    args = getattr(model, "args", None)
+    if args is None:
+        raise TypeError(
+            "Model does not expose `.args` (mlx-lm ModelArgs); cannot write config.json."
+        )
+    save_dir = Path(save_directory)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    save_model(save_dir, model)
+    save_config(dataclasses.asdict(args), save_dir / "config.json")

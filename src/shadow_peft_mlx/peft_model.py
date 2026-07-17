@@ -17,6 +17,7 @@ from .model_utils import (
     build_implicit_shadow_model,
     clone_embedding,
     clone_linear,
+    dequantized_weight,
     print_trainable_parameters,
 )
 from .modules import ShadowInjectionModel, ShadowUpdateModel
@@ -415,7 +416,7 @@ class ShadowPeftModel(nn.Module):
         if base_head is None:
             vocab_size = int(base_inner.args.vocab_size)
             base_head = nn.Linear(self.base_hidden_size, vocab_size, bias=False)
-            base_head.weight = base_inner.embed_tokens.weight * 1
+            base_head.weight = dequantized_weight(base_inner.embed_tokens) * 1
         return ProjectedCausalLM(
             shadow_model=exported,
             shadow_hidden_projection=clone_linear(self.shadow_hidden_projection),

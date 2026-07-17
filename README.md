@@ -558,13 +558,79 @@ model.save_pretrained("./shadow-checkpoint")
 
 ---
 
+## MLX Implementation (`shadow_peft_mlx`)
+
+A full port of ShadowPEFT to [MLX](https://ml-explore.github.io/mlx/) ships alongside the
+torch version as the `shadow_peft_mlx` package (built on `mlx-lm`). It mirrors the torch
+API — `ShadowConfig`, `get_shadow_model` / `ShadowPeftModel`, `ShadowForCausalLM`,
+`ShadowForSequenceClassification`, `ProjectedCausalLM`, `export_shadow()`, adapter-only
+checkpoints (`shadow_config.json` + `shadow_adapter.safetensors`) — and supports KV-cache
+incremental decoding, so it works directly with `mlx_lm.generate_step` / `mlx_lm.server`.
+
+### Installation
+
+```bash
+uv pip install "shadow-peft[mlx]"   # from PyPI, or:
+uv pip install -e ".[mlx]"          # from a clone (macOS / Apple Silicon)
+```
+
+### Quick start
+
+```python
+from mlx_lm.utils import load
+from shadow_peft_mlx import ShadowConfig, ShadowForCausalLM, get_shadow_model, train
+
+base, tokenizer = load("mlx-community/Qwen3-0.6B-4bit")
+peft = get_shadow_model(base, ShadowConfig())
+task = ShadowForCausalLM(peft)
+
+# dataset: iterable of (input_ids, labels) mx.array pairs
+train(task, dataset, lr=1e-4, epochs=1)
+
+# generation via mlx-lm (KV cache included)
+from mlx_lm.generate import generate_step
+for token, _ in generate_step(prompt_ids, peft, max_tokens=64):
+    ...
+```
+
+### Quantized base models (QLoRA-style)
+
+Shadow injection/update operates in hidden-state space, so 4/8-bit quantized bases work
+out of the box — only the shadow backbone and adapters train, in full precision:
+
+```python
+import mlx.nn as nn
+nn.quantize(base, group_size=64, bits=4)  # or load a pre-quantized checkpoint
+peft = get_shadow_model(base, ShadowConfig())
+```
+
+### Exporting and serving the shadow model
+
+```python
+from shadow_peft_mlx import save_servable_model
+
+exported = peft.export_shadow()          # standalone mlx-lm model (float, dequantized)
+save_servable_model(exported, "./shadow-mlx")  # config.json + safetensors shards
+# Serve with the standard tooling: mlx_lm.server --model ./shadow-mlx
+```
+
+### Converting adapters between torch and MLX
+
+Adapter checkpoints use the same schema on both sides and can be converted without
+retraining (the base model weights are not part of the adapter — use the same base on
+both sides):
+
+```python
+from shadow_peft_mlx import convert_checkpoint
+convert_checkpoint("./torch-ckpt", "./mlx-ckpt", direction="torch_to_mlx")
+# or the CLI: python experiment/convert_adapter.py SRC DST --direction mlx_to_torch
+```
+
+---
+
 ## Notes and Limitations
 
-- **KV cache is disabled.** Shadow requires full-sequence processing to compute injections at every layer. `use_cache=False` is enforced automatically in all forward passes and generation calls.
-- **Generation requires `use_cache=False`.** Some Transformers versions will still try to slice inputs when cache is active. Always pass it explicitly:
-  ```python
-  outputs = model.generate(input_ids, use_cache=False, max_new_tokens=64)
-  ```
+- **KV cache is supported.** Training and full-sequence forwards default to `use_cache=False`; generation works with `use_cache=True`, keeping one KV cache for the base model and a second one for the shadow backbone (identical tokens to uncached decoding, much faster).
 - **Base model is always frozen.** `ShadowPeftModel` sets `requires_grad=False` on all base model parameters during construction. If you need to fine-tune both base and shadow, manage `requires_grad` manually after wrapping.
 - **Minimum 2 decoder layers required.** Shadow injection starts at layer 1, so the base model must have at least 2 decoder layers.
 - **Embedding sharing.** For implicit shadow models, `embed_tokens` is removed from the shadow backbone and replaced by the base model's embeddings. This saves memory and keeps token representations consistent. Explicit shadow models keep their own embeddings by default; pass `remove_embed_tokens=True` to `prepare_shadow_model` to opt in to sharing.

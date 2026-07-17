@@ -8,7 +8,7 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_flatten
 
-from .model_utils import _get_inner_model
+from .model_utils import _get_inner_model, dequantized_weight
 from .peft_model import ShadowPeftModel
 
 InferenceMode = Literal["base_shadow", "shadow_only"]
@@ -108,9 +108,9 @@ class ShadowForCausalLM(nn.Module):
         self.lm_head = getattr(peft_model.base_model, "lm_head", None)
         self.shadow_lm_head = nn.Linear(hidden, vocab_size, bias=False)
         if self.lm_head is not None:
-            self.shadow_lm_head.weight = self.lm_head.weight * 1
+            self.shadow_lm_head.weight = dequantized_weight(self.lm_head) * 1
         else:
-            self.shadow_lm_head.weight = base_inner.embed_tokens.weight * 1
+            self.shadow_lm_head.weight = dequantized_weight(base_inner.embed_tokens) * 1
 
         # Heads are frozen by default (mirrors the torch implementation); unfreeze via
         # ShadowConfig.modules_to_save.

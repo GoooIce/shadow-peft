@@ -123,6 +123,16 @@ def test_requires_at_least_two_layers(llama_factory, shadow_cfg):
         get_shadow_model(base, shadow_cfg)
 
 
+def test_implicit_shadow_has_requested_depth(llama_factory, qwen2_factory, shadow_cfg):
+    # Regression: llama builds layers from `layer_types` (resolved from the base's
+    # args), which must be truncated alongside num_hidden_layers.
+    for factory in (llama_factory, qwen2_factory):
+        peft = get_shadow_model(factory(num_layers=4), shadow_cfg)
+        shadow_layers = peft.shadow_model.layers
+        assert len(shadow_layers) == shadow_cfg.num_shadow_layers
+        assert peft.shadow_model.args.num_hidden_layers == shadow_cfg.num_shadow_layers
+
+
 def test_print_trainable_parameters(llama_factory, shadow_cfg, capsys):
     peft = get_shadow_model(llama_factory(), shadow_cfg)
     peft.print_trainable_parameters()
