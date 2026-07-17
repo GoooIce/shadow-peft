@@ -12,6 +12,12 @@ dependencies = [
   "safetensors>=0.4.3",
 ]
 
+[project.optional-dependencies]
+mlx = [
+  "mlx>=0.31.2; platform_system == 'Darwin'",
+  "mlx-lm>=0.31.3",
+]
+
 [project.urls]
 Repository = "https://github.com/ShadowLLM/shadow-peft"
 
@@ -26,7 +32,7 @@ requires = ["hatchling>=1.24.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/shadow_peft"]
+packages = ["src/shadow_peft", "src/shadow_peft_mlx"]
 
 [tool.ruff]
 line-length = 100
@@ -36,4 +42,4 @@ lint.select = ["E", "F", "I", "UP", "B", "SIM"]
 lint.ignore = ["E501","B028"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["shadow_peft"]
+known-first-party = ["shadow_peft", "shadow_peft_mlx"]
