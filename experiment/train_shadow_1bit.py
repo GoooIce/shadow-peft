@@ -28,7 +28,13 @@ from shadow_peft import ShadowConfig, ShadowForCausalLM, get_shadow_model
 from shadow_peft.quantization import quantize_model_1bit
 
 MODEL = "Qwen/Qwen3-1.7B"
-DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
+DEVICE = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps"
+    if torch.backends.mps.is_available()
+    else "cpu"
+)
 DTYPE = torch.float16
 EOS = 151643  # <|endoftext|>, also used as pad id
 
