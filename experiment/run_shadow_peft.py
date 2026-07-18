@@ -383,6 +383,25 @@ def parse_args() -> argparse.Namespace:
         "E.g., 0.1 means shadow params get 10%% of base LR. Default: 1.0 (same as base).",
     )
 
+    # 1-bit quantized base + KL distillation (P2)
+    parser.add_argument(
+        "--quantize_base_group_size",
+        type=int,
+        default=None,
+        help="If set (e.g. 128), quantize the frozen base model to 1-bit weights with this group size "
+        "before building Shadow-PEFT. Default: None (no quantization).",
+    )
+    parser.add_argument(
+        "--distill_from",
+        type=str,
+        default=None,
+        help="Optional teacher model name/path (same architecture as the base, e.g. the fp16 original). "
+        "When set, a frozen teacher is kept alongside and its logits are distilled into the student. "
+        "Default: None (no distillation).",
+    )
+    parser.add_argument("--distill_weight", type=float, default=1.0)
+    parser.add_argument("--distill_temperature", type=float, default=1.0)
+
     # MMLU fewshot
     parser.add_argument("--use_few_shot", type=int, default=0, choices=[0, 1])
     return parser.parse_args()
@@ -507,6 +526,41 @@ def prepare_causal_model(model_name: str, attn_impl: str):
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = False
     return model
+
+
+def _maybe_quantize_base_model(args: argparse.Namespace, base_model) -> None:
+    """In-place 1-bit quantization of the frozen base model (before building Shadow-PEFT)."""
+    group_size = getattr(args, "quantize_base_group_size", None)
+    if group_size is None:
+        return
+    # Lazy import: the quantization module is only required when this flag is set.
+    from shadow_peft.quantization import quantize_model_1bit
+
+    manifest = quantize_model_1bit(base_model, group_size=int(group_size))
+    manifest = manifest or {}
+    quantized = manifest.get("quantized_layers") or manifest.get("quantized") or []
+    skipped = manifest.get("skipped_layers") or manifest.get("skipped") or []
+    print(
+        f">>> Quantized base model to 1-bit (group_size={int(group_size)}): "
+        f"{len(quantized)} quantized layers, {len(skipped)} skipped layers."
+    )
+
+
+def _prepare_distill_teacher(args: argparse.Namespace, tokenizer):
+    """Load a frozen fp16/bf16 teacher on the same device flow as the base model (None if disabled)."""
+    teacher_name = getattr(args, "distill_from", None)
+    if not teacher_name:
+        return None
+    teacher = prepare_causal_model(teacher_name, args.attn_implementation)
+    _sync_pad_token(teacher, tokenizer)
+    if args.bf16:
+        teacher = teacher.to(torch.bfloat16)
+    elif args.fp16:
+        teacher = teacher.to(torch.float16)
+    teacher.eval()
+    teacher.requires_grad_(False)
+    print(f">>> Distillation teacher loaded: {teacher_name} (dtype={next(teacher.parameters()).dtype}).")
+    return teacher
 
 
 def _sync_pad_token(model, tokenizer):
@@ -733,6 +787,34 @@ class DifferentialLRMixin:
         return super().create_optimizer()
 
 
+class DistillTeacherMixin:
+    """
+    Mixin that runs a frozen teacher in `compute_loss` and passes its logits to the student.
+
+    Usage: Mix this into any Trainer class whose student is a ShadowForCausalLM and set
+    self.teacher_model before calling super().__init__(). When teacher_model is None (or the
+    student has distill_weight == 0), compute_loss behaves exactly as before.
+    """
+
+    def _inject_teacher_logits(self, model, inputs):
+        teacher = getattr(self, "teacher_model", None)
+        if teacher is None or inputs.get("labels") is None:
+            return inputs
+        actual = _unwrap_model(model)
+        if getattr(actual, "distill_weight", 0.0) <= 0:
+            return inputs
+        device = inputs["input_ids"].device
+        if next(teacher.parameters()).device != device:
+            teacher.to(device)
+        teacher_inputs = {
+            k: inputs[k] for k in ("input_ids", "attention_mask", "position_ids") if k in inputs
+        }
+        with torch.no_grad():
+            outputs = teacher(**teacher_inputs)
+        inputs["teacher_logits"] = outputs.logits
+        return inputs
+
+
 class SquadV2DataCollator:
     """Data collator for SQuAD v2 that preserves prompt + id/answers for metric eval."""
 
@@ -933,10 +1015,14 @@ def _build_shadow_peft_causal_lm(
     args: argparse.Namespace, base_model, *, shadow_model=None
 ) -> ShadowForCausalLM:
     peft = get_shadow_model(base_model, _shadow_config_from_args(args), shadow_model=shadow_model)
+    # Distillation only activates when a teacher is provided; otherwise keep the exact previous behavior.
+    distill_enabled = getattr(args, "distill_from", None) is not None
     return ShadowForCausalLM(
         peft,
         shadow_loss_weight=float(args.shadow_loss_weight),
         inference_mode="base_shadow",
+        distill_weight=float(getattr(args, "distill_weight", 1.0)) if distill_enabled else 0.0,
+        distill_temperature=float(getattr(args, "distill_temperature", 1.0)),
     )
 
 
@@ -956,12 +1042,17 @@ def generate_from_shadow(model: ShadowForCausalLM, **gen_kwargs) -> torch.Tensor
         model.set_inference_mode(prev)
 
 
-class ShadowSFTTrainer(DifferentialLRMixin, SFTTrainer):
+class ShadowSFTTrainer(DifferentialLRMixin, DistillTeacherMixin, SFTTrainer):
     """SFTTrainer variant that evaluates shadow_logits during evaluation."""
 
-    def __init__(self, *args, shadow_lr_multiplier=1.0, **kwargs):
+    def __init__(self, *args, shadow_lr_multiplier=1.0, teacher_model=None, **kwargs):
         self.shadow_lr_multiplier = shadow_lr_multiplier
+        self.teacher_model = teacher_model
         super().__init__(*args, **kwargs)
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        inputs = self._inject_teacher_logits(model, inputs)
+        return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
 
     def evaluation_loop(self, dataloader, description, prediction_loss_only=None, ignore_keys=None, metric_key_prefix="eval"):
         model = self._wrap_model(self.model, training=False, dataloader=dataloader)
@@ -997,11 +1088,12 @@ class ShadowSFTTrainer(DifferentialLRMixin, SFTTrainer):
         return EvalLoopOutput(predictions=None, label_ids=None, metrics=metrics, num_samples=num_samples)
 
 
-class MMLUTrainer(DifferentialLRMixin, SFTTrainer):
+class MMLUTrainer(DifferentialLRMixin, DistillTeacherMixin, SFTTrainer):
     """SFTTrainer variant for MMLU with answer extraction and accuracy computation."""
 
-    def __init__(self, *args, shadow_lr_multiplier=1.0, **kwargs):
+    def __init__(self, *args, shadow_lr_multiplier=1.0, teacher_model=None, **kwargs):
         self.shadow_lr_multiplier = shadow_lr_multiplier
+        self.teacher_model = teacher_model
         super().__init__(*args, **kwargs)
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
@@ -1009,6 +1101,7 @@ class MMLUTrainer(DifferentialLRMixin, SFTTrainer):
         inputs.pop("prompt_attention_mask", None)
         inputs.pop("answer_letter", None)
         inputs.pop("answer_idx", None)
+        inputs = self._inject_teacher_logits(model, inputs)
         return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
 
     def evaluation_loop(self, dataloader, description, prediction_loss_only=None, ignore_keys=None, metric_key_prefix="eval"):
@@ -1147,17 +1240,19 @@ class MMLUTrainer(DifferentialLRMixin, SFTTrainer):
         return EvalLoopOutput(predictions=all_predictions, label_ids=all_labels, metrics=metrics, num_samples=num_samples)
 
 
-class GSM8KTrainer(DifferentialLRMixin, SFTTrainer):
+class GSM8KTrainer(DifferentialLRMixin, DistillTeacherMixin, SFTTrainer):
     """SFTTrainer variant for GSM8K with final-answer extraction accuracy."""
 
-    def __init__(self, *args, shadow_lr_multiplier=1.0, **kwargs):
+    def __init__(self, *args, shadow_lr_multiplier=1.0, teacher_model=None, **kwargs):
         self.shadow_lr_multiplier = shadow_lr_multiplier
+        self.teacher_model = teacher_model
         super().__init__(*args, **kwargs)
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         inputs.pop("prompt_input_ids", None)
         inputs.pop("prompt_attention_mask", None)
         inputs.pop("gold_answers", None)
+        inputs = self._inject_teacher_logits(model, inputs)
         return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
 
     def evaluation_loop(
@@ -1323,11 +1418,12 @@ class GSM8KTrainer(DifferentialLRMixin, SFTTrainer):
         return EvalLoopOutput(predictions=None, label_ids=None, metrics=metrics, num_samples=num_samples)
 
 
-class SquadV2Trainer(DifferentialLRMixin, SFTTrainer):
+class SquadV2Trainer(DifferentialLRMixin, DistillTeacherMixin, SFTTrainer):
     """SFTTrainer variant for SQuAD v2 using the official EM/F1 metric."""
 
-    def __init__(self, *args, shadow_lr_multiplier=1.0, **kwargs):
+    def __init__(self, *args, shadow_lr_multiplier=1.0, teacher_model=None, **kwargs):
         self.shadow_lr_multiplier = shadow_lr_multiplier
+        self.teacher_model = teacher_model
         super().__init__(*args, **kwargs)
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
@@ -1335,6 +1431,7 @@ class SquadV2Trainer(DifferentialLRMixin, SFTTrainer):
         inputs.pop("prompt_attention_mask", None)
         inputs.pop("squad_ids", None)
         inputs.pop("squad_answers", None)
+        inputs = self._inject_teacher_logits(model, inputs)
         return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
 
     def evaluation_loop(
@@ -1632,6 +1729,7 @@ def generation_lora(args, tokenizer, datasets):
 def generation_shadow(args, tokenizer, datasets):
     base_model = prepare_causal_model(args.model_name, args.attn_implementation)
     _sync_pad_token(base_model, tokenizer)
+    _maybe_quantize_base_model(args, base_model)
     shadow_model = None
     if getattr(args, "pretrained_shadow_model_name", None):
         shadow_model = prepare_causal_model(args.pretrained_shadow_model_name, args.attn_implementation)
@@ -1674,7 +1772,10 @@ def generation_shadow(args, tokenizer, datasets):
         training_args,
         datasets,
         trainer_cls=ShadowSFTTrainer,
-        trainer_kwargs={"shadow_lr_multiplier": float(getattr(args, "shadow_lr_multiplier", 1.0))},
+        trainer_kwargs={
+            "shadow_lr_multiplier": float(getattr(args, "shadow_lr_multiplier", 1.0)),
+            "teacher_model": _prepare_distill_teacher(args, tokenizer),
+        },
         save_model=False,  # avoid saving backbone weights via Trainer
     )
     _save_shadow_peft_adapter(model, tokenizer, training_args.output_dir)
@@ -1766,6 +1867,7 @@ def gsm8k_lora(args, tokenizer, datasets: GSM8KDatasetBundle):
 def gsm8k_shadow(args, tokenizer, datasets: GSM8KDatasetBundle):
     base_model = prepare_causal_model(args.model_name, args.attn_implementation)
     _sync_pad_token(base_model, tokenizer)
+    _maybe_quantize_base_model(args, base_model)
     shadow_model = None
     if getattr(args, "pretrained_shadow_model_name", None):
         shadow_model = prepare_causal_model(args.pretrained_shadow_model_name, args.attn_implementation)
@@ -1818,6 +1920,7 @@ def gsm8k_shadow(args, tokenizer, datasets: GSM8KDatasetBundle):
         data_collator=collator,
         processing_class=tokenizer,
         shadow_lr_multiplier=float(getattr(args, "shadow_lr_multiplier", 1.0)),
+        teacher_model=_prepare_distill_teacher(args, tokenizer),
     )
     trainer.train()
     metrics = trainer.evaluate()
@@ -1911,6 +2014,7 @@ def squad_v2_lora(args, tokenizer, datasets: SquadV2DatasetBundle):
 def squad_v2_shadow(args, tokenizer, datasets: SquadV2DatasetBundle):
     base_model = prepare_causal_model(args.model_name, args.attn_implementation)
     _sync_pad_token(base_model, tokenizer)
+    _maybe_quantize_base_model(args, base_model)
     shadow_model = None
     if getattr(args, "pretrained_shadow_model_name", None):
         shadow_model = prepare_causal_model(args.pretrained_shadow_model_name, args.attn_implementation)
@@ -1963,6 +2067,7 @@ def squad_v2_shadow(args, tokenizer, datasets: SquadV2DatasetBundle):
         data_collator=collator,
         processing_class=tokenizer,
         shadow_lr_multiplier=float(getattr(args, "shadow_lr_multiplier", 1.0)),
+        teacher_model=_prepare_distill_teacher(args, tokenizer),
     )
     trainer.train()
     metrics = trainer.evaluate()
@@ -2053,6 +2158,7 @@ def mmlu_lora(args, tokenizer, datasets: MMLUDatasetBundle):
 def mmlu_shadow(args, tokenizer, datasets: MMLUDatasetBundle):
     base_model = prepare_causal_model(args.model_name, args.attn_implementation)
     _sync_pad_token(base_model, tokenizer)
+    _maybe_quantize_base_model(args, base_model)
     shadow_model = None
     if getattr(args, "pretrained_shadow_model_name", None):
         shadow_model = prepare_causal_model(args.pretrained_shadow_model_name, args.attn_implementation)
@@ -2104,6 +2210,7 @@ def mmlu_shadow(args, tokenizer, datasets: MMLUDatasetBundle):
         data_collator=data_collator,
         processing_class=tokenizer,
         shadow_lr_multiplier=float(getattr(args, "shadow_lr_multiplier", 1.0)),
+        teacher_model=_prepare_distill_teacher(args, tokenizer),
     )
     trainer.train()
     metrics = _evaluate_mmlu_subsets(trainer, datasets.eval_datasets)

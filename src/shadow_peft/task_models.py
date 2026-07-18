@@ -105,9 +105,34 @@ def _shifted_ce_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     )
 
 
+def _shifted_kd_loss(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    labels: torch.Tensor,
+    temperature: float,
+) -> torch.Tensor:
+    # KL(teacher || student) with the same shift/ignore_index alignment as `_shifted_ce_loss`.
+    if teacher_logits.size(-1) != student_logits.size(-1):
+        raise ValueError(
+            f"Teacher/student vocab mismatch: teacher has vocab {teacher_logits.size(-1)}, "
+            f"student has vocab {student_logits.size(-1)}. "
+            "The teacher must be the same model as the student base (e.g. fp16 vs 1-bit)."
+        )
+    shift_student = student_logits[..., :-1, :].contiguous()
+    shift_teacher = teacher_logits[..., :-1, :].contiguous().to(dtype=shift_student.dtype)
+    shift_labels = labels[..., 1:].contiguous()
+    student_log_probs = F.log_softmax(shift_student.view(-1, shift_student.size(-1)) / temperature, dim=-1)
+    teacher_probs = F.softmax(shift_teacher.view(-1, shift_teacher.size(-1)) / temperature, dim=-1)
+    valid = shift_labels.view(-1) != -100
+    # batchmean over non-ignored tokens matches the CE normalization (mean over non-ignored).
+    kd = F.kl_div(student_log_probs[valid], teacher_probs[valid], reduction="batchmean")
+    return kd * temperature * temperature
+
+
 @dataclass
 class ShadowCausalLMOutputWithPast(CausalLMOutputWithPast):
     shadow_logits: torch.Tensor | None = None
+    kd_loss: torch.Tensor | None = None
 
 
 @dataclass
@@ -135,11 +160,15 @@ class ShadowForCausalLM(nn.Module, GenerationMixin):
         *,
         shadow_loss_weight: float = 0.05,
         inference_mode: InferenceMode = "base_shadow",
+        distill_weight: float = 0.0,
+        distill_temperature: float = 1.0,
     ) -> None:
         super().__init__()
         self.peft_model = peft_model
         self.shadow_loss_weight = float(shadow_loss_weight)
         self.inference_mode: InferenceMode = inference_mode
+        self.distill_weight = float(distill_weight)
+        self.distill_temperature = float(distill_temperature)
 
         # Expose config/generation_config like a HF model.
         self.config = getattr(self.peft_model.base_model, "config", None)
@@ -324,6 +353,7 @@ class ShadowForCausalLM(nn.Module, GenerationMixin):
         self,
         *args,
         labels: torch.Tensor | None = None,
+        teacher_logits: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> ShadowCausalLMOutputWithPast:
         # Default to no-cache for backward compatibility (training / full-seq inference).
@@ -373,16 +403,21 @@ class ShadowForCausalLM(nn.Module, GenerationMixin):
         shadow_logits = self.shadow_lm_head(shadow_hidden)
 
         loss = getattr(outputs, "loss", None)
+        kd_loss = None
         if labels is not None:
             if loss is None:
                 loss = _shifted_ce_loss(base_logits, labels)
             if self.shadow_loss_weight > 0:
                 loss = loss + self.shadow_loss_weight * _shifted_ce_loss(shadow_logits, labels)
+            if teacher_logits is not None and self.distill_weight > 0:
+                kd_loss = _shifted_kd_loss(base_logits, teacher_logits, labels, self.distill_temperature)
+                loss = loss + self.distill_weight * kd_loss
 
         return ShadowCausalLMOutputWithPast(
             loss=loss,
             logits=base_logits,
             shadow_logits=shadow_logits,
+            kd_loss=kd_loss,
             past_key_values=getattr(outputs, "past_key_values", None),
             hidden_states=getattr(outputs, "hidden_states", None),
             attentions=getattr(outputs, "attentions", None),

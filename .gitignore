@@ -208,3 +208,9 @@ __marimo__/
 
 # ZCode session files
 .zcode/
+
+# Third-party source checkouts (e.g. MLX PR builds for bits=1 support)
+third_party/
+
+# External demo/reference repositories
+Bonsai-demo/
