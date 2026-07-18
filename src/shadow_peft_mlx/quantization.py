@@ -193,6 +193,12 @@ def quantize_model_1bit(
 
     nn.quantize(model, group_size=group_size, bits=1, class_predicate=predicate)
 
+    if manifest["trimmed"]:
+        # Keep ModelArgs consistent with the trimmed vocab.
+        args = getattr(model, "args", None)
+        if args is not None and getattr(args, "vocab_size", 0) > trim_vocab_to:
+            args.vocab_size = trim_vocab_to
+
     if refine_iters > 0:
         for path, module in model.named_modules():
             if path not in originals:

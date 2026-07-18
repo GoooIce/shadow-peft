@@ -34,6 +34,7 @@ def _make_shadow_for_causal_lm(
     *,
     distill_weight: float = 0.0,
     distill_temperature: float = 1.0,
+    distill_hidden_weight: float = 0.0,
     seed: int = 0,
 ) -> ShadowForCausalLM:
     torch.manual_seed(seed)
@@ -52,6 +53,7 @@ def _make_shadow_for_causal_lm(
         inference_mode="base_shadow",
         distill_weight=distill_weight,
         distill_temperature=distill_temperature,
+        distill_hidden_weight=distill_hidden_weight,
     )
 
 
@@ -169,3 +171,78 @@ def test_run_shadow_peft_args_defaults(monkeypatch):
         assert args.distill_temperature == 2.0
     finally:
         sys.path.remove(str(experiment_dir))
+
+
+def test_hidden_distill_off_by_default():
+    m = _make_shadow_for_causal_lm()
+    assert m.distill_hidden_weight == 0.0
+    m.eval()
+    input_ids, labels = _batch()
+    with torch.no_grad():
+        out_ref = m(input_ids=input_ids, labels=labels)
+        # Even with teacher hidden states passed, weight=0 means no-op.
+        out = m(
+            input_ids=input_ids,
+            labels=labels,
+            teacher_hidden_states=tuple(
+                torch.randn(2, 8, 32) for _ in range(5)
+            ),
+        )
+    assert out.hidden_loss is None
+    assert torch.allclose(out_ref.loss, out.loss, atol=0.0, rtol=0.0)
+
+
+def test_hidden_distill_zero_when_identical():
+    m = _make_shadow_for_causal_lm(distill_hidden_weight=1.0)
+    m.eval()
+    input_ids, labels = _batch()
+    with torch.no_grad():
+        ref = m(input_ids=input_ids, output_hidden_states=True)
+        assert ref.hidden_states is not None
+        out = m(
+            input_ids=input_ids,
+            labels=labels,
+            teacher_hidden_states=tuple(h.clone() for h in ref.hidden_states),
+        )
+    assert out.hidden_loss is not None
+    assert abs(out.hidden_loss.item()) < 1e-5
+
+
+def test_hidden_distill_finite_and_loss_composition():
+    m = _make_shadow_for_causal_lm(distill_hidden_weight=2.0)
+    m.train()
+    input_ids, labels = _batch()
+    with torch.no_grad():
+        ref = m(input_ids=input_ids, output_hidden_states=True)
+    teacher_hs = tuple(h + 0.1 * torch.randn_like(h) for h in ref.hidden_states)
+
+    out = m(input_ids=input_ids, labels=labels, teacher_hidden_states=teacher_hs)
+    assert out.hidden_loss is not None
+    assert torch.isfinite(out.hidden_loss)
+    with torch.no_grad():
+        out_no_hidden = m(input_ids=input_ids, labels=labels)
+    expected = out_no_hidden.loss.detach() + m.distill_hidden_weight * out.hidden_loss.detach()
+    assert torch.allclose(out.loss.detach(), expected, atol=1e-5, rtol=1e-5)
+
+    out.loss.backward()
+    for name, p in m.named_parameters():
+        if not p.requires_grad:
+            assert p.grad is None, f"frozen param got grad: {name}"
+    shadow_prefixes = (
+        "peft_model.shadow_model",
+        "peft_model.shadow_injection_model",
+        "peft_model.shadow_update_model",
+    )
+    assert any(
+        p.grad is not None and p.grad.abs().sum() > 0
+        for name, p in m.named_parameters()
+        if name.startswith(shadow_prefixes)
+    )
+
+
+def test_hidden_layer_count_mismatch_raises():
+    m = _make_shadow_for_causal_lm(distill_hidden_weight=1.0)
+    input_ids, labels = _batch()
+    bad_teacher = (torch.randn(2, 8, 32), torch.randn(2, 8, 32))  # 2 != 5 layers
+    with pytest.raises(ValueError, match="layer count"):
+        m(input_ids=input_ids, labels=labels, teacher_hidden_states=bad_teacher)

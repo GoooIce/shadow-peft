@@ -129,10 +129,39 @@ def _shifted_kd_loss(
     return kd * temperature * temperature
 
 
+def _hidden_mse_loss(
+    student_hidden_states: tuple[torch.Tensor, ...],
+    teacher_hidden_states: tuple[torch.Tensor, ...],
+    labels: torch.Tensor,
+) -> torch.Tensor:
+    """
+    OneBit-style (arXiv:2402.11295) per-layer hidden-state distillation:
+    L2-normalize each token vector, MSE per layer, averaged over layers and
+    non-ignored positions.
+    """
+    if len(student_hidden_states) != len(teacher_hidden_states):
+        raise ValueError(
+            f"Teacher/student hidden layer count mismatch: "
+            f"{len(teacher_hidden_states)} vs {len(student_hidden_states)}. "
+            "The teacher must be the same model as the student base (e.g. fp16 vs 1-bit)."
+        )
+    valid = (labels != -100).unsqueeze(-1).to(torch.float32)
+    denom = valid.sum().clamp_min(1.0)
+    total = None
+    for student, teacher in zip(student_hidden_states, teacher_hidden_states, strict=True):
+        s_n = F.normalize(student.float(), dim=-1)
+        t_n = F.normalize(teacher.float(), dim=-1)
+        mse = ((s_n - t_n) ** 2).sum(dim=-1, keepdim=True)
+        layer_loss = (mse * valid).sum() / denom
+        total = layer_loss if total is None else total + layer_loss
+    return total / len(student_hidden_states)
+
+
 @dataclass
 class ShadowCausalLMOutputWithPast(CausalLMOutputWithPast):
     shadow_logits: torch.Tensor | None = None
     kd_loss: torch.Tensor | None = None
+    hidden_loss: torch.Tensor | None = None
 
 
 @dataclass
@@ -162,6 +191,7 @@ class ShadowForCausalLM(nn.Module, GenerationMixin):
         inference_mode: InferenceMode = "base_shadow",
         distill_weight: float = 0.0,
         distill_temperature: float = 1.0,
+        distill_hidden_weight: float = 0.0,
     ) -> None:
         super().__init__()
         self.peft_model = peft_model
@@ -169,6 +199,7 @@ class ShadowForCausalLM(nn.Module, GenerationMixin):
         self.inference_mode: InferenceMode = inference_mode
         self.distill_weight = float(distill_weight)
         self.distill_temperature = float(distill_temperature)
+        self.distill_hidden_weight = float(distill_hidden_weight)
 
         # Expose config/generation_config like a HF model.
         self.config = getattr(self.peft_model.base_model, "config", None)
@@ -354,11 +385,20 @@ class ShadowForCausalLM(nn.Module, GenerationMixin):
         *args,
         labels: torch.Tensor | None = None,
         teacher_logits: torch.Tensor | None = None,
+        teacher_hidden_states: tuple[torch.Tensor, ...] | None = None,
         **kwargs: Any,
     ) -> ShadowCausalLMOutputWithPast:
         # Default to no-cache for backward compatibility (training / full-seq inference).
         kwargs.setdefault("use_cache", False)
         kwargs.setdefault("past_key_values", None)
+
+        need_student_hidden = (
+            teacher_hidden_states is not None
+            and self.distill_hidden_weight > 0
+            and labels is not None
+        )
+        if need_student_hidden:
+            kwargs["output_hidden_states"] = True
 
         # Normalize common HF kwargs so we never pass them twice (e.g. generation sets return_dict=True).
         if "labels" in kwargs:
@@ -404,6 +444,7 @@ class ShadowForCausalLM(nn.Module, GenerationMixin):
 
         loss = getattr(outputs, "loss", None)
         kd_loss = None
+        hidden_loss = None
         if labels is not None:
             if loss is None:
                 loss = _shifted_ce_loss(base_logits, labels)
@@ -412,12 +453,22 @@ class ShadowForCausalLM(nn.Module, GenerationMixin):
             if teacher_logits is not None and self.distill_weight > 0:
                 kd_loss = _shifted_kd_loss(base_logits, teacher_logits, labels, self.distill_temperature)
                 loss = loss + self.distill_weight * kd_loss
+            if need_student_hidden:
+                student_hidden = getattr(outputs, "hidden_states", None)
+                if student_hidden is None:
+                    raise RuntimeError(
+                        "Base model did not return hidden_states despite "
+                        "output_hidden_states=True; cannot compute hidden distillation."
+                    )
+                hidden_loss = _hidden_mse_loss(student_hidden, teacher_hidden_states, labels)
+                loss = loss + self.distill_hidden_weight * hidden_loss
 
         return ShadowCausalLMOutputWithPast(
             loss=loss,
             logits=base_logits,
             shadow_logits=shadow_logits,
             kd_loss=kd_loss,
+            hidden_loss=hidden_loss,
             past_key_values=getattr(outputs, "past_key_values", None),
             hidden_states=getattr(outputs, "hidden_states", None),
             attentions=getattr(outputs, "attentions", None),

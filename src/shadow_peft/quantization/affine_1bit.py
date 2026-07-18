@@ -375,6 +375,12 @@ def quantize_model_1bit(
         replaced_weights.append(weight)
         quantized.append(name)
 
+    if trimmed and getattr(model, "config", None) is not None:
+        # Keep the model config consistent with the trimmed vocab so e.g. HF's
+        # internal CE loss (`logits.view(-1, config.vocab_size)`) still works.
+        if getattr(model.config, "vocab_size", 0) > trim_vocab_to:
+            model.config.vocab_size = trim_vocab_to
+
     return {
         "quantization": {
             "mode": "affine",

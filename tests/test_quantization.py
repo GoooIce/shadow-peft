@@ -311,6 +311,7 @@ def test_trim_vocab_embedding_and_tied_lm_head():
     assert manifest["trimmed"]["lm_head"] == [128, 96]
     assert manifest["quantization"]["trim_vocab_to"] == 96
     assert manifest["tied"] == ["lm_head"]
+    assert model.config.vocab_size == 96  # config kept consistent with the trim
 
     ids = torch.randint(0, 96, (2, 8))
     out = model(input_ids=ids)

@@ -214,3 +214,7 @@ third_party/
 
 # External demo/reference repositories
 Bonsai-demo/
+
+# Generated training data and experiment outputs
+experiment/data/
+experiment/runs/
