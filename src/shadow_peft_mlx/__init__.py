@@ -3,7 +3,7 @@ from .convert import convert_checkpoint
 from .model_utils import save_servable_model
 from .peft_model import ShadowPeftModel, get_shadow_model, prepare_shadow_model
 from .projected_causal_lm import ProjectedCausalLM, compute_pinv_projection
-from .quantization import ensure_1bit_support, quantize_model_1bit
+from .quantization import ensure_1bit_support, pack_1bit_refined, quantize_model_1bit
 from .task_models import (
     ShadowCausalLMOutput,
     ShadowForCausalLM,
@@ -27,6 +27,7 @@ __all__ = [
     "ensure_1bit_support",
     "get_shadow_model",
     "loss_fn",
+    "pack_1bit_refined",
     "prepare_shadow_model",
     "quantize_model_1bit",
     "save_servable_model",

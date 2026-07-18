@@ -164,7 +164,13 @@ def test_quantize_model_replaces_layers_and_skips_tied_lm_head():
     assert isinstance(model.lm_head, nn.Linear)
     assert manifest["tied"] == ["lm_head"]
     assert manifest["skipped"] == {}
-    assert manifest["quantization"] == {"mode": "affine", "bits": 1, "group_size": 32}
+    assert manifest["quantization"] == {
+        "mode": "affine",
+        "bits": 1,
+        "group_size": 32,
+        "refine_iters": 0,
+        "trim_vocab_to": None,
+    }
     assert "model.embed_tokens" in manifest["quantized"]
 
     model.eval()
@@ -232,3 +238,89 @@ def test_mps_matches_cpu():
         packed_mps, scales_mps, biases_mps, group_size=128
     ).cpu()
     assert torch.equal(w_cpu, w_mps)
+
+
+def _group_mse(weight: torch.Tensor, packed, scales, biases, group_size: int) -> float:
+    w_hat = dequantize_1bit_affine(packed, scales, biases, group_size=group_size)
+    return (w_hat.float() - weight.float()).pow(2).mean().item()
+
+
+def test_refine_reduces_mse_and_is_monotone():
+    torch.manual_seed(0)
+    weight = torch.randn(8, 256, dtype=torch.float16)
+    mses = []
+    for iters in (0, 1, 2, 5):
+        packed, scales, biases = quantize_1bit_affine(
+            weight, group_size=128, refine_iters=iters
+        )
+        mses.append(_group_mse(weight, packed, scales, biases, 128))
+    assert mses[1] < mses[0] * 0.5  # refinement removes most of the error
+    assert all(b <= a + 1e-9 for a, b in zip(mses, mses[1:], strict=False))
+
+
+def test_refine_format_and_determinism():
+    torch.manual_seed(0)
+    weight = torch.randn(8, 256, dtype=torch.float16)
+    p1, s1, b1 = quantize_1bit_affine(weight, group_size=128, refine_iters=10)
+    p2, s2, b2 = quantize_1bit_affine(weight, group_size=128, refine_iters=10)
+    assert p1.shape == (8, 8) and p1.dtype == torch.int32
+    assert s1.shape == b1.shape == (8, 2) and s1.dtype == torch.float16
+    assert torch.equal(p1, p2) and torch.equal(s1, s2) and torch.equal(b1, b2)
+
+
+def test_refine_degenerate_group_constant_weights():
+    weight = torch.full((2, 64), 3.25, dtype=torch.float16)
+    packed, scales, biases = quantize_1bit_affine(
+        weight, group_size=32, refine_iters=10
+    )
+    w_hat = dequantize_1bit_affine(packed, scales, biases, group_size=32)
+    assert not torch.isnan(w_hat).any()
+    assert torch.allclose(w_hat, weight, atol=1e-3)
+
+
+def test_refine_rejects_negative_iters():
+    with pytest.raises(ValueError):
+        quantize_1bit_affine(
+            torch.randn(4, 128, dtype=torch.float16), group_size=128, refine_iters=-1
+        )
+
+
+def test_refine_manifest_records_iters():
+    model = _tiny_llama().half()
+    manifest = quantize_model_1bit(model, group_size=32, refine_iters=3)
+    assert manifest["quantization"]["refine_iters"] == 3
+
+
+def test_trim_vocab_embedding_and_tied_lm_head():
+    torch.manual_seed(0)
+    model = _tiny_llama(tie_word_embeddings=True).half()  # vocab 128, hidden 32
+    manifest = quantize_model_1bit(model, group_size=32, trim_vocab_to=96)
+
+    emb = model.model.embed_tokens
+    assert isinstance(emb, QuantizedEmbedding1Bit)
+    assert emb.num_embeddings == 96
+    assert emb.weight.shape == (96, 1)  # hidden 32 -> 1 word per row
+
+    # Tied lm_head is re-pointed at the trimmed fp weight (not quantized).
+    head = model.lm_head
+    assert isinstance(head, nn.Linear)
+    assert not isinstance(head, QuantizedLinear1Bit)
+    assert head.weight.shape == (96, 32)
+
+    assert manifest["trimmed"]["model.embed_tokens"] == [128, 96]
+    assert manifest["trimmed"]["lm_head"] == [128, 96]
+    assert manifest["quantization"]["trim_vocab_to"] == 96
+    assert manifest["tied"] == ["lm_head"]
+
+    ids = torch.randint(0, 96, (2, 8))
+    out = model(input_ids=ids)
+    assert out.logits.shape == (2, 8, 96)
+    assert torch.isfinite(out.logits).all()
+
+
+def test_trim_vocab_to_none_by_default():
+    torch.manual_seed(0)
+    model = _tiny_llama().half()
+    manifest = quantize_model_1bit(model, group_size=32)
+    assert manifest["trimmed"] == {}
+    assert model.model.embed_tokens.weight.shape == (128, 1)

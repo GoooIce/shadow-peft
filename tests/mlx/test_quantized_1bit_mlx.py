@@ -19,6 +19,7 @@ from mlx.utils import tree_flatten  # noqa: E402
 from shadow_peft_mlx import (  # noqa: E402
     ShadowForCausalLM,
     get_shadow_model,
+    pack_1bit_refined,
     quantize_model_1bit,
 )
 
@@ -79,6 +80,8 @@ def test_all_layers_quantized_1bit(quantized_1bit_llama):
         "mode": "affine",
         "bits": 1,
         "group_size": GROUP_SIZE,
+        "refine_iters": 0,
+        "trim_vocab_to": None,
     }
 
 
@@ -154,3 +157,84 @@ def test_forward_finite_1bit(quantized_1bit_llama):
     base, _ = quantized_1bit_llama
     logits = base(mx.array([[1, 5, 7, 9, 3]]))
     assert mx.isfinite(logits).all().item()
+
+
+def test_pack_1bit_refined_reduces_mse_monotonically():
+    mx.random.seed(7)
+    w = mx.random.normal((8, 256)).astype(mx.float16)
+
+    def mse(iters: int) -> float:
+        p, s, b = pack_1bit_refined(w, group_size=128, iters=iters)
+        deq = mx.dequantize(p, s, b, group_size=128, bits=1)
+        return ((deq.astype(mx.float32) - w.astype(mx.float32)) ** 2).mean().item()
+
+    mses = [mse(i) for i in (0, 1, 2, 5)]
+    assert mses[1] < mses[0] * 0.5
+    assert all(b <= a + 1e-7 for a, b in zip(mses, mses[1:], strict=False))
+
+
+def test_pack_1bit_refined_format_and_qmm():
+    mx.random.seed(8)
+    w = mx.random.normal((4, 256)).astype(mx.float16)
+    p, s, b = pack_1bit_refined(w, group_size=128, iters=10)
+    assert p.dtype == mx.uint32 and p.shape == (4, 8)
+    assert s.shape == b.shape == (4, 2) and s.dtype == mx.float16
+
+    x = mx.random.normal((2, 256)).astype(mx.float16)
+    y_ref = x @ mx.dequantize(p, s, b, group_size=128, bits=1).T
+    y_qmm = mx.quantized_matmul(x, p, s, b, transpose=True, group_size=128, bits=1)
+    assert mx.abs(y_ref - y_qmm).max().item() < 1e-1
+
+
+def test_pack_1bit_refined_constant_group():
+    w = mx.full((2, 128), 0.5, dtype=mx.float16)
+    p, s, b = pack_1bit_refined(w, group_size=128, iters=10)
+    deq = mx.dequantize(p, s, b, group_size=128, bits=1)
+    assert mx.isfinite(deq).all().item()
+    assert mx.abs(deq - 0.5).max().item() < 1e-3
+
+
+def test_quantize_model_1bit_refine_integration(llama_128):
+    original = llama_128.model.layers[0].self_attn.q_proj.weight * 1
+    mx.eval(original)
+    manifest = quantize_model_1bit(llama_128, group_size=GROUP_SIZE, refine_iters=5)
+    assert manifest["quantization"]["refine_iters"] == 5
+
+    q_proj = llama_128.model.layers[0].self_attn.q_proj
+    assert isinstance(q_proj, nn.QuantizedLinear)
+    assert q_proj.weight.shape == (128, 4) and q_proj.weight.dtype == mx.uint32
+
+    # Refined packing must beat naive packing in weight space.
+    deq = mx.dequantize(
+        q_proj.weight, q_proj.scales, q_proj.biases, group_size=GROUP_SIZE, bits=1
+    )
+    naive_p, naive_s, naive_b = mx.quantize(original, group_size=GROUP_SIZE, bits=1)
+    naive_deq = mx.dequantize(naive_p, naive_s, naive_b, group_size=GROUP_SIZE, bits=1)
+    ref = original.astype(mx.float32)
+    mse_refined = ((deq.astype(mx.float32) - ref) ** 2).mean().item()
+    mse_naive = ((naive_deq.astype(mx.float32) - ref) ** 2).mean().item()
+    assert mse_refined < mse_naive
+
+    # Forward still works end to end.
+    logits = llama_128(mx.array([[1, 5, 7, 9, 3]]))
+    assert mx.isfinite(logits).all().item()
+
+
+def test_trim_vocab_mlx(llama_128):
+    # vocab 64 -> trim 48; untied lm_head is trimmed along with the embedding.
+    manifest = quantize_model_1bit(llama_128, group_size=GROUP_SIZE, trim_vocab_to=48)
+
+    embed = llama_128.model.embed_tokens
+    assert isinstance(embed, nn.QuantizedEmbedding)
+    assert embed.weight.shape == (48, 4)  # 48 rows, 128/32 words per row
+    assert manifest["trimmed"]["model.embed_tokens"] == [64, 48]
+    assert manifest["quantization"]["trim_vocab_to"] == 48
+
+    logits = llama_128(mx.array([[1, 5, 7, 9, 3]]))
+    assert logits.shape[-1] == 48
+    assert mx.isfinite(logits).all().item()
+
+
+def test_trim_vocab_validation(llama_128):
+    with pytest.raises(ValueError):
+        quantize_model_1bit(llama_128, group_size=GROUP_SIZE, trim_vocab_to=0)
