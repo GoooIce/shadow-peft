@@ -61,11 +61,25 @@ def main() -> None:
         help="refine_iters to benchmark (default: 0 8)",
     )
     ap.add_argument("--group-size", type=int, default=128)
+    ap.add_argument(
+        "--thr-ratio",
+        type=float,
+        default=0.5,
+        help="ternary threshold ratio (|w| < thr_ratio*s_g -> 0); default 0.5",
+    )
     args = ap.parse_args()
 
     from datasets import load_dataset
+    from huggingface_hub import hf_hub_download
 
-    ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    # Load wikitext-2 via a single parquet shard. The standard
+    # ``load_dataset("wikitext", ...)`` path is blocked on recent
+    # huggingface_hub (the single-segment "wikitext" repo id breaks the
+    # ``hf://`` URI parser), so fetch the parquet file directly instead.
+    parquet = hf_hub_download(
+        "wikitext", "wikitext-2-raw-v1/test-00000-of-00001.parquet", repo_type="dataset"
+    )
+    ds = load_dataset("parquet", data_files=parquet, split="train")
     text = "\n".join(line for line in ds["text"] if line.strip())[:200_000]
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
@@ -86,12 +100,19 @@ def main() -> None:
     for iters in args.refine_iters:
         model = AutoModelForCausalLM.from_pretrained(args.model, dtype=DTYPE).to(DEVICE)
         manifest = quantize_model_2bit(
-            model, group_size=args.group_size, refine_iters=iters
+            model,
+            group_size=args.group_size,
+            refine_iters=iters,
+            thr_ratio=args.thr_ratio,
         )
         n_quant = len(manifest["quantized"])
         model.eval()
         ppl = perplexity(model, tokenizer, text)
-        print(f"| ternary 2-bit PTQ refine={iters} ({n_quant} modules) | {ppl:.2f} |", flush=True)
+        print(
+            f"| ternary 2-bit PTQ thr={args.thr_ratio} refine={iters} "
+            f"({n_quant} modules) | {ppl:.2f} |",
+            flush=True,
+        )
         del model
         gc.collect()
         if DEVICE == "mps":

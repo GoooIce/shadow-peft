@@ -218,3 +218,4 @@ Bonsai-demo/
 # Generated training data and experiment outputs
 experiment/data/
 experiment/runs/
+experiment/runs_5M/

@@ -353,8 +353,32 @@ class ShadowPeftModel(nn.Module):
                 wrapped.append(_ShadowLayerWrapper(layer, layer_idx=i, adapter=self))
         setattr(base_backbone, base_layers_attr, wrapped)
 
-        # Ensure the shadow model is on the same device/dtype when `.to()` is called.
-        self.shadow_model.to(next(self.base_model.parameters()).device)
+        # Align the shadow model and adapter modules with the base's float dtype.
+        # The implicit shadow model is instantiated as fp32, but the base may run
+        # in fp16/bf16 (especially when quantized). If shadow hidden states (fp32)
+        # meet base hidden states (fp16), `hidden - shadow` promotes to fp32 and
+        # the next quantized Linear (fp16 weight) raises a dtype mismatch. Cast
+        # the shadow model (a normal, unquantized backbone with no int32 buffers)
+        # and the trainable adapter modules to match.
+        base_param = next(self.base_model.parameters())
+        base_dtype = self._base_float_dtype()
+        self.shadow_model.to(device=base_param.device, dtype=base_dtype or base_param.dtype)
+        if base_dtype is not None:
+            self.shadow_injection_model.to(base_dtype)
+            self.shadow_update_model.to(base_dtype)
+            self.shadow_hidden_projection.to(base_dtype)
+
+    def _base_float_dtype(self) -> torch.dtype | None:
+        """Return the first floating-point parameter dtype of the base model.
+
+        A quantized base keeps its packed weights as int buffers, so its float
+        dtype is best inferred from a normal (e.g. norm / lm_head bias) parameter.
+        Returns ``None`` if no floating-point parameter is found.
+        """
+        for p in self.base_model.parameters():
+            if p.is_floating_point():
+                return p.dtype
+        return None
 
     def __getattr__(self, name: str):
         """

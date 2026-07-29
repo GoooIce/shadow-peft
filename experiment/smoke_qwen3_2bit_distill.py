@@ -33,7 +33,7 @@ DEVICE = (
     if torch.backends.mps.is_available()
     else "cpu"
 )
-DTYPE = torch.float16
+DTYPE = torch.bfloat16  # bf16: fp16 training diverges (loss -> nan) at lr=3e-4
 GROUP_SIZE = 128
 REFINE_ITERS = 8
 STEPS = 10

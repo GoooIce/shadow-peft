@@ -39,7 +39,7 @@ DEVICE = (
     if torch.backends.mps.is_available()
     else "cpu"
 )
-DTYPE = torch.float16
+DTYPE = torch.bfloat16  # bf16: fp16 training diverges (loss -> nan) at lr=1e-5
 EOS = 151643  # <|endoftext|>, also used as pad id
 
 
@@ -178,8 +178,15 @@ def main() -> None:
     seqs = load_teacher_data(args.data)
     print(f"teacher sequences: {len(seqs)}", flush=True)
     from datasets import load_dataset
+    from huggingface_hub import hf_hub_download
 
-    ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    # See benchmark_2bit_ptq.py: ``load_dataset("wikitext", ...)`` is broken on
+    # recent huggingface_hub (single-segment repo id), so fetch the parquet
+    # shard directly.
+    parquet = hf_hub_download(
+        "wikitext", "wikitext-2-raw-v1/test-00000-of-00001.parquet", repo_type="dataset"
+    )
+    ds = load_dataset("parquet", data_files=parquet, split="train")
     eval_text = "\n".join(line for line in ds["text"] if line.strip())[:200_000]
 
     log_f = open(save_dir / "train_log.jsonl", "w")
