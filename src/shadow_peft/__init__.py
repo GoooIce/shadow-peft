@@ -6,10 +6,15 @@ from .projected_causal_lm import (
 )
 from .quantization import (
     QuantizedEmbedding1Bit,
+    QuantizedEmbedding2Bit,
     QuantizedLinear1Bit,
+    QuantizedLinear2Bit,
     dequantize_1bit_affine,
+    dequantize_2bit_ternary,
     quantize_1bit_affine,
+    quantize_2bit_ternary,
     quantize_model_1bit,
+    quantize_model_2bit,
     save_quantized_checkpoint,
 )
 from .task_models import ShadowForCausalLM, ShadowForSequenceClassification
@@ -20,15 +25,20 @@ __all__ = [
     "AutoModelForCausalLMWithHiddenProjection",
     "AutoModelForCausalLMWithHiddenProjectionConfig",
     "QuantizedEmbedding1Bit",
+    "QuantizedEmbedding2Bit",
     "QuantizedLinear1Bit",
+    "QuantizedLinear2Bit",
     "ShadowForCausalLM",
     "ShadowForSequenceClassification",
     "ShadowPeftModel",
     "dequantize_1bit_affine",
+    "dequantize_2bit_ternary",
     "get_shadow_model",
     "prepare_shadow_model",
     "quantize_1bit_affine",
+    "quantize_2bit_ternary",
     "quantize_model_1bit",
+    "quantize_model_2bit",
     "save_quantized_checkpoint",
 ]
 

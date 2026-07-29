@@ -12,10 +12,15 @@ from transformers import LlamaConfig, LlamaForCausalLM  # noqa: E402
 
 from shadow_peft import (  # noqa: E402
     QuantizedEmbedding1Bit,
+    QuantizedEmbedding2Bit,
     QuantizedLinear1Bit,
+    QuantizedLinear2Bit,
     dequantize_1bit_affine,
+    dequantize_2bit_ternary,
     quantize_1bit_affine,
+    quantize_2bit_ternary,
     quantize_model_1bit,
+    quantize_model_2bit,
     save_quantized_checkpoint,
 )
 
@@ -325,3 +330,191 @@ def test_trim_vocab_to_none_by_default():
     manifest = quantize_model_1bit(model, group_size=32)
     assert manifest["trimmed"] == {}
     assert model.model.embed_tokens.weight.shape == (128, 1)
+
+
+# ---------------------------------------------------------------------------
+# Ternary 2-bit quantization tests
+# ---------------------------------------------------------------------------
+
+
+class TestQuantize2BitTernary:
+    """Tests for the ternary 2-bit ({-1,0,+1}) quantizer."""
+
+    def test_packed_shapes_and_dtypes(self):
+        torch.manual_seed(0)
+        weight = torch.randn(8, 256, dtype=torch.float16)
+        packed, scales, biases = quantize_2bit_ternary(weight, group_size=128)
+        assert packed.shape == (8, 16)  # 256 / 16 codes per word
+        assert packed.dtype == torch.int32
+        assert scales.shape == (8, 2)  # 256 / 128
+        assert biases.shape == (8, 2)
+        assert scales.dtype == torch.float16
+        assert biases.dtype == torch.float16
+
+    def test_code_3_never_produced(self):
+        """Safety: unpacked codes must only be in {0, 1, 2}, never 3."""
+        torch.manual_seed(0)
+        weight = torch.randn(8, 256, dtype=torch.float16)
+        packed, _, _ = quantize_2bit_ternary(weight, group_size=128)
+        shifts = 2 * torch.arange(16, dtype=torch.int32)
+        codes = ((packed.unsqueeze(-1) >> shifts) & 0b11)
+        assert codes.max().item() <= 2
+
+    def test_dequant_values_are_ternary(self):
+        """Dequantized weights must be exactly {-s_g, 0, +s_g} per group."""
+        torch.manual_seed(0)
+        weight = torch.randn(8, 256, dtype=torch.float16)
+        packed, scales, biases = quantize_2bit_ternary(weight, group_size=128)
+        w_hat = dequantize_2bit_ternary(packed, scales, biases, group_size=128)
+
+        # For each group, the dequantized values must be in {-s_g, 0, +s_g}.
+        for g in range(2):
+            sg = scales[0, g].item()
+            group_vals = w_hat[0, g * 128 : (g + 1) * 128].float()
+            unique_vals = group_vals.unique()
+            assert len(unique_vals) <= 3
+            for v in unique_vals:
+                assert any(abs(v.item() - t) < 1e-3 for t in (-sg, 0.0, sg))
+
+    def test_bias_is_negative_scale(self):
+        """bias must equal -scale (so dequant = scale*(code-1))."""
+        torch.manual_seed(0)
+        weight = torch.randn(4, 128, dtype=torch.float16)
+        _, scales, biases = quantize_2bit_ternary(weight, group_size=128)
+        torch.testing.assert_close(biases.float(), -scales.float(), rtol=0, atol=1e-3)
+
+    def test_roundtrip_mse_better_than_max(self):
+        """Round-trip error should be much less than the weight magnitude."""
+        torch.manual_seed(0)
+        weight = torch.randn(8, 256, dtype=torch.float16)
+        packed, scales, biases = quantize_2bit_ternary(weight, group_size=128, refine_iters=8)
+        w_hat = dequantize_2bit_ternary(packed, scales, biases, group_size=128)
+        mse = ((weight.float() - w_hat.float()) ** 2).mean().item()
+        signal = weight.float().var().item()
+        assert mse < signal  # error smaller than signal variance
+
+    def test_refine_reduces_mse_and_is_monotone(self):
+        torch.manual_seed(0)
+        weight = torch.randn(8, 512, dtype=torch.float16)
+
+        mses = []
+        for iters in range(6):
+            packed, scales, biases = quantize_2bit_ternary(
+                weight, group_size=128, refine_iters=iters
+            )
+            w_hat = dequantize_2bit_ternary(packed, scales, biases, group_size=128)
+            mses.append(((weight.float() - w_hat.float()) ** 2).mean().item())
+
+        # Refinement (iters=1) should reduce MSE significantly.
+        assert mses[1] < mses[0] * 0.95
+        # MSE should be monotonically non-increasing.
+        for i in range(1, len(mses)):
+            assert mses[i] <= mses[i - 1] + 1e-7
+
+    def test_quantize_rejects_bad_dims(self):
+        with pytest.raises(ValueError):
+            quantize_2bit_ternary(torch.randn(4, 64, dtype=torch.float16), group_size=128)
+        with pytest.raises(ValueError):
+            quantize_2bit_ternary(torch.randn(4, 3, dtype=torch.float16), group_size=16)  # noqa: PT012
+
+    def test_quantize_rejects_bad_thr_ratio(self):
+        with pytest.raises(ValueError):
+            quantize_2bit_ternary(
+                torch.randn(4, 128, dtype=torch.float16), group_size=128, thr_ratio=0.0
+            )
+        with pytest.raises(ValueError):
+            quantize_2bit_ternary(
+                torch.randn(4, 128, dtype=torch.float16), group_size=128, thr_ratio=1.5
+            )
+
+    def test_refine_rejects_negative_iters(self):
+        with pytest.raises(ValueError):
+            quantize_2bit_ternary(
+                torch.randn(4, 128, dtype=torch.float16), group_size=128, refine_iters=-1
+            )
+
+    def test_quantized_linear_matches_dequantized_reference(self):
+        torch.manual_seed(0)
+        linear = nn.Linear(256, 128, bias=True).half()
+        ql = QuantizedLinear2Bit.from_linear(linear, group_size=128, refine_iters=5)
+        x = torch.randn(2, 8, 256, dtype=torch.float16)
+        out_ql = ql(x)
+        w_hat = ql.dequantize_weight()
+        out_ref = F.linear(x, w_hat, ql.bias)
+        torch.testing.assert_close(out_ql, out_ref, rtol=1e-3, atol=1e-3)
+
+    def test_quantized_linear_eval_cache_and_train_invalidation(self):
+        torch.manual_seed(0)
+        linear = nn.Linear(256, 128, bias=True).half()
+        ql = QuantizedLinear2Bit.from_linear(linear, group_size=128)
+        x = torch.randn(1, 4, 256, dtype=torch.float16)
+
+        ql.eval()
+        out1 = ql(x)
+        assert ql._cached_weight is not None
+        out2 = ql(x)
+        torch.testing.assert_close(out1, out2)
+
+        ql.train()
+        assert ql._cached_weight is None  # train mode invalidates cache
+
+    def test_quantized_embedding_matches_reference(self):
+        torch.manual_seed(0)
+        emb = nn.Embedding(64, 256).half()
+        qe = QuantizedEmbedding2Bit.from_embedding(emb, group_size=128, refine_iters=5)
+        ids = torch.randint(0, 64, (2, 8))
+        out_qe = qe(ids)
+        w_hat = qe.dequantize_weight()
+        out_ref = F.embedding(ids, w_hat)
+        torch.testing.assert_close(out_qe, out_ref, rtol=1e-3, atol=1e-3)
+
+    def test_quantize_model_replaces_layers_and_skips_tied_lm_head(self):
+        torch.manual_seed(0)
+        model = _tiny_llama(tie_word_embeddings=True).half()
+        manifest = quantize_model_2bit(model, group_size=32, refine_iters=3)
+
+        assert isinstance(model.model.embed_tokens, QuantizedEmbedding2Bit)
+        assert isinstance(model.model.layers[0].self_attn.q_proj, QuantizedLinear2Bit)
+        assert manifest["tied"] == ["lm_head"]  # tied head is not re-quantized
+        assert manifest["quantization"]["bits"] == 2
+        assert manifest["quantization"]["ternary"] is True
+        assert manifest["quantization"]["refine_iters"] == 3
+
+        ids = torch.randint(0, 128, (2, 8))
+        out = model(input_ids=ids)
+        assert out.logits.shape == (2, 8, 128)
+        assert torch.isfinite(out.logits).all()
+
+    def test_quantize_model_skip_patterns_and_bad_dims(self):
+        torch.manual_seed(0)
+        model = _tiny_llama().half()
+        manifest = quantize_model_2bit(model, group_size=128, skip_patterns=["embed_tokens"])
+        assert "model.embed_tokens" in manifest["skipped"]
+        assert not isinstance(model.model.embed_tokens, QuantizedEmbedding2Bit)
+        # hidden=32 not divisible by 128 -> linear layers skipped
+        assert len(manifest["skipped"]) > 0
+
+    def test_manifest_records_thr_ratio(self):
+        model = _tiny_llama().half()
+        manifest = quantize_model_2bit(model, group_size=32, thr_ratio=0.6)
+        assert manifest["quantization"]["thr_ratio"] == 0.6
+
+    def test_bf16_input_kept_as_bf16(self):
+        weight = torch.randn(4, 128, dtype=torch.bfloat16)
+        _, scales, biases = quantize_2bit_ternary(weight, group_size=128)
+        assert scales.dtype == torch.bfloat16
+        assert biases.dtype == torch.bfloat16
+
+    def test_save_load_roundtrip(self, tmp_path):
+        model = _tiny_llama().half()
+        manifest = quantize_model_2bit(model, group_size=32, refine_iters=2)
+        save_quantized_checkpoint(model, manifest, tmp_path)
+        assert (tmp_path / "model.safetensors").exists()
+        assert (tmp_path / "quantization.json").exists()
+        state = safetensors_load_file(str(tmp_path / "model.safetensors"))
+        assert len(state) > 0
+        import json
+
+        qconf = json.loads((tmp_path / "quantization.json").read_text())
+        assert qconf["quantization"]["bits"] == 2
+        assert qconf["quantization"]["ternary"] is True
