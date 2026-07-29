@@ -1,8 +1,11 @@
 from .affine_1bit import (
     QuantizedEmbedding1Bit,
+    QuantizedEmbedding1BitSign,
     QuantizedLinear1Bit,
+    QuantizedLinear1BitSign,
     dequantize_1bit_affine,
     quantize_1bit_affine,
+    quantize_1bit_sign,
     quantize_model_1bit,
     save_quantized_checkpoint,
 )
@@ -16,9 +19,12 @@ from .affine_2bit import (
 
 __all__ = [
     "QuantizedEmbedding1Bit",
+    "QuantizedEmbedding1BitSign",
     "QuantizedLinear1Bit",
+    "QuantizedLinear1BitSign",
     "dequantize_1bit_affine",
     "quantize_1bit_affine",
+    "quantize_1bit_sign",
     "quantize_model_1bit",
     "save_quantized_checkpoint",
     "QuantizedEmbedding2Bit",

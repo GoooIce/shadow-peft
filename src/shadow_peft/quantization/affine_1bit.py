@@ -96,6 +96,10 @@ def dequantize_1bit_affine(
     Inverse of `quantize_1bit_affine`: unpack `packed [out, in/32]` (int32,
     LSB-first) and broadcast `scale * q + bias` per group. Output dtype follows
     `scales`.
+
+    Also the dequantizer for the sign variant (`quantize_1bit_sign`): both
+    variants share the identical packed-code/scale/bias container, so the same
+    unpacking recovers {-d, +d} when ``scale=2d, bias=-d``.
     """
     out_features, num_words = packed.shape
     in_features = num_words * 32
@@ -105,6 +109,64 @@ def dequantize_1bit_affine(
     q = bits.reshape(out_features, in_features // group_size, group_size).to(scales.dtype)
     w = scales.unsqueeze(-1) * q + biases.unsqueeze(-1)
     return w.reshape(out_features, in_features)
+
+
+def quantize_1bit_sign(
+    weight: torch.Tensor, group_size: int = 128, refine_iters: int = 0
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Quantize a 2D weight ``[out, in]`` to packed 1-bit **sign** form (BitNet /
+    Bonsai GGUF Q1_0 recipe, ``y = bit ? d : -d``).
+
+    Per group of ``group_size`` values along the last dim:
+      d_g = mean(|w|);  t = sign(w)  (0 maps to +1 by torch.sign convention)
+      code bit: 0 -> -d_g,  1 -> +d_g
+      stored as scale = 2*d_g, bias = -d_g  =>  dequant: 2*d_g*q - d_g = {-d_g, +d_g}
+
+    The optimal scale minimizing per-group MSE for a fixed sign assignment is
+    ``d_g = sum(w*sign(w)) / 128 = mean(|w|)``, so it equals the absmean init;
+    ``refine_iters`` re-applies the same closed-form fit each step (it is a
+    fixed point after the first re-threshold) and is accepted purely for API
+    parity with :func:`quantize_1bit_affine`. Output format is bit-identical to
+    the affine variant: 32 codes per int32 word, LSB-first, fp16 scale/bias.
+    """
+    if weight.ndim != 2:
+        raise ValueError(f"weight must be 2D [out, in], got shape {tuple(weight.shape)}")
+    out_features, in_features = weight.shape
+    _check_dims(in_features, group_size)
+    if refine_iters < 0:
+        raise ValueError(f"refine_iters must be >= 0, got {refine_iters}")
+
+    dtype = weight.dtype
+    if dtype not in (torch.float16, torch.bfloat16):
+        weight = weight.to(torch.float16)
+        dtype = weight.dtype
+
+    # Group stats in fp32 so the eps clamp survives (1e-8 underflows fp16).
+    groups = weight.reshape(out_features, in_features // group_size, group_size).float()
+
+    # absmean scale (BitNet / Bonsai Q1_0 `d = mean(|x|)`).
+    d = groups.abs().mean(dim=-1).clamp_min(_EPS)
+
+    if refine_iters > 0:
+        # Closed-form refit: d* = sum(w*sign(w))/group_size = mean(|w|).
+        # Re-derive the sign and the absmean each step; converges in 1 step.
+        for _ in range(refine_iters):
+            t = torch.where(groups >= 0, 1.0, -1.0)
+            d = (groups * t).sum(dim=-1).clamp_min(_EPS) / group_size
+
+    # sign -> bit: positive (+d) -> 1, negative (-d) -> 0.
+    q = (groups >= 0).to(torch.int64)
+
+    q = q.reshape(out_features, in_features // 32, 32)
+    powers = 2 ** torch.arange(32, dtype=torch.int64, device=weight.device)
+    packed = (q * powers).sum(dim=-1)  # values in [0, 2^32)
+    packed = (packed & 0xFFFFFFFF).to(torch.int32)  # wrap to int32 bit pattern
+
+    # Affine params: scale = 2*d, bias = -d  =>  scale*q + bias in {-d, +d}.
+    scales = (2.0 * d).to(dtype)
+    biases = (-d).to(dtype)
+    return packed, scales, biases
 
 
 class QuantizedLinear1Bit(nn.Module):
@@ -259,12 +321,68 @@ class QuantizedEmbedding1Bit(nn.Module):
         )
 
 
+class QuantizedLinear1BitSign(QuantizedLinear1Bit):
+    """
+    Sign variant of :class:`QuantizedLinear1Bit`: same packed-code/scale/bias
+    container, but the weight is binarized as ``sign(w)*mean(|w|)`` (BitNet /
+    Bonsai Q1_0 ``y = bit ? d : -d``), so dequantization yields ``{-d, +d}``.
+    Only the factory differs (calls :func:`quantize_1bit_sign`).
+    """
+
+    @classmethod
+    def from_linear(
+        cls, linear: nn.Linear, group_size: int = 128, refine_iters: int = 0
+    ) -> QuantizedLinear1BitSign:
+        module = cls(
+            linear.in_features,
+            linear.out_features,
+            bias=linear.bias is not None,
+            group_size=group_size,
+        )
+        with torch.no_grad():
+            packed, scales, biases = quantize_1bit_sign(
+                linear.weight.detach(), group_size, refine_iters=refine_iters
+            )
+            module.weight = packed
+            module.scales = scales
+            module.biases = biases
+            if linear.bias is not None:
+                module.bias = nn.Parameter(
+                    linear.bias.detach().clone().to(scales.dtype), requires_grad=False
+                )
+        return module
+
+
+class QuantizedEmbedding1BitSign(QuantizedEmbedding1Bit):
+    """Sign variant of :class:`QuantizedEmbedding1Bit` (see :class:`QuantizedLinear1BitSign`)."""
+
+    @classmethod
+    def from_embedding(
+        cls, embedding: nn.Embedding, group_size: int = 128, refine_iters: int = 0
+    ) -> QuantizedEmbedding1BitSign:
+        module = cls(
+            embedding.num_embeddings,
+            embedding.embedding_dim,
+            padding_idx=embedding.padding_idx,
+            group_size=group_size,
+        )
+        with torch.no_grad():
+            packed, scales, biases = quantize_1bit_sign(
+                embedding.weight.detach(), group_size, refine_iters=refine_iters
+            )
+            module.weight = packed
+            module.scales = scales
+            module.biases = biases
+        return module
+
+
 def quantize_model_1bit(
     model: nn.Module,
     group_size: int = 128,
     skip_patterns: tuple[str, ...] | list[str] = (),
     refine_iters: int = 0,
     trim_vocab_to: int | None = None,
+    variant: str = "affine",
 ) -> dict[str, Any]:
     """
     Replace every `nn.Linear`/`nn.Embedding` in `model` (in place) with its
@@ -276,7 +394,11 @@ def quantize_model_1bit(
     - Layers whose last dim is not divisible by `group_size` are skipped and
       listed under "skipped" with the reason.
     - `refine_iters > 0` enables Lloyd-style scale/bias refinement
-      (see `quantize_1bit_affine`).
+      (see `quantize_1bit_affine` / `quantize_1bit_sign`).
+    - `variant` selects the 1-bit recipe: ``"affine"`` (default, min/max
+      two-level grid, dequant in ``{bias, bias+scale}``) or ``"sign"``
+      (BitNet/Bonsai Q1_0, dequant in ``{-d, +d}``). Both share the identical
+      packed-code/scale/bias container; only the scale/bias semantics differ.
     - `trim_vocab_to` drops dead padding rows (e.g. Qwen3's 151936 -> 151669)
       from `nn.Embedding` tables and any module with "lm_head" in its name
       before quantization. A tied lm_head is re-pointed at the trimmed fp
@@ -286,6 +408,8 @@ def quantize_model_1bit(
       `len(AutoTokenizer)`) — a bare `vocab_size` attribute may exclude
       special tokens and truncate their rows.
     """
+    if variant not in ("affine", "sign"):
+        raise ValueError(f"variant must be 'affine' or 'sign', got {variant!r}")
     if trim_vocab_to is not None and trim_vocab_to < 1:
         raise ValueError(f"trim_vocab_to must be >= 1, got {trim_vocab_to}")
 
@@ -364,13 +488,23 @@ def quantize_model_1bit(
             trimmed[name] = [weight.shape[0], trim_vocab_to]
 
         if isinstance(source, nn.Linear):
-            new_module: nn.Module = QuantizedLinear1Bit.from_linear(
-                source, group_size, refine_iters=refine_iters
-            )
+            if variant == "sign":
+                new_module: nn.Module = QuantizedLinear1BitSign.from_linear(
+                    source, group_size, refine_iters=refine_iters
+                )
+            else:
+                new_module = QuantizedLinear1Bit.from_linear(
+                    source, group_size, refine_iters=refine_iters
+                )
         else:
-            new_module = QuantizedEmbedding1Bit.from_embedding(
-                source, group_size, refine_iters=refine_iters
-            )
+            if variant == "sign":
+                new_module = QuantizedEmbedding1BitSign.from_embedding(
+                    source, group_size, refine_iters=refine_iters
+                )
+            else:
+                new_module = QuantizedEmbedding1Bit.from_embedding(
+                    source, group_size, refine_iters=refine_iters
+                )
         setattr(parent, child_name, new_module)
         replaced_weights.append(weight)
         quantized.append(name)
@@ -388,6 +522,7 @@ def quantize_model_1bit(
         "quantization": {
             "mode": "affine",
             "bits": 1,
+            "variant": variant,
             "group_size": group_size,
             "refine_iters": refine_iters,
             "trim_vocab_to": trim_vocab_to,

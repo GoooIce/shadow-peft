@@ -1,0 +1,306 @@
+{
+  "variants": {
+    "affine1bit": {
+      "variant": "affine1bit",
+      "bits": 1,
+      "group_size": 128,
+      "n_quantized": 197,
+      "header_len": 78104,
+      "file_size": 891476256,
+      "payload_bytes": 891398144,
+      "header_overhead": 78112,
+      "overhead_is_8_plus_header_len": true,
+      "offsets_contiguous": true,
+      "triplets_full": 197,
+      "triplets_partial": 0,
+      "shape_ok": 197,
+      "shape_fail": 0,
+      "shape_fail_examples": [],
+      "bpw_global": {
+        "native_bpw": 1.125,
+        "slot_bpw": 1.125,
+        "mlx_on_disk_bpw": 1.25,
+        "n_layers": 197
+      },
+      "bpw_by_bucket": {
+        "embed_tokens": {
+          "native_bpw": 1.125,
+          "slot_bpw": 1.125,
+          "mlx_on_disk_bpw": 1.25,
+          "n_layers": 1
+        },
+        "mlp.down_proj": {
+          "native_bpw": 1.125,
+          "slot_bpw": 1.125,
+          "mlx_on_disk_bpw": 1.25,
+          "n_layers": 28
+        },
+        "mlp.gate_proj": {
+          "native_bpw": 1.125,
+          "slot_bpw": 1.125,
+          "mlx_on_disk_bpw": 1.25,
+          "n_layers": 28
+        },
+        "mlp.up_proj": {
+          "native_bpw": 1.125,
+          "slot_bpw": 1.125,
+          "mlx_on_disk_bpw": 1.25,
+          "n_layers": 28
+        },
+        "self_attn.k_proj": {
+          "native_bpw": 1.125,
+          "slot_bpw": 1.125,
+          "mlx_on_disk_bpw": 1.25,
+          "n_layers": 28
+        },
+        "self_attn.o_proj": {
+          "native_bpw": 1.125,
+          "slot_bpw": 1.125,
+          "mlx_on_disk_bpw": 1.25,
+          "n_layers": 28
+        },
+        "self_attn.q_proj": {
+          "native_bpw": 1.125,
+          "slot_bpw": 1.125,
+          "mlx_on_disk_bpw": 1.25,
+          "n_layers": 28
+        },
+        "self_attn.v_proj": {
+          "native_bpw": 1.125,
+          "slot_bpw": 1.125,
+          "mlx_on_disk_bpw": 1.25,
+          "n_layers": 28
+        }
+      },
+      "manifest_quantization": {
+        "mode": "affine",
+        "bits": 1,
+        "variant": "affine",
+        "group_size": 128,
+        "refine_iters": 8,
+        "trim_vocab_to": null
+      },
+      "save_dir": "/root/autodl-tmp/shadow-peft/experiment/analysis_container/affine1bit"
+    },
+    "sign1bit": {
+      "variant": "sign1bit",
+      "bits": 1,
+      "group_size": 128,
+      "n_quantized": 197,
+      "header_len": 78104,
+      "file_size": 891476256,
+      "payload_bytes": 891398144,
+      "header_overhead": 78112,
+      "overhead_is_8_plus_header_len": true,
+      "offsets_contiguous": true,
+      "triplets_full": 197,
+      "triplets_partial": 0,
+      "shape_ok": 197,
+      "shape_fail": 0,
+      "shape_fail_examples": [],
+      "bpw_global": {
+        "native_bpw": 1.125,
+        "slot_bpw": 1.125,
+        "mlx_on_disk_bpw": 1.25,
+        "n_layers": 197
+      },
+      "bpw_by_bucket": {
+        "embed_tokens": {
+          "native_bpw": 1.125,
+          "slot_bpw": 1.125,
+          "mlx_on_disk_bpw": 1.25,
+          "n_layers": 1
+        },
+        "mlp.down_proj": {
+          "native_bpw": 1.125,
+          "slot_bpw": 1.125,
+          "mlx_on_disk_bpw": 1.25,
+          "n_layers": 28
+        },
+        "mlp.gate_proj": {
+          "native_bpw": 1.125,
+          "slot_bpw": 1.125,
+          "mlx_on_disk_bpw": 1.25,
+          "n_layers": 28
+        },
+        "mlp.up_proj": {
+          "native_bpw": 1.125,
+          "slot_bpw": 1.125,
+          "mlx_on_disk_bpw": 1.25,
+          "n_layers": 28
+        },
+        "self_attn.k_proj": {
+          "native_bpw": 1.125,
+          "slot_bpw": 1.125,
+          "mlx_on_disk_bpw": 1.25,
+          "n_layers": 28
+        },
+        "self_attn.o_proj": {
+          "native_bpw": 1.125,
+          "slot_bpw": 1.125,
+          "mlx_on_disk_bpw": 1.25,
+          "n_layers": 28
+        },
+        "self_attn.q_proj": {
+          "native_bpw": 1.125,
+          "slot_bpw": 1.125,
+          "mlx_on_disk_bpw": 1.25,
+          "n_layers": 28
+        },
+        "self_attn.v_proj": {
+          "native_bpw": 1.125,
+          "slot_bpw": 1.125,
+          "mlx_on_disk_bpw": 1.25,
+          "n_layers": 28
+        }
+      },
+      "manifest_quantization": {
+        "mode": "affine",
+        "bits": 1,
+        "variant": "sign",
+        "group_size": 128,
+        "refine_iters": 8,
+        "trim_vocab_to": null
+      },
+      "save_dir": "/root/autodl-tmp/shadow-peft/experiment/analysis_container/sign1bit"
+    },
+    "ternary2bit": {
+      "variant": "ternary2bit",
+      "bits": 2,
+      "group_size": 128,
+      "n_quantized": 197,
+      "header_len": 79400,
+      "file_size": 1106533936,
+      "payload_bytes": 1106454528,
+      "header_overhead": 79408,
+      "overhead_is_8_plus_header_len": true,
+      "offsets_contiguous": true,
+      "triplets_full": 197,
+      "triplets_partial": 0,
+      "shape_ok": 197,
+      "shape_fail": 0,
+      "shape_fail_examples": [],
+      "bpw_global": {
+        "native_bpw": 1.7099625007211527,
+        "slot_bpw": 2.125,
+        "mlx_on_disk_bpw": 2.25,
+        "n_layers": 197
+      },
+      "bpw_by_bucket": {
+        "embed_tokens": {
+          "native_bpw": 1.709962500721156,
+          "slot_bpw": 2.125,
+          "mlx_on_disk_bpw": 2.25,
+          "n_layers": 1
+        },
+        "mlp.down_proj": {
+          "native_bpw": 1.709962500721156,
+          "slot_bpw": 2.125,
+          "mlx_on_disk_bpw": 2.25,
+          "n_layers": 28
+        },
+        "mlp.gate_proj": {
+          "native_bpw": 1.709962500721156,
+          "slot_bpw": 2.125,
+          "mlx_on_disk_bpw": 2.25,
+          "n_layers": 28
+        },
+        "mlp.up_proj": {
+          "native_bpw": 1.709962500721156,
+          "slot_bpw": 2.125,
+          "mlx_on_disk_bpw": 2.25,
+          "n_layers": 28
+        },
+        "self_attn.k_proj": {
+          "native_bpw": 1.709962500721155,
+          "slot_bpw": 2.125,
+          "mlx_on_disk_bpw": 2.25,
+          "n_layers": 28
+        },
+        "self_attn.o_proj": {
+          "native_bpw": 1.709962500721155,
+          "slot_bpw": 2.125,
+          "mlx_on_disk_bpw": 2.25,
+          "n_layers": 28
+        },
+        "self_attn.q_proj": {
+          "native_bpw": 1.709962500721155,
+          "slot_bpw": 2.125,
+          "mlx_on_disk_bpw": 2.25,
+          "n_layers": 28
+        },
+        "self_attn.v_proj": {
+          "native_bpw": 1.709962500721155,
+          "slot_bpw": 2.125,
+          "mlx_on_disk_bpw": 2.25,
+          "n_layers": 28
+        }
+      },
+      "manifest_quantization": {
+        "mode": "affine",
+        "bits": 2,
+        "ternary": true,
+        "group_size": 128,
+        "refine_iters": 8,
+        "thr_ratio": 0.5,
+        "trim_vocab_to": null
+      },
+      "save_dir": "/root/autodl-tmp/shadow-peft/experiment/analysis_container/ternary2bit"
+    }
+  },
+  "codebooks": {
+    "affine1bit": {
+      "variant": "affine1bit",
+      "layer": "model.layers.0.self_attn.q_proj",
+      "unique_codes": [
+        0,
+        1
+      ],
+      "scale_first_group": 0.0194549560546875,
+      "bias_first_group": -0.0096435546875,
+      "d_first_group": 0.00972747802734375,
+      "bias_is_neg_d": true,
+      "dequant_levels": [
+        -0.0096435546875,
+        0.0098114013671875
+      ],
+      "levels_are_pm_d": true
+    },
+    "sign1bit": {
+      "variant": "sign1bit",
+      "layer": "model.layers.0.self_attn.q_proj",
+      "unique_codes": [
+        0,
+        1
+      ],
+      "scale_first_group": 0.0194549560546875,
+      "bias_first_group": -0.00972747802734375,
+      "d_first_group": 0.00972747802734375,
+      "bias_is_neg_d": true,
+      "dequant_levels": [
+        -0.00972747802734375,
+        0.00972747802734375
+      ],
+      "levels_are_pm_d": true
+    },
+    "ternary2bit": {
+      "variant": "ternary2bit",
+      "layer": "model.layers.0.self_attn.q_proj",
+      "unique_codes": [
+        0,
+        1,
+        2
+      ],
+      "code3_present": false,
+      "scale_first_group": 0.01340484619140625,
+      "bias_first_group": -0.01340484619140625,
+      "bias_is_neg_scale": true,
+      "dequant_levels": [
+        -0.01340484619140625,
+        0.0,
+        0.01340484619140625
+      ],
+      "levels_are_neg0pos": true
+    }
+  }
+}

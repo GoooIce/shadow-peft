@@ -12,12 +12,15 @@ from transformers import LlamaConfig, LlamaForCausalLM  # noqa: E402
 
 from shadow_peft import (  # noqa: E402
     QuantizedEmbedding1Bit,
+    QuantizedEmbedding1BitSign,
     QuantizedEmbedding2Bit,
     QuantizedLinear1Bit,
+    QuantizedLinear1BitSign,
     QuantizedLinear2Bit,
     dequantize_1bit_affine,
     dequantize_2bit_ternary,
     quantize_1bit_affine,
+    quantize_1bit_sign,
     quantize_2bit_ternary,
     quantize_model_1bit,
     quantize_model_2bit,
@@ -172,6 +175,7 @@ def test_quantize_model_replaces_layers_and_skips_tied_lm_head():
     assert manifest["quantization"] == {
         "mode": "affine",
         "bits": 1,
+        "variant": "affine",
         "group_size": 32,
         "refine_iters": 0,
         "trim_vocab_to": None,
@@ -518,3 +522,126 @@ class TestQuantize2BitTernary:
         qconf = json.loads((tmp_path / "quantization.json").read_text())
         assert qconf["quantization"]["bits"] == 2
         assert qconf["quantization"]["ternary"] is True
+
+
+class TestQuantize1BitSign:
+    """Tests for the sign 1-bit ({-d, +d}, BitNet/Bonsai Q1_0) variant."""
+
+    def test_packed_shapes_and_dtypes(self):
+        torch.manual_seed(0)
+        weight = torch.randn(8, 256, dtype=torch.float16)
+        packed, scales, biases = quantize_1bit_sign(weight, group_size=128)
+        assert packed.shape == (8, 8)  # 256 / 32 bits per word
+        assert packed.dtype == torch.int32
+        assert scales.shape == (8, 2)  # 256 / 128
+        assert biases.shape == (8, 2)
+        assert scales.dtype == torch.float16
+        assert biases.dtype == torch.float16
+
+    def test_bias_is_negative_half_scale(self):
+        """Sign container: bias must equal -scale/2 (dequant = {-d, +d})."""
+        torch.manual_seed(0)
+        weight = torch.randn(4, 128, dtype=torch.float16)
+        _, scales, biases = quantize_1bit_sign(weight, group_size=128)
+        torch.testing.assert_close(
+            biases.float(), -scales.float() / 2, rtol=0, atol=1e-3
+        )
+
+    def test_dequant_values_are_symmetric_sign(self):
+        """Each group's dequantized values must be exactly {-d_g, +d_g}."""
+        torch.manual_seed(0)
+        weight = torch.randn(8, 256, dtype=torch.float16)
+        packed, scales, biases = quantize_1bit_sign(weight, group_size=128)
+        w_hat = dequantize_1bit_affine(packed, scales, biases, group_size=128)
+        for g in range(2):
+            d_g = scales[0, g].item() / 2
+            group_vals = w_hat[0, g * 128 : (g + 1) * 128].float()
+            for v in group_vals.unique():
+                assert any(abs(v.item() - t) < 1e-3 for t in (-d_g, d_g))
+
+    def test_sign_matches_sign_weight(self):
+        """Dequantized value must equal mean(|w|) * sign(w) per group."""
+        torch.manual_seed(0)
+        weight = torch.randn(4, 128, dtype=torch.float16)
+        packed, scales, biases = quantize_1bit_sign(weight, group_size=128)
+        w_hat = dequantize_1bit_affine(packed, scales, biases, group_size=128)
+        d_g = weight.float().abs().mean(dim=-1, keepdim=True)
+        expected = d_g * torch.sign(weight.float())
+        torch.testing.assert_close(w_hat.float(), expected, rtol=0, atol=1e-2)
+
+    def test_refine_reduces_mse_and_is_monotone(self):
+        # Sign's optimal d is mean(|w|), reached at iters>=1; refine must not
+        # raise MSE. iters=0 vs >=1 are identical here for gaussian weights,
+        # so we assert non-increasing (allowing equality at the fixed point).
+        torch.manual_seed(0)
+        weight = torch.randn(8, 512, dtype=torch.float16)
+        mses = []
+        for iters in range(4):
+            packed, scales, biases = quantize_1bit_sign(
+                weight, group_size=128, refine_iters=iters
+            )
+            w_hat = dequantize_1bit_affine(packed, scales, biases, group_size=128)
+            mses.append(((weight.float() - w_hat.float()) ** 2).mean().item())
+        for i in range(1, len(mses)):
+            assert mses[i] <= mses[i - 1] + 1e-7
+
+    def test_quantize_rejects_bad_dims(self):
+        with pytest.raises(ValueError):
+            quantize_1bit_sign(torch.randn(4, 64, dtype=torch.float16), group_size=128)
+        with pytest.raises(ValueError):
+            quantize_1bit_sign(torch.randn(4, 3, dtype=torch.float16), group_size=32)  # noqa: PT012
+
+    def test_refine_rejects_negative_iters(self):
+        with pytest.raises(ValueError):
+            quantize_1bit_sign(
+                torch.randn(4, 128, dtype=torch.float16), group_size=128, refine_iters=-1
+            )  # noqa: PT012
+
+    def test_quantized_linear_sign_matches_dequantized_reference(self):
+        torch.manual_seed(0)
+        linear = nn.Linear(128, 64, bias=True).half()
+        ql = QuantizedLinear1BitSign.from_linear(linear, group_size=128, refine_iters=2)
+        x = torch.randn(3, 5, 128, dtype=torch.float16)
+        ref = F.linear(x, ql.dequantize_weight(), ql.bias)
+        torch.testing.assert_close(ql(x), ref, rtol=0, atol=0)
+
+    def test_quantized_embedding_sign_matches_reference(self):
+        torch.manual_seed(0)
+        emb = nn.Embedding(10, 128).half()
+        qe = QuantizedEmbedding1BitSign.from_embedding(emb, group_size=128)
+        idx = torch.randint(0, 10, (2, 3))
+        weight = dequantize_1bit_affine(qe.weight, qe.scales, qe.biases, qe.group_size)
+        torch.testing.assert_close(qe(idx), F.embedding(idx, weight), rtol=0, atol=0)
+
+    def test_model_variant_sign_in_manifest(self):
+        model = _tiny_llama().half()
+        manifest = quantize_model_1bit(model, group_size=32, variant="sign")
+        assert manifest["quantization"]["variant"] == "sign"
+        # The sign modules must actually be installed.
+        from shadow_peft import QuantizedLinear1BitSign
+
+        assert isinstance(model.model.layers[0].self_attn.q_proj, QuantizedLinear1BitSign)
+
+    def test_model_default_variant_is_affine(self):
+        model = _tiny_llama().half()
+        manifest = quantize_model_1bit(model, group_size=32)
+        assert manifest["quantization"]["variant"] == "affine"
+
+    def test_model_rejects_bad_variant(self):
+        model = _tiny_llama().half()
+        with pytest.raises(ValueError):
+            quantize_model_1bit(model, group_size=32, variant="ternary")  # noqa: PT012
+
+    def test_save_load_roundtrip(self, tmp_path):
+        model = _tiny_llama().half()
+        manifest = quantize_model_1bit(model, group_size=32, variant="sign", refine_iters=2)
+        save_quantized_checkpoint(model, manifest, tmp_path)
+        assert (tmp_path / "model.safetensors").exists()
+        assert (tmp_path / "quantization.json").exists()
+        state = safetensors_load_file(str(tmp_path / "model.safetensors"))
+        assert len(state) > 0
+        import json
+
+        qconf = json.loads((tmp_path / "quantization.json").read_text())
+        assert qconf["quantization"]["bits"] == 1
+        assert qconf["quantization"]["variant"] == "sign"
