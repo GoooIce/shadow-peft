@@ -219,3 +219,8 @@ Bonsai-demo/
 experiment/data/
 experiment/runs/
 experiment/runs_5M/
+
+# Local converted model checkpoints
+gemma-4-12b-it-mlx-2bit/
+gemma-4-12b-it-torch-1bit/
+gemma-4-12b-it-torch-2bit/

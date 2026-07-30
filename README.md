@@ -101,7 +101,7 @@ uv pip install -e .
 uv pip install -e ".[dev]"
 ```
 
-**Requirements:** Python ≥ 3.10, PyTorch ≥ 2.1, Transformers > 5.0
+**Requirements:** Python ≥ 3.10, PyTorch ≥ 2.1, Transformers ≥ 5.10.1 and < 6
 
 ---
 
@@ -555,6 +555,96 @@ trainer.train()
 # Save only the adapter
 model.save_pretrained("./shadow-checkpoint")
 ```
+
+---
+
+## Bonsai-style binary 1-bit quantization
+
+The package supports the published Bonsai/Q1_0 binary-g128 container: each
+group represents two symmetric levels `{-d, +d}` with 128 sign bits and one
+FP16 magnitude; bits are packed LSB-first, while the MLX affine container
+stores `scale=2d` and `bias=-d`. To project a dense weight into that
+representation, this implementation uses an FP32-view deterministic local-MSE rule
+`bit=(w>=0), d=mean(abs(w))`. It does not reproduce Prism ML's unpublished
+migration/training solver.
+
+```python
+from shadow_peft import quantize_model_1bit
+
+manifest = quantize_model_1bit(model, method="bonsai")
+# Torch defaults: g128, refine_iters=0, tied heads become independent triplets
+```
+
+To convert the local Gemma 4 12B snapshot without creating any MLX output:
+
+```bash
+python experiment/convert_gemma4_to_1bit.py \
+  --torch-only \
+  --model /path/to/gemma-4-12B-it \
+  --out-torch ./gemma-4-12b-it-torch-1bit
+```
+
+The Torch checkpoint uses project-specific packed modules, so load it with the
+Shadow PEFT loader rather than vanilla Transformers `from_pretrained()`:
+
+```python
+from shadow_peft import load_quantized_checkpoint_1bit
+
+model = load_quantized_checkpoint_1bit("./gemma-4-12b-it-torch-1bit")
+```
+
+The loader creates the Transformers architecture on the meta device, rebuilds
+the quantized modules from the manifest, and strictly assigns the packed state
+without materializing the original dense model. It also restores Gemma 4's
+scaled-embedding and non-persistent RoPE semantics.
+
+The sign/absmean projection is already the least-squares fixed point for a
+fixed binary assignment, so it does not need the eight refinement iterations
+used by the ternary surrogate. Legacy calls without `method="bonsai"` keep the
+existing affine behavior. `variant="sign"` uses the same projection but keeps
+the legacy tied-weight default, which skips the duplicate head.
+
+For MLX-style export:
+
+```python
+from shadow_peft_mlx import save_1bit_mlx_checkpoint
+
+save_1bit_mlx_checkpoint(model, config, manifest, "./model-mlx-1bit")
+```
+
+The exporter requires a complete Bonsai/sign manifest, rejects unlisted,
+incomplete, or asymmetric triplets, writes packed weights as U32, and casts
+floating tensors to F16. For recognized tied pairs it keeps the token
+embedding and removes the output-head copy regardless of registration order;
+set `deduplicate_tied_weights=False` for a different runtime contract. This
+matches the observed 1-bit tensor/layout contract. Executing it still requires
+an MLX build with `bits=1` affine-kernel support, such as the Prism ML fork.
+Torch reference packing accepts group sizes that are multiples of 32; MLX
+export/runtime is restricted to 32, 64, or 128, and only 128 is the published
+Bonsai-g128 contract. See the
+[1-bit implementation report](bonsai-1bit-implementation-report.md) for the
+evidence and implementation boundary.
+
+---
+
+## Bonsai-style ternary 2-bit quantization
+
+The torch package includes the reproducible ternary-g128 surrogate described in
+`deep-research-report.md`: weights are grouped along the input dimension, projected to
+`{-1, 0, +1}`, and packed into MLX-compatible 2-bit affine slots (`scale=s`,
+`bias=-s`, codes `0/1/2`; code `3` is unused).
+
+```python
+from shadow_peft import quantize_model_2bit
+
+manifest = quantize_model_2bit(model, method="bonsai")
+# Defaults: group_size=128, refine_iters=8, thr_ratio=0.5
+```
+
+This implements the report's deterministic absmean/threshold/least-squares baseline and
+the published checkpoint representation. Prism ML's proprietary migration/training
+solver is not public, so this is intentionally described as Bonsai-style rather than an
+exact reproduction of that solver.
 
 ---
 

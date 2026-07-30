@@ -61,7 +61,9 @@ flowchart TD
 
 这条还原链路背后的核心证据有四条。第一，模型卡直接把语言模型表示定义为 **“Ternary g128: {−1,0,+1} weights with FP16 group-wise scaling”**，并给出理想位宽 1.71 bpw 与当前 2-bit slot 部署位宽 2.125 bpw。第二，配置明确写出 `group_size=128, bits=2`。第三，索引文件把主要语言线性层全部组织成 `weight/scales/biases` 三元组，这与 MLX grouped affine quantization 的张量组织方式完全一致。第四，MLX 官方文档说明 `quantized_matmul` / `dequantize` 都是“packed unsigned 32-bit integers + per-group scale and bias”的 grouped affine 接口，而 Bonsai 模型卡又明确说它是通过 `s_mlx = 2·s_g` 与 `bias = -s_g` 把**原生只含 scale 的 ternary 表示**嵌入到 MLX 容器中。
 
-> **⚠️ 修正注记（2026-07-29 实验验证）**：上述 `s_mlx = 2·s_g, bias = -s_g` 的映射对于三元 {-1,0,+1} 三个电平是**数学上不可能的**。穷举验证表明，在 2-bit affine 容器（code 0–3，dequant = scale·q + bias）中表达三值 {-s_g, 0, +s_g} 的唯一有效映射是 **`scale = s_g, bias = -s_g, codes {0,1,2}`**（code 0→-s_g, code 1→0, code 2→+s_g, code 3 不用）。`s_mlx = 2·s_g` 只能产生两个电平 {-s_g, +s_g}（即二值 ±d），无法表示三元中的 0。详见 `src/shadow_peft/quantization/affine_2bit.py` 的实现与 `tests/test_quantization.py::TestQuantize2BitTernary` 的验证。报告其余关于格式、容器、张量组织的结论不受此修正影响。citeturn13view1turn5view0turn14view0turn25view0turn25view1
+> **⚠️ 修正注记（2026-07-29 实验验证，已用真实 Bonsai 数据证实）**：上述 `s_mlx = 2·s_g, bias = -s_g` 的映射对于三元 {-1,0,+1} 三个电平是**数学上不可能的**。穷举验证表明，在 2-bit affine 容器（code 0–3，dequant = scale·q + bias）中表达三值 {-s_g, 0, +s_g} 的唯一有效映射是 **`scale = s_g, bias = -s_g, codes {0,1,2}`**（code 0→-s_g, code 1→0, code 2→+s_g, code 3 不用）。`s_mlx = 2·s_g` 只能产生两个电平 {-s_g, +s_g}（即二值 ±d），无法表示三元中的 0。详见 `src/shadow_peft/quantization/affine_2bit.py` 的实现与 `tests/test_quantization.py::TestQuantize2BitTernary` 的验证。报告其余关于格式、容器、张量组织的结论不受此修正影响。
+
+> **✅ 真实数据证实（2026-07-29）**：上述修正注记已从「数学穷举推断」升级为「直接证实」。下载真实的 `prism-ml/Ternary-Bonsai-27B-mlx-2bit`（packed）与 `prism-ml/Ternary-Bonsai-27B-unpacked`（FP16 基准），对全部 **498 个量化三元组逐层比对**：dequantized packed 权重与 unpacked FP16 权重的 **MSE 中位数 = 0、cosine = 1.000000**（bit-exact 一致，仅 embed_tokens 有 2.88e-20 级 fp16 舍入噪声）。对 6 个不同类型小层（embed_tokens / in_proj_a / in_proj_b / out_proj / k_proj / lm_head）穷举全部 24 种 code→ternary 映射，**最优映射全部为 `[-1,0,1,0]`（MSE=0）**，证实 code 3 在真实数据中确实未被使用，`scale=s_g, bias=-s_g` 是唯一解。复现脚本与产物见 `experiment/analyze_bonsai_vs_unpacked.py` 与 `experiment/analysis_bonsai_vs_unpacked/REPORT.md`。citeturn13view1turn5view0turn14view0turn25view0turn25view1
 
 因此，对用户最重要的结论是：**这个仓库里的“2bit”本质上是一个“ternary-like、group-wise、weight-only、runtime-packed、MLX-containerized”的表示。** 它不是标准 GPTQ int2，不是 AWQ int2，也不是 HQQ int2，更不是常规对称 int2 的“scale + zero_point”导出。真正被仓库公开出来的，是**结果格式**与**runtime 可消费的数据结构**，而不是完整训练配方。citeturn13view1turn24view0turn32view0
 
@@ -290,7 +292,7 @@ def dequantize_ternary_native(q: np.ndarray, s: np.ndarray, group_size: int = 12
 
 根据模型卡，Bonsai 原生表示是“每组只有 scale，没有 bias”；落到 MLX 时，为了适配 grouped affine quantization，会增加一个 bias。公开材料给出了转换关系 `s_mlx = 2·s_g`、`bias = -s_g`，但**没有公开 MLX 内部 2-bit codebook 与 ternary 值的一一映射**。因此，最严谨的做法是：
 
-> **⚠️ 修正注记（2026-07-29）**：`s_mlx = 2·s_g` 对于三元是错误的（见上文 §量化流程还原的修正注记）。正确映射为 `scale = s_g, bias = -s_g`，codes {0,1,2} → {-s_g, 0, +s_g}。此结论已通过穷举验证并在 `affine_2bit.py` 中实现，因此下面的 brute-force codebook 搜索**不再必要**——默认映射 `ternary_012` 已是唯一解。
+> **⚠️ 修正注记（2026-07-29）**：`s_mlx = 2·s_g` 对于三元是错误的（见上文 §量化流程还原的修正注记）。正确映射为 `scale = s_g, bias = -s_g`，codes {0,1,2} → {-s_g, 0, +s_g}。此结论已通过穷举验证并在 `affine_2bit.py` 中实现，因此下面的 brute-force codebook 搜索**不再必要**——默认映射 `ternary_012` 已是唯一解。**真实数据复核（2026-07-29）**：已下载真实 packed + unpacked 仓库并执行该 brute-force（`experiment/analyze_bonsai_vs_unpacked.py`），6 个小层的最优映射全部为 `[-1,0,1,0]`（MSE=0），与默认映射 `ternary_012` 完全一致，code 3 确实未被使用。
 
 - 若只想跑推理或还原浮点权重：用 `mx.dequantize`。  
 - 若想恢复“原生 ternary codebook”：本地对照 unpacked 权重做映射搜索。  
@@ -438,6 +440,6 @@ print("unpacked shape:", w_ref.shape, w_ref.dtype)
 | 视觉塔如何在单文件中表示 HQQ 4-bit | 中低 | 需本地 header 读取确认 |
 | 官方求解器是 PTQ、QAT 还是蒸馏重构 | 中低 | 公开材料未披露 |
 
-改进建议也分成两类。一类是**对反向工程者**：优先下载 unpacked 仓库，把每个量化层的 dequantized 结果与 unpacked 同名层逐层比对；并对一个小层做 codeword brute-force 搜索，这能一次性解开“MLX 2-bit slot 到 ternary codebook”的具体映射。另一类是**如果 PrismML 未来要增强可审计性**：建议公开至少三项内容——一份最小化量化导出脚本、一份 safetensors 元数据样例、以及一个说明“视觉塔在 MLX 单文件中的 HQQ 打包方式”的技术说明。这样就能把当前很多“高可信推断”升级为“直接证实”。citeturn32view0turn30view0turn13view1
+改进建议也分成两类。一类是**对反向工程者**：优先下载 unpacked 仓库，把每个量化层的 dequantized 结果与 unpacked 同名层逐层比对；并对一个小层做 codeword brute-force 搜索，这能一次性解开“MLX 2-bit slot 到 ternary codebook”的具体映射。 **【✅ 已于 2026-07-29 完成】**该建议已完整执行：下载 `Ternary-Bonsai-27B-mlx-2bit`（packed）+ `Ternary-Bonsai-27B-unpacked`（FP16），498 层逐层比对 MSE 中位数 = 0、cosine = 1.0；6 个小层 brute-force 最优映射全部为 `[-1,0,1,0]`（MSE=0），codebook 映射已一次性解开并坐实。详见 `experiment/analysis_bonsai_vs_unpacked/REPORT.md`。另一类是**如果 PrismML 未来要增强可审计性**：建议公开至少三项内容——一份最小化量化导出脚本、一份 safetensors 元数据样例、以及一个说明“视觉塔在 MLX 单文件中的 HQQ 打包方式”的技术说明。这样就能把当前很多“高可信推断”升级为“直接证实”。citeturn32view0turn30view0turn13view1
 
 综合而言，本报告的最终结论可以压缩成一句话：**`prism-ml/Ternary-Bonsai-27B-mlx-2bit` 的“2bit”不是普通 int2，而是 Bonsai 的 ternary g128 语言权重通过 MLX grouped affine quantization 容器落盘后的结果；主干线性层采用 128 分组、组级 scale、MLX 容器级 bias、packed uint32 权重；runtime 直接消费 packed weights，不先展开回 FP16；训练/量化求解器未公开，但公开证据足以重建其文件格式、反量化路径与主要工程语义。**citeturn13view1turn14view0turn24view0turn25view0turn25view1turn33view0

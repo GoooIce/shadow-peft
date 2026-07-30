@@ -19,6 +19,7 @@ from mlx.utils import tree_flatten  # noqa: E402
 from shadow_peft_mlx import (  # noqa: E402
     ShadowForCausalLM,
     get_shadow_model,
+    pack_1bit_bonsai,
     pack_1bit_refined,
     quantize_model_1bit,
 )
@@ -192,6 +193,38 @@ def test_pack_1bit_refined_constant_group():
     deq = mx.dequantize(p, s, b, group_size=128, bits=1)
     assert mx.isfinite(deq).all().item()
     assert mx.abs(deq - 0.5).max().item() < 1e-3
+
+
+def test_pack_1bit_bonsai_is_symmetric_and_lsb_packed():
+    values = mx.array(
+        [[-1.0 if index % 3 == 0 else 1.0 for index in range(128)]],
+        dtype=mx.float16,
+    )
+    packed, scales, biases = pack_1bit_bonsai(values, group_size=128)
+    restored = mx.dequantize(packed, scales, biases, group_size=128, bits=1)
+    mx.eval(packed, scales, biases, restored)
+
+    expected_word = sum(
+        (int(index % 3 != 0) << index) for index in range(32)
+    )
+    assert int(packed[0, 0].item()) == expected_word
+    assert mx.max(mx.abs(biases + scales / 2)).item() == 0
+    assert mx.all(mx.sign(restored) == mx.sign(values)).item()
+
+
+def test_quantize_model_1bit_bonsai_integration(llama_128):
+    manifest = quantize_model_1bit(
+        llama_128,
+        group_size=GROUP_SIZE,
+        method="bonsai",
+    )
+    q_proj = llama_128.model.layers[0].self_attn.q_proj
+    assert manifest["quantization"]["method"] == "bonsai"
+    assert manifest["quantization"]["variant"] == "sign"
+    assert mx.max(mx.abs(q_proj.biases + q_proj.scales / 2)).item() == 0
+
+    logits = llama_128(mx.array([[1, 5, 7, 9, 3]]))
+    assert mx.isfinite(logits).all().item()
 
 
 def test_quantize_model_1bit_refine_integration(llama_128):

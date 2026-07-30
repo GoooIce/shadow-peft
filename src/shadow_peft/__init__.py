@@ -13,11 +13,15 @@ from .quantization import (
     QuantizedLinear2Bit,
     dequantize_1bit_affine,
     dequantize_2bit_ternary,
+    load_quantized_checkpoint_1bit,
     quantize_1bit_affine,
+    quantize_1bit_bonsai,
     quantize_1bit_sign,
+    quantize_2bit_bonsai,
     quantize_2bit_ternary,
     quantize_model_1bit,
     quantize_model_2bit,
+    rebuild_quantized_model_1bit,
     save_quantized_checkpoint,
 )
 from .task_models import ShadowForCausalLM, ShadowForSequenceClassification
@@ -39,12 +43,16 @@ __all__ = [
     "dequantize_1bit_affine",
     "dequantize_2bit_ternary",
     "get_shadow_model",
+    "load_quantized_checkpoint_1bit",
     "prepare_shadow_model",
     "quantize_1bit_affine",
+    "quantize_1bit_bonsai",
     "quantize_1bit_sign",
+    "quantize_2bit_bonsai",
     "quantize_2bit_ternary",
     "quantize_model_1bit",
     "quantize_model_2bit",
+    "rebuild_quantized_model_1bit",
     "save_quantized_checkpoint",
 ]
 

@@ -22,6 +22,13 @@ import mlx.nn as nn
 _1BIT_PR_URL = "https://github.com/ml-explore/mlx/pull/3161"
 
 
+def _check_group_size(group_size: int) -> None:
+    if group_size not in (32, 64, 128):
+        raise ValueError(
+            f"MLX group_size must be one of 32, 64, or 128, got {group_size}"
+        )
+
+
 def ensure_1bit_support() -> None:
     """Raise a RuntimeError unless the installed MLX supports ``bits=1``."""
     probe = mx.zeros((1, 128), dtype=mx.float16)
@@ -57,6 +64,7 @@ def pack_1bit_refined(
     Returns ``(packed uint32 [..., K/32], scales fp16, biases fp16)``, exactly
     the layout consumed by ``mx.dequantize`` / ``mx.quantized_matmul``.
     """
+    _check_group_size(group_size)
     if iters < 0:
         raise ValueError(f"iters must be >= 0, got {iters}")
     if weight.ndim != 2 or weight.shape[-1] % group_size != 0:
@@ -102,16 +110,50 @@ def pack_1bit_refined(
     )
 
 
+def pack_1bit_bonsai(
+    weight: mx.array,
+    group_size: int = 128,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Pack the deterministic Bonsai/Q1_0 binary surrogate for MLX.
+
+    Each group uses d=mean(abs(w)), bit 0/1 for -d/+d, and the MLX affine
+    representation scale=2d, bias=-d. Codes are packed 32 per U32 word,
+    LSB-first. This is format-compatible with published Bonsai checkpoints,
+    not a reproduction of the unpublished training solver.
+    """
+    _check_group_size(group_size)
+    if weight.ndim != 2 or weight.shape[-1] % group_size != 0:
+        raise ValueError(
+            f"weight must be [out, K] with K % {group_size} == 0, "
+            f"got {tuple(weight.shape)}"
+        )
+
+    w = weight.astype(mx.float32)
+    out_features, k = w.shape
+    groups = w.reshape(out_features, k // group_size, group_size)
+    d = mx.mean(mx.abs(groups), axis=-1)
+    bits = groups >= 0
+
+    words = bits.reshape(out_features, k // 32, 32).astype(mx.uint32)
+    packed = (words * (2 ** mx.arange(32, dtype=mx.uint32))).sum(axis=-1)
+    packed = packed.astype(mx.uint32)
+    scales = (2 * d).astype(mx.float16)
+    biases = (-scales / 2).astype(mx.float16)
+    return packed, scales, biases
+
+
 def quantize_model_1bit(
     model: nn.Module,
     group_size: int = 128,
     skip_patterns: tuple[str, ...] = (),
     refine_iters: int = 0,
     trim_vocab_to: int | None = None,
+    *,
+    method: str | None = None,
 ) -> dict:
     """
     Quantize every eligible ``nn.Linear`` / ``nn.Embedding`` of ``model`` to
-    1-bit affine, in place.
+    1-bit affine or Bonsai-style binary form, in place.
 
     Args:
         model: The model to quantize.
@@ -121,7 +163,8 @@ def quantize_model_1bit(
             substrings are left untouched.
         refine_iters: If > 0, repack every quantized weight with
             :func:`pack_1bit_refined` (Lloyd-style optimized scale/bias/bits),
-            recovering accuracy at zero inference cost.
+            recovering accuracy at zero inference cost in affine mode. Bonsai
+            sign/absmean is already a closed-form fixed point.
         trim_vocab_to: Drop dead padding rows (e.g. Qwen3's 151936 -> 151669)
             from ``nn.Embedding`` tables and any module with "lm_head" in its
             path before quantization. With tied lm_head (mlx-lm reads logits
@@ -143,9 +186,15 @@ def quantize_model_1bit(
               "trimmed": {module path: [orig_rows, new_rows]},
             }
     """
-    ensure_1bit_support()
+    _check_group_size(group_size)
+    if refine_iters < 0:
+        raise ValueError(f"refine_iters must be >= 0, got {refine_iters}")
+    if method not in (None, "affine", "bonsai"):
+        raise ValueError(f"method must be 'affine' or 'bonsai', got {method!r}")
     if trim_vocab_to is not None and trim_vocab_to < 1:
         raise ValueError(f"trim_vocab_to must be >= 1, got {trim_vocab_to}")
+    resolved_method = method or "affine"
+    ensure_1bit_support()
 
     manifest: dict = {
         "quantization": {
@@ -199,15 +248,25 @@ def quantize_model_1bit(
         if args is not None and getattr(args, "vocab_size", 0) > trim_vocab_to:
             args.vocab_size = trim_vocab_to
 
-    if refine_iters > 0:
+    if resolved_method == "bonsai" or refine_iters > 0:
         for path, module in model.named_modules():
             if path not in originals:
                 continue
-            packed, scales, biases = pack_1bit_refined(
-                originals[path], group_size=group_size, iters=refine_iters
-            )
+            if resolved_method == "bonsai":
+                packed, scales, biases = pack_1bit_bonsai(
+                    originals[path], group_size=group_size
+                )
+            else:
+                packed, scales, biases = pack_1bit_refined(
+                    originals[path], group_size=group_size, iters=refine_iters
+                )
             module.weight, module.scales, module.biases = packed, scales, biases
         mx.eval(model.parameters())
         originals.clear()
+
+    if method is not None:
+        manifest["quantization"]["method"] = resolved_method
+        if resolved_method == "bonsai":
+            manifest["quantization"]["variant"] = "sign"
 
     return manifest

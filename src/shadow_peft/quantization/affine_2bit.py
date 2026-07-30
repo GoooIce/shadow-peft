@@ -2,13 +2,17 @@
 Ternary 2-bit affine quantization: weights are projected to ``{-1, 0, +1}``
 with a per-group scale, then packed into 2-bit slots.
 
-This mirrors ``affine_1bit.py`` but targets 3 levels instead of 2, following
-the BitNet b1.58 / Bonsai ternary g128 recipe (arXiv:2504.12285):
+This mirrors ``affine_1bit.py`` but targets 3 levels instead of 2.  Two
+projection entry points are provided:
 
-  - Per group of ``group_size`` weights: ``s_g = mean(|w|)``, then
+  - :func:`quantize_2bit_ternary` is the original configurable baseline.  Per
+    group of ``group_size`` weights, ``s_g = mean(|w|)``, then
     ``t_i = 0`` if ``|w_i| < thr_ratio * s_g`` else ``sign(w_i)``.
-  - Least-squares refit of ``s_g = sum(w*t) / sum(t*t)`` (BitNet absmean
-    init, then Lloyd-style alternation when ``refine_iters > 0``).
+  - :func:`quantize_2bit_bonsai` is the reproducible Bonsai-style surrogate
+    from ``deep-research-report.md``: g128, absmean initialization, strict
+    threshold assignment, and eight group-wise least-squares updates by
+    default.  Prism ML's proprietary migration/training solver is not public;
+    this function reproduces the published representation, not that solver.
 
 Code/affine mapping (the only valid one for 3 ternary levels in a 4-level
 2-bit affine grid)::
@@ -17,7 +21,7 @@ Code/affine mapping (the only valid one for 3 ternary levels in a 4-level
       -1  -->  0  --> -s_g
        0  -->  1  -->  0
       +1  -->  2  --> +s_g
-               3  --> unused (safety-clamped to 2)
+               3  --> unused (would dequantize to +2*s_g)
 
 Bits are packed 16 per word, LSB-first (weight j occupies bits 2*(j%16)
 and 2*(j%16)+1), stored as int32 bit patterns. Returns
@@ -37,9 +41,13 @@ import torch.nn.functional as F
 _EPS = 1e-8
 
 
-def _check_dims(in_features: int, group_size: int) -> None:
+def _check_group_size(group_size: int) -> None:
     if group_size < 16 or group_size % 16 != 0:
         raise ValueError(f"group_size must be a positive multiple of 16, got {group_size}")
+
+
+def _check_dims(in_features: int, group_size: int) -> None:
+    _check_group_size(group_size)
     if in_features % group_size != 0:
         raise ValueError(
             f"in_features ({in_features}) must be divisible by group_size ({group_size})"
@@ -119,6 +127,94 @@ def quantize_2bit_ternary(
     return packed, scales.to(dtype), biases
 
 
+def quantize_2bit_bonsai(
+    weight: torch.Tensor,
+    group_size: int = 128,
+    refine_iters: int = 8,
+    thr_ratio: float = 0.5,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Quantize ``weight [out, in]`` with the report's Bonsai-style surrogate.
+
+    Each group is initialized with ``mean(abs(w))``.  A refinement iteration
+    assigns strict ternary levels at ``+-thr_ratio * scale`` (values exactly on
+    the boundary remain zero), then least-squares refits the scale::
+
+        q_i = -1 if w_i < -thr_ratio*s else 1 if w_i > thr_ratio*s else 0
+        s   = abs(sum(w_i*q_i) / max(sum(q_i*q_i), 1))
+
+    The returned MLX-affine representation uses codes ``{0,1,2}`` for ternary
+    ``{-1,0,+1}``, ``scale=s`` and ``bias=-s``; code 3 is never emitted.  Codes
+    are packed 16 per int32 word, least-significant code first.
+
+    ``group_size=128``, ``refine_iters=8`` and ``thr_ratio=0.5`` are the report
+    defaults.  Other group sizes remain available for small-model tests and
+    experiments, but are not Bonsai g128 checkpoint compatible.
+
+    This is a format-compatible, deterministic baseline.  It must not be
+    interpreted as a reproduction of Prism ML's unpublished optimization or
+    training procedure.
+    """
+    if weight.ndim != 2:
+        raise ValueError(f"weight must be 2D [out, in], got shape {tuple(weight.shape)}")
+    out_features, in_features = weight.shape
+    _check_dims(in_features, group_size)
+    if refine_iters < 0:
+        raise ValueError(f"refine_iters must be >= 0, got {refine_iters}")
+    if not 0.0 < thr_ratio <= 1.0:
+        raise ValueError(f"thr_ratio must be in (0, 1], got {thr_ratio}")
+
+    dtype = weight.dtype
+    if dtype not in (torch.float16, torch.bfloat16):
+        weight = weight.to(torch.float16)
+        dtype = weight.dtype
+
+    groups = weight.reshape(out_features, in_features // group_size, group_size).float()
+
+    scales = groups.abs().mean(dim=-1).clamp_min(_EPS)
+
+    def assign(current_scales: torch.Tensor) -> torch.Tensor:
+        threshold = thr_ratio * current_scales.unsqueeze(-1)
+        # Strict comparisons are intentional: values exactly at either
+        # threshold belong to the zero level, matching the report pseudocode.
+        return torch.where(
+            groups > threshold,
+            torch.ones_like(groups),
+            torch.where(groups < -threshold, -torch.ones_like(groups), 0.0),
+        )
+
+    # refine_iters=0 is a useful no-refit baseline.  For N>0 this is exactly N
+    # assignment -> least-squares steps; the returned scale is fitted to the
+    # returned assignment rather than to a subsequently changed assignment.
+    ternary = assign(scales)
+    for iteration in range(refine_iters):
+        denom = (ternary * ternary).sum(dim=-1).clamp_min(1.0)
+        scales = ((groups * ternary).sum(dim=-1) / denom).abs().clamp_min(_EPS)
+        if iteration + 1 < refine_iters:
+            ternary = assign(scales)
+
+    # Map ternary {-1,0,+1} -> code {0,1,2}. Code 3 is never produced.
+    code = (ternary + 1.0).to(torch.int64)  # -1->0, 0->1, +1->2
+
+    # Pack 16 2-bit codes per int32 word, LSB-first.
+    n_words = in_features // 16
+    code = code.reshape(out_features, n_words, 16)
+    shifts = 2 ** (2 * torch.arange(16, dtype=torch.int64, device=weight.device))
+    packed = (code * shifts).sum(dim=-1)  # values in [0, 2^32)
+    packed = (packed & 0xFFFFFFFF).to(torch.int32)  # wrap to int32 bit pattern
+
+    # 1e-8 rounds to zero in fp16. Replace only values that actually rounded
+    # to zero; valid fp16 subnormal scales must not be inflated. Code 1 plus
+    # bias=-scale still reconstructs an all-zero group exactly.
+    stored_scales = scales.to(dtype)
+    stored_scales = torch.where(
+        stored_scales == 0,
+        torch.full_like(stored_scales, torch.finfo(dtype).tiny),
+        stored_scales,
+    )
+    biases = -stored_scales
+    return packed, stored_scales, biases
+
+
 def dequantize_2bit_ternary(
     packed: torch.Tensor,
     scales: torch.Tensor,
@@ -184,7 +280,16 @@ class QuantizedLinear2Bit(nn.Module):
         group_size: int = 128,
         refine_iters: int = 0,
         thr_ratio: float = 0.7,
+        quant_fn=None,
     ) -> QuantizedLinear2Bit:
+        if quant_fn is None:
+
+            def _default(w):
+                return quantize_2bit_ternary(
+                    w, group_size, refine_iters=refine_iters, thr_ratio=thr_ratio
+                )
+
+            quant_fn = _default
         module = cls(
             linear.in_features,
             linear.out_features,
@@ -192,12 +297,7 @@ class QuantizedLinear2Bit(nn.Module):
             group_size=group_size,
         )
         with torch.no_grad():
-            packed, scales, biases = quantize_2bit_ternary(
-                linear.weight.detach(),
-                group_size,
-                refine_iters=refine_iters,
-                thr_ratio=thr_ratio,
-            )
+            packed, scales, biases = quant_fn(linear.weight.detach())
             module.weight = packed
             module.scales = scales
             module.biases = biases
@@ -224,6 +324,29 @@ class QuantizedLinear2Bit(nn.Module):
         self._cached_weight = None
         return super()._apply(fn, recurse)
 
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        # A parent model's load_state_dict() bypasses this module's public
+        # load_state_dict method, so invalidate at the recursive hook point.
+        self._cached_weight = None
+        return super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.training:
             weight = self.dequantize_weight()
@@ -231,7 +354,15 @@ class QuantizedLinear2Bit(nn.Module):
             if self._cached_weight is None:
                 self._cached_weight = self.dequantize_weight()
             weight = self._cached_weight
-        return F.linear(x, weight, self.bias)
+        # Float32 source models are quantized into an FP16 container. Cast the
+        # dequantized compute view back to the activation dtype so the module
+        # remains usable without requiring callers to cast their inputs.
+        if weight.dtype != x.dtype:
+            weight = weight.to(x.dtype)
+        bias = self.bias
+        if bias is not None and bias.dtype != x.dtype:
+            bias = bias.to(x.dtype)
+        return F.linear(x, weight, bias)
 
     def extra_repr(self) -> str:
         return (
@@ -275,7 +406,16 @@ class QuantizedEmbedding2Bit(nn.Module):
         group_size: int = 128,
         refine_iters: int = 0,
         thr_ratio: float = 0.7,
+        quant_fn=None,
     ) -> QuantizedEmbedding2Bit:
+        if quant_fn is None:
+
+            def _default(w):
+                return quantize_2bit_ternary(
+                    w, group_size, refine_iters=refine_iters, thr_ratio=thr_ratio
+                )
+
+            quant_fn = _default
         module = cls(
             embedding.num_embeddings,
             embedding.embedding_dim,
@@ -283,12 +423,7 @@ class QuantizedEmbedding2Bit(nn.Module):
             group_size=group_size,
         )
         with torch.no_grad():
-            packed, scales, biases = quantize_2bit_ternary(
-                embedding.weight.detach(),
-                group_size,
-                refine_iters=refine_iters,
-                thr_ratio=thr_ratio,
-            )
+            packed, scales, biases = quant_fn(embedding.weight.detach())
             module.weight = packed
             module.scales = scales
             module.biases = biases
@@ -318,31 +453,71 @@ def quantize_model_2bit(
     model: nn.Module,
     group_size: int = 128,
     skip_patterns: tuple[str, ...] | list[str] = (),
-    refine_iters: int = 0,
+    refine_iters: int | None = None,
     trim_vocab_to: int | None = None,
     thr_ratio: float = 0.5,
+    method: str = "affine",
+    quantize_tied_weights: bool | None = None,
 ) -> dict[str, Any]:
     """
     Replace every ``nn.Linear`` / ``nn.Embedding`` in ``model`` (in place) with
     its ternary 2-bit quantized counterpart. Returns a JSON-serializable manifest.
 
     - Modules whose full name contains any of ``skip_patterns`` are left as-is.
-    - A ``nn.Linear`` whose weight is the same tensor as an already-replaced
-      module's weight (e.g. a tied lm_head) is skipped and listed under "tied".
+    - A ``nn.Linear`` whose weight is shared with an already-replaced module
+      (for example a tied lm_head) follows ``quantize_tied_weights``; skipped
+      tied modules are listed under ``"tied"``.
     - Layers whose last dim is not divisible by ``group_size`` are skipped and
       listed under "skipped" with the reason.
-    - ``refine_iters > 0`` enables Lloyd-style scale refinement.
+    - ``method="bonsai"`` selects the report's g128 ternary/least-squares
+      surrogate.  It reproduces the published representation, not Prism ML's
+      unpublished migration/training solver.
+    - When ``refine_iters`` is omitted, it defaults to 8 for ``method="bonsai"``
+      and 0 for the legacy ``method="affine"`` baseline.
+    - Tied output heads are quantized as a separate triplet by default in
+      Bonsai mode, matching the published embedding/lm-head coverage.  The
+      legacy affine mode keeps its previous skip behavior.  Override either
+      default with ``quantize_tied_weights``.
     - ``trim_vocab_to`` drops dead padding rows (e.g. Qwen3's 151936 -> 151669)
       from ``nn.Embedding`` tables and any module with "lm_head" in its name
       before quantization. Pass the FULL tokenizer length (including special
       tokens, e.g. ``len(AutoTokenizer)``).
     """
+    _check_group_size(group_size)
+    if not 0.0 < thr_ratio <= 1.0:
+        raise ValueError(f"thr_ratio must be in (0, 1], got {thr_ratio}")
+    if method not in ("affine", "bonsai"):
+        raise ValueError(f"method must be 'affine' or 'bonsai', got {method!r}")
     if trim_vocab_to is not None and trim_vocab_to < 1:
         raise ValueError(f"trim_vocab_to must be >= 1, got {trim_vocab_to}")
+    if refine_iters is not None and refine_iters < 0:
+        raise ValueError(f"refine_iters must be >= 0, got {refine_iters}")
 
+    # Preserve the legacy affine default while giving the report-defined
+    # Bonsai-style entry point its documented eight LS updates.
+    resolved_refine_iters = (
+        (8 if method == "bonsai" else 0) if refine_iters is None else refine_iters
+    )
+    resolved_quantize_tied = (
+        method == "bonsai" if quantize_tied_weights is None else quantize_tied_weights
+    )
+
+    if method == "bonsai":
+
+        def quant_fn(w):
+            return quantize_2bit_bonsai(
+                w,
+                group_size,
+                refine_iters=resolved_refine_iters,
+                thr_ratio=thr_ratio,
+            )
+
+    else:
+        quant_fn = None  # use the default in from_linear/from_embedding
     quantized: list[str] = []
     skipped: dict[str, str] = {}
     tied: list[str] = []
+    quantized_tied: list[str] = []
     trimmed: dict[str, list[int]] = {}
     replaced_weights: list[torch.Tensor] = []
 
@@ -357,7 +532,10 @@ def quantize_model_2bit(
         parent_name, _, child_name = name.rpartition(".")
         parent = model.get_submodule(parent_name) if parent_name else model
 
-        if any(weight is w or weight.data_ptr() == w.data_ptr() for w in replaced_weights):
+        is_tied = any(
+            weight is w or weight.data_ptr() == w.data_ptr() for w in replaced_weights
+        )
+        if is_tied and not resolved_quantize_tied:
             tied.append(name)
             # Keep a tied lm_head dimensionally consistent with a trimmed
             # embedding: re-point it at the trimmed slice of the fp weight.
@@ -419,19 +597,24 @@ def quantize_model_2bit(
             new_module: nn.Module = QuantizedLinear2Bit.from_linear(
                 source,
                 group_size,
-                refine_iters=refine_iters,
+                refine_iters=resolved_refine_iters,
                 thr_ratio=thr_ratio,
+                quant_fn=quant_fn,
             )
         else:
             new_module = QuantizedEmbedding2Bit.from_embedding(
                 source,
                 group_size,
-                refine_iters=refine_iters,
+                refine_iters=resolved_refine_iters,
                 thr_ratio=thr_ratio,
+                quant_fn=quant_fn,
             )
+        new_module.train(module.training)
         setattr(parent, child_name, new_module)
         replaced_weights.append(weight)
         quantized.append(name)
+        if is_tied:
+            quantized_tied.append(name)
 
     if (
         trimmed
@@ -447,13 +630,16 @@ def quantize_model_2bit(
             "mode": "affine",
             "bits": 2,
             "ternary": True,
+            "method": method,
             "group_size": group_size,
-            "refine_iters": refine_iters,
+            "refine_iters": resolved_refine_iters,
             "thr_ratio": thr_ratio,
+            "quantize_tied_weights": resolved_quantize_tied,
             "trim_vocab_to": trim_vocab_to,
         },
         "quantized": quantized,
         "skipped": skipped,
         "tied": tied,
+        "quantized_tied": quantized_tied,
         "trimmed": trimmed,
     }
