@@ -1024,7 +1024,8 @@ def main() -> None:
     ptq_dir = args.ptq.expanduser().resolve()
     out_dir = args.out.expanduser().resolve()
     manifest_path = out_dir / "dataset_manifest.json"
-    if args.refresh_data or not manifest_path.is_file():
+    dataset_path = out_dir / "dataset.jsonl"
+    if args.refresh_data or not manifest_path.is_file() or not dataset_path.is_file():
         manifest = prepare_dataset(
             dataset_dir,
             official_dir,
