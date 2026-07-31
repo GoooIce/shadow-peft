@@ -1,0 +1,15 @@
+{
+  "dataset_sha256": "548651cdaef7951b3a97dbd0e3c698d568fdd364eff23bd811a899ad8541bd3f",
+  "official_model": "/Users/devel0per/.cache/modelscope/models/prism-ml--Ternary-Bonsai-27B-mlx-2bit/snapshots/master",
+  "top_k": 32,
+  "max_length": 128,
+  "examples": 80,
+  "tokens": 9238,
+  "teacher_seconds": 81.26088308301405,
+  "teacher_generations": {
+    "fact": "Paris",
+    "math": "391",
+    "zh_math": "54",
+    "code": "```python\ndef add(a, b):\n    return"
+  }
+}

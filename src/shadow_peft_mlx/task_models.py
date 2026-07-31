@@ -8,7 +8,7 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_flatten
 
-from .model_utils import _get_inner_model, dequantized_weight
+from .model_utils import _get_inner_model, _get_lm_head, _get_vocab_size, dequantized_weight
 from .peft_model import ShadowPeftModel
 
 InferenceMode = Literal["base_shadow", "shadow_only"]
@@ -100,12 +100,12 @@ class ShadowForCausalLM(nn.Module):
         self.inference_mode: InferenceMode = inference_mode
 
         base_inner = _get_inner_model(peft_model.base_model)
-        vocab_size = int(base_inner.args.vocab_size)
+        vocab_size = _get_vocab_size(peft_model.base_model)
         hidden = peft_model.base_hidden_size
 
         # `lm_head` is a direct reference to the base model's head (None when the
         # architecture ties embeddings and scores via `embed_tokens.as_linear`).
-        self.lm_head = getattr(peft_model.base_model, "lm_head", None)
+        self.lm_head = _get_lm_head(peft_model.base_model)
         self.shadow_lm_head = nn.Linear(hidden, vocab_size, bias=False)
         if self.lm_head is not None:
             self.shadow_lm_head.weight = dequantized_weight(self.lm_head) * 1
@@ -172,7 +172,9 @@ class ShadowForCausalLM(nn.Module):
             shadow_hidden = self.peft_model._compute_shadow_hidden(input_ids, shadow_cache=None)
             shadow_logits = self.shadow_lm_head(shadow_hidden)
             loss = _shifted_ce_loss(shadow_logits, labels) if labels is not None else None
-            return ShadowCausalLMOutput(loss=loss, logits=shadow_logits, shadow_logits=shadow_logits)
+            return ShadowCausalLMOutput(
+                loss=loss, logits=shadow_logits, shadow_logits=shadow_logits
+            )
 
         logits, shadow_hidden = self.peft_model.forward_with_shadow(input_ids, cache=cache)
         shadow_logits = self.shadow_lm_head(shadow_hidden)

@@ -1,0 +1,1148 @@
+{
+  "protocol": {
+    "experiment_label": "E3",
+    "official_model": "/Users/devel0per/.cache/modelscope/models/prism-ml--Ternary-Bonsai-27B-mlx-2bit/snapshots/master",
+    "ptq_model": "/Users/devel0per/Code/shadow-peft/qwen3.6-27b-mlx-2bit-v3-oneshot",
+    "quantized_matrices": 498,
+    "main_parameter_arrays": 1494,
+    "aux_parameter_arrays": 353,
+    "main_parameter_values": 2101043200,
+    "aux_parameter_values": 2645504,
+    "max_generation_tokens": 24,
+    "greedy": true,
+    "thinking": false,
+    "prompts": [
+      {
+        "id": "fact",
+        "text": "What is the capital of France? Answer briefly."
+      },
+      {
+        "id": "math",
+        "text": "Calculate 17 * 23. Give only the result."
+      },
+      {
+        "id": "zh_math",
+        "text": "请计算 18 × 3，只给出答案。"
+      },
+      {
+        "id": "code",
+        "text": "Write a Python function add(a, b) that returns their sum."
+      }
+    ]
+  },
+  "cases": {
+    "A_official_main_official_aux": {
+      "prompts": {
+        "fact": {
+          "top10": [
+            {
+              "id": 57590,
+              "text": "Paris",
+              "logit": 21.28125
+            },
+            {
+              "id": 760,
+              "text": "The",
+              "logit": 14.4921875
+            },
+            {
+              "id": 11751,
+              "text": " Paris",
+              "logit": 14.2265625
+            },
+            {
+              "id": 4132,
+              "text": "Par",
+              "logit": 13.203125
+            },
+            {
+              "id": 1671,
+              "text": "par",
+              "logit": 11.28125
+            },
+            {
+              "id": 47358,
+              "text": "France",
+              "logit": 11.125
+            },
+            {
+              "id": 248046,
+              "text": "<|im_end|>",
+              "logit": 11.0859375
+            },
+            {
+              "id": 332,
+              "text": "**",
+              "logit": 11.078125
+            },
+            {
+              "id": 38261,
+              "text": "London",
+              "logit": 10.7421875
+            },
+            {
+              "id": 91149,
+              "text": "Berlin",
+              "logit": 10.71875
+            }
+          ],
+          "logits_seconds": 0.3079279169905931,
+          "generation": "Paris",
+          "generation_metrics": {
+            "elapsed_seconds": 0.7151894999842625,
+            "prompt_tokens": 22,
+            "generation_tokens": 2,
+            "prompt_tps": 54.375956511699755,
+            "generation_tps": 52.182421512180575
+          }
+        },
+        "math": {
+          "top10": [
+            {
+              "id": 18,
+              "text": "3",
+              "logit": 20.921875
+            },
+            {
+              "id": 220,
+              "text": " ",
+              "logit": 18.078125
+            },
+            {
+              "id": 16,
+              "text": "1",
+              "logit": 14.453125
+            },
+            {
+              "id": 19,
+              "text": "4",
+              "logit": 13.3125
+            },
+            {
+              "id": 760,
+              "text": "The",
+              "logit": 12.6953125
+            },
+            {
+              "id": 17,
+              "text": "2",
+              "logit": 11.765625
+            },
+            {
+              "id": 20,
+              "text": "5",
+              "logit": 11.71875
+            },
+            {
+              "id": 15,
+              "text": "0",
+              "logit": 11.3125
+            },
+            {
+              "id": 71093,
+              "text": "```",
+              "logit": 11.2421875
+            },
+            {
+              "id": 24,
+              "text": "9",
+              "logit": 10.7734375
+            }
+          ],
+          "logits_seconds": 0.2943507499876432,
+          "generation": "391",
+          "generation_metrics": {
+            "elapsed_seconds": 0.6414733749988955,
+            "prompt_tokens": 26,
+            "generation_tokens": 4,
+            "prompt_tps": 71.72604238065426,
+            "generation_tps": 36.62977096062143
+          }
+        },
+        "zh_math": {
+          "top10": [
+            {
+              "id": 20,
+              "text": "5",
+              "logit": 20.703125
+            },
+            {
+              "id": 220,
+              "text": " ",
+              "logit": 17.65625
+            },
+            {
+              "id": 16,
+              "text": "1",
+              "logit": 14.2734375
+            },
+            {
+              "id": 21,
+              "text": "6",
+              "logit": 12.9921875
+            },
+            {
+              "id": 18,
+              "text": "3",
+              "logit": 12.5390625
+            },
+            {
+              "id": 19,
+              "text": "4",
+              "logit": 11.953125
+            },
+            {
+              "id": 17,
+              "text": "2",
+              "logit": 11.640625
+            },
+            {
+              "id": 15,
+              "text": "0",
+              "logit": 11.1875
+            },
+            {
+              "id": 23,
+              "text": "8",
+              "logit": 11.1171875
+            },
+            {
+              "id": 24,
+              "text": "9",
+              "logit": 10.8671875
+            }
+          ],
+          "logits_seconds": 0.2799158330017235,
+          "generation": "54",
+          "generation_metrics": {
+            "elapsed_seconds": 0.5747248750121798,
+            "prompt_tokens": 25,
+            "generation_tokens": 3,
+            "prompt_tps": 74.13750282486858,
+            "generation_tps": 38.87311201350307
+          }
+        },
+        "code": {
+          "top10": [
+            {
+              "id": 71093,
+              "text": "```",
+              "logit": 20.640625
+            },
+            {
+              "id": 8160,
+              "text": "Here",
+              "logit": 17.375
+            },
+            {
+              "id": 52451,
+              "text": " ```",
+              "logit": 15.8984375
+            },
+            {
+              "id": 727,
+              "text": "def",
+              "logit": 15.2109375
+            },
+            {
+              "id": 38493,
+              "text": "Sure",
+              "logit": 13.4375
+            },
+            {
+              "id": 2056,
+              "text": "Of",
+              "logit": 13.140625
+            },
+            {
+              "id": 2,
+              "text": "#",
+              "logit": 12.984375
+            },
+            {
+              "id": 2523,
+              "text": "You",
+              "logit": 12.6796875
+            },
+            {
+              "id": 50821,
+              "text": "Actually",
+              "logit": 12.6640625
+            },
+            {
+              "id": 687,
+              "text": " def",
+              "logit": 12.515625
+            }
+          ],
+          "logits_seconds": 0.2908197500219103,
+          "generation": "```python\ndef add(a, b):\n    return a + b\n```",
+          "generation_metrics": {
+            "elapsed_seconds": 1.1462089580018073,
+            "prompt_tokens": 26,
+            "generation_tokens": 18,
+            "prompt_tps": 76.02219702247382,
+            "generation_tps": 28.836570537918362
+          }
+        }
+      },
+      "vs_A_official": {
+        "fact": {
+          "kl_official_to_case": 0.0,
+          "logit_cosine": 1.0,
+          "top10_overlap": 10
+        },
+        "math": {
+          "kl_official_to_case": 0.0,
+          "logit_cosine": 1.0,
+          "top10_overlap": 10
+        },
+        "zh_math": {
+          "kl_official_to_case": 0.0,
+          "logit_cosine": 1.0,
+          "top10_overlap": 10
+        },
+        "code": {
+          "kl_official_to_case": 0.0,
+          "logit_cosine": 1.0,
+          "top10_overlap": 10
+        }
+      }
+    },
+    "B_official_main_qwen_aux": {
+      "prompts": {
+        "fact": {
+          "top10": [
+            {
+              "id": 57590,
+              "text": "Paris",
+              "logit": 19.796875
+            },
+            {
+              "id": 760,
+              "text": "The",
+              "logit": 15.1015625
+            },
+            {
+              "id": 332,
+              "text": "**",
+              "logit": 14.765625
+            },
+            {
+              "id": 4132,
+              "text": "Par",
+              "logit": 12.9453125
+            },
+            {
+              "id": 11751,
+              "text": " Paris",
+              "logit": 12.6640625
+            },
+            {
+              "id": 248068,
+              "text": "<think>",
+              "logit": 11.390625
+            },
+            {
+              "id": 248046,
+              "text": "<|im_end|>",
+              "logit": 11.2421875
+            },
+            {
+              "id": 16,
+              "text": "1",
+              "logit": 10.96875
+            },
+            {
+              "id": 38261,
+              "text": "London",
+              "logit": 9.9921875
+            },
+            {
+              "id": 47358,
+              "text": "France",
+              "logit": 9.9375
+            }
+          ],
+          "logits_seconds": 0.27910091599915177,
+          "generation": "Paris",
+          "generation_metrics": {
+            "elapsed_seconds": 0.5545414170192089,
+            "prompt_tokens": 22,
+            "generation_tokens": 2,
+            "prompt_tps": 63.2431595861333,
+            "generation_tps": 53.71777353323186
+          }
+        },
+        "math": {
+          "top10": [
+            {
+              "id": 18,
+              "text": "3",
+              "logit": 17.390625
+            },
+            {
+              "id": 16,
+              "text": "1",
+              "logit": 17.0625
+            },
+            {
+              "id": 19,
+              "text": "4",
+              "logit": 15.796875
+            },
+            {
+              "id": 220,
+              "text": " ",
+              "logit": 15.578125
+            },
+            {
+              "id": 17,
+              "text": "2",
+              "logit": 14.7265625
+            },
+            {
+              "id": 22,
+              "text": "7",
+              "logit": 14.5078125
+            },
+            {
+              "id": 23,
+              "text": "8",
+              "logit": 14.4765625
+            },
+            {
+              "id": 21,
+              "text": "6",
+              "logit": 14.3359375
+            },
+            {
+              "id": 24,
+              "text": "9",
+              "logit": 14.28125
+            },
+            {
+              "id": 20,
+              "text": "5",
+              "logit": 14.1796875
+            }
+          ],
+          "logits_seconds": 0.28659558400977403,
+          "generation": "399",
+          "generation_metrics": {
+            "elapsed_seconds": 0.6347497499955352,
+            "prompt_tokens": 26,
+            "generation_tokens": 4,
+            "prompt_tps": 74.68695222272193,
+            "generation_tps": 35.893472664525966
+          }
+        },
+        "zh_math": {
+          "top10": [
+            {
+              "id": 20,
+              "text": "5",
+              "logit": 18.9375
+            },
+            {
+              "id": 220,
+              "text": " ",
+              "logit": 13.609375
+            },
+            {
+              "id": 16,
+              "text": "1",
+              "logit": 13.484375
+            },
+            {
+              "id": 21,
+              "text": "6",
+              "logit": 12.5546875
+            },
+            {
+              "id": 248068,
+              "text": "<think>",
+              "logit": 12.3203125
+            },
+            {
+              "id": 18,
+              "text": "3",
+              "logit": 12.2578125
+            },
+            {
+              "id": 17,
+              "text": "2",
+              "logit": 11.90625
+            },
+            {
+              "id": 19,
+              "text": "4",
+              "logit": 11.7734375
+            },
+            {
+              "id": 15,
+              "text": "0",
+              "logit": 11.46875
+            },
+            {
+              "id": 13682,
+              "text": "$$",
+              "logit": 11.3203125
+            }
+          ],
+          "logits_seconds": 0.29613175001577474,
+          "generation": "51",
+          "generation_metrics": {
+            "elapsed_seconds": 0.6126122919959016,
+            "prompt_tokens": 25,
+            "generation_tokens": 3,
+            "prompt_tps": 69.06054283448749,
+            "generation_tps": 41.0311354201272
+          }
+        },
+        "code": {
+          "top10": [
+            {
+              "id": 71093,
+              "text": "```",
+              "logit": 19.828125
+            },
+            {
+              "id": 8160,
+              "text": "Here",
+              "logit": 18.375
+            },
+            {
+              "id": 2056,
+              "text": "Of",
+              "logit": 16.234375
+            },
+            {
+              "id": 1206,
+              "text": "To",
+              "logit": 16.0
+            },
+            {
+              "id": 727,
+              "text": "def",
+              "logit": 15.0078125
+            },
+            {
+              "id": 38493,
+              "text": "Sure",
+              "logit": 14.390625
+            },
+            {
+              "id": 2,
+              "text": "#",
+              "logit": 14.0390625
+            },
+            {
+              "id": 2523,
+              "text": "You",
+              "logit": 13.4375
+            },
+            {
+              "id": 92157,
+              "text": "Certainly",
+              "logit": 13.421875
+            },
+            {
+              "id": 760,
+              "text": "The",
+              "logit": 13.1328125
+            }
+          ],
+          "logits_seconds": 0.29410054101026617,
+          "generation": "```python\ndef add(a, b):\n    return a + b\n```",
+          "generation_metrics": {
+            "elapsed_seconds": 1.1701916660240386,
+            "prompt_tokens": 26,
+            "generation_tokens": 18,
+            "prompt_tps": 74.91181654131523,
+            "generation_tps": 28.22474762590963
+          }
+        }
+      },
+      "vs_A_official": {
+        "fact": {
+          "kl_official_to_case": 0.013674159035496002,
+          "logit_cosine": 0.9678166320355697,
+          "top10_overlap": 8
+        },
+        "math": {
+          "kl_official_to_case": 0.7744015841990805,
+          "logit_cosine": 0.9670885533111203,
+          "top10_overlap": 7
+        },
+        "zh_math": {
+          "kl_official_to_case": 0.07037584505514258,
+          "logit_cosine": 0.9377207693096197,
+          "top10_overlap": 8
+        },
+        "code": {
+          "kl_official_to_case": 0.17479759886618443,
+          "logit_cosine": 0.9451799503870345,
+          "top10_overlap": 7
+        }
+      }
+    },
+    "C_ptq_main_official_aux": {
+      "prompts": {
+        "fact": {
+          "top10": [
+            {
+              "id": 248046,
+              "text": "<|im_end|>",
+              "logit": 6.91796875
+            },
+            {
+              "id": 13,
+              "text": ".",
+              "logit": 6.83984375
+            },
+            {
+              "id": 1358,
+              "text": "\n\n\n",
+              "logit": 6.375
+            },
+            {
+              "id": 1092,
+              "text": " what",
+              "logit": 6.28125
+            },
+            {
+              "id": 58750,
+              "text": " fkk",
+              "logit": 6.11328125
+            },
+            {
+              "id": 283,
+              "text": " =",
+              "logit": 6.0390625
+            },
+            {
+              "id": 271,
+              "text": "\n\n",
+              "logit": 6.0
+            },
+            {
+              "id": 30,
+              "text": "?",
+              "logit": 5.71875
+            },
+            {
+              "id": 1953,
+              "text": " sw",
+              "logit": 5.56640625
+            },
+            {
+              "id": 781,
+              "text": " they",
+              "logit": 5.5390625
+            }
+          ],
+          "logits_seconds": 0.28685249999398366,
+          "generation": "",
+          "generation_metrics": {
+            "elapsed_seconds": 0.4883062499866355,
+            "prompt_tokens": 22,
+            "generation_tokens": 1,
+            "prompt_tps": 66.35570793458056,
+            "generation_tps": 74305.14294117392
+          }
+        },
+        "math": {
+          "top10": [
+            {
+              "id": 13,
+              "text": ".",
+              "logit": 7.24609375
+            },
+            {
+              "id": 248046,
+              "text": "<|im_end|>",
+              "logit": 6.83203125
+            },
+            {
+              "id": 1358,
+              "text": "\n\n\n",
+              "logit": 6.38671875
+            },
+            {
+              "id": 271,
+              "text": "\n\n",
+              "logit": 6.28515625
+            },
+            {
+              "id": 58750,
+              "text": " fkk",
+              "logit": 5.93359375
+            },
+            {
+              "id": 1710,
+              "text": "。",
+              "logit": 5.91015625
+            },
+            {
+              "id": 283,
+              "text": " =",
+              "logit": 5.890625
+            },
+            {
+              "id": 198,
+              "text": "\n",
+              "logit": 5.76953125
+            },
+            {
+              "id": 73150,
+              "text": "\\_",
+              "logit": 5.60546875
+            },
+            {
+              "id": 1092,
+              "text": " what",
+              "logit": 5.59375
+            }
+          ],
+          "logits_seconds": 0.2905890000110958,
+          "generation": "........................",
+          "generation_metrics": {
+            "elapsed_seconds": 1.3977205409901217,
+            "prompt_tokens": 26,
+            "generation_tokens": 24,
+            "prompt_tps": 72.8116766330311,
+            "generation_tps": 27.660686729472882
+          }
+        },
+        "zh_math": {
+          "top10": [
+            {
+              "id": 13,
+              "text": ".",
+              "logit": 7.3515625
+            },
+            {
+              "id": 1710,
+              "text": "。",
+              "logit": 7.3125
+            },
+            {
+              "id": 248046,
+              "text": "<|im_end|>",
+              "logit": 7.04296875
+            },
+            {
+              "id": 1358,
+              "text": "\n\n\n",
+              "logit": 6.55078125
+            },
+            {
+              "id": 58750,
+              "text": " fkk",
+              "logit": 6.3828125
+            },
+            {
+              "id": 271,
+              "text": "\n\n",
+              "logit": 6.26953125
+            },
+            {
+              "id": 198,
+              "text": "\n",
+              "logit": 5.91015625
+            },
+            {
+              "id": 11,
+              "text": ",",
+              "logit": 5.8828125
+            },
+            {
+              "id": 283,
+              "text": " =",
+              "logit": 5.55859375
+            },
+            {
+              "id": 73150,
+              "text": "\\_",
+              "logit": 5.5390625
+            }
+          ],
+          "logits_seconds": 0.30295991600723937,
+          "generation": ".",
+          "generation_metrics": {
+            "elapsed_seconds": 0.5768661670153961,
+            "prompt_tokens": 25,
+            "generation_tokens": 2,
+            "prompt_tps": 72.62070946881587,
+            "generation_tps": 55.53370305694861
+          }
+        },
+        "code": {
+          "top10": [
+            {
+              "id": 13,
+              "text": ".",
+              "logit": 7.0390625
+            },
+            {
+              "id": 248046,
+              "text": "<|im_end|>",
+              "logit": 6.78125
+            },
+            {
+              "id": 1358,
+              "text": "\n\n\n",
+              "logit": 6.296875
+            },
+            {
+              "id": 58750,
+              "text": " fkk",
+              "logit": 6.2265625
+            },
+            {
+              "id": 271,
+              "text": "\n\n",
+              "logit": 6.10546875
+            },
+            {
+              "id": 283,
+              "text": " =",
+              "logit": 5.75
+            },
+            {
+              "id": 1710,
+              "text": "。",
+              "logit": 5.73828125
+            },
+            {
+              "id": 91942,
+              "text": " uranus",
+              "logit": 5.51953125
+            },
+            {
+              "id": 11,
+              "text": ",",
+              "logit": 5.44921875
+            },
+            {
+              "id": 73150,
+              "text": "\\_",
+              "logit": 5.4453125
+            }
+          ],
+          "logits_seconds": 0.2858645000087563,
+          "generation": ".",
+          "generation_metrics": {
+            "elapsed_seconds": 0.5370082919835113,
+            "prompt_tokens": 26,
+            "generation_tokens": 2,
+            "prompt_tps": 76.22872078187014,
+            "generation_tps": 55.516038955006046
+          }
+        }
+      },
+      "vs_A_official": {
+        "fact": {
+          "kl_official_to_case": 13.021188623416247,
+          "logit_cosine": 0.47871699224791403,
+          "top10_overlap": 1
+        },
+        "math": {
+          "kl_official_to_case": 11.098186828551734,
+          "logit_cosine": 0.5385655547818424,
+          "top10_overlap": 0
+        },
+        "zh_math": {
+          "kl_official_to_case": 11.293827048416867,
+          "logit_cosine": 0.5032954921179992,
+          "top10_overlap": 0
+        },
+        "code": {
+          "kl_official_to_case": 10.345872975974881,
+          "logit_cosine": 0.5353980526488279,
+          "top10_overlap": 0
+        }
+      }
+    },
+    "D_ptq_main_qwen_aux": {
+      "prompts": {
+        "fact": {
+          "top10": [
+            {
+              "id": 58750,
+              "text": " fkk",
+              "logit": 7.05078125
+            },
+            {
+              "id": 56014,
+              "text": " $\\",
+              "logit": 6.6796875
+            },
+            {
+              "id": 1358,
+              "text": "\n\n\n",
+              "logit": 6.40625
+            },
+            {
+              "id": 271,
+              "text": "\n\n",
+              "logit": 6.1875
+            },
+            {
+              "id": 248046,
+              "text": "<|im_end|>",
+              "logit": 6.1640625
+            },
+            {
+              "id": 1092,
+              "text": " what",
+              "logit": 6.09375
+            },
+            {
+              "id": 3,
+              "text": "$",
+              "logit": 6.015625
+            },
+            {
+              "id": 198,
+              "text": "\n",
+              "logit": 5.9140625
+            },
+            {
+              "id": 30,
+              "text": "?",
+              "logit": 5.76171875
+            },
+            {
+              "id": 2099,
+              "text": " image",
+              "logit": 5.28125
+            }
+          ],
+          "logits_seconds": 0.2794641249929555,
+          "generation": "fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk",
+          "generation_metrics": {
+            "elapsed_seconds": 1.3527489999833051,
+            "prompt_tokens": 22,
+            "generation_tokens": 24,
+            "prompt_tps": 64.97311601600668,
+            "generation_tps": 28.34687796812414
+          }
+        },
+        "math": {
+          "top10": [
+            {
+              "id": 58750,
+              "text": " fkk",
+              "logit": 6.93359375
+            },
+            {
+              "id": 1358,
+              "text": "\n\n\n",
+              "logit": 6.67578125
+            },
+            {
+              "id": 56014,
+              "text": " $\\",
+              "logit": 6.5625
+            },
+            {
+              "id": 271,
+              "text": "\n\n",
+              "logit": 6.453125
+            },
+            {
+              "id": 198,
+              "text": "\n",
+              "logit": 6.0546875
+            },
+            {
+              "id": 248046,
+              "text": "<|im_end|>",
+              "logit": 6.02734375
+            },
+            {
+              "id": 3,
+              "text": "$",
+              "logit": 5.8671875
+            },
+            {
+              "id": 30,
+              "text": "?",
+              "logit": 5.5390625
+            },
+            {
+              "id": 1092,
+              "text": " what",
+              "logit": 5.51953125
+            },
+            {
+              "id": 13,
+              "text": ".",
+              "logit": 5.203125
+            }
+          ],
+          "logits_seconds": 0.2947470410144888,
+          "generation": "fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk",
+          "generation_metrics": {
+            "elapsed_seconds": 1.3434222500072792,
+            "prompt_tokens": 26,
+            "generation_tokens": 24,
+            "prompt_tps": 77.52522590427623,
+            "generation_tps": 28.341602903392907
+          }
+        },
+        "zh_math": {
+          "top10": [
+            {
+              "id": 58750,
+              "text": " fkk",
+              "logit": 6.9375
+            },
+            {
+              "id": 1358,
+              "text": "\n\n\n",
+              "logit": 6.765625
+            },
+            {
+              "id": 56014,
+              "text": " $\\",
+              "logit": 6.59375
+            },
+            {
+              "id": 271,
+              "text": "\n\n",
+              "logit": 6.34765625
+            },
+            {
+              "id": 248046,
+              "text": "<|im_end|>",
+              "logit": 6.0625
+            },
+            {
+              "id": 198,
+              "text": "\n",
+              "logit": 5.92578125
+            },
+            {
+              "id": 3,
+              "text": "$",
+              "logit": 5.8828125
+            },
+            {
+              "id": 1092,
+              "text": " what",
+              "logit": 5.4453125
+            },
+            {
+              "id": 30,
+              "text": "?",
+              "logit": 5.24609375
+            },
+            {
+              "id": 304,
+              "text": " h",
+              "logit": 5.203125
+            }
+          ],
+          "logits_seconds": 0.28538862499408424,
+          "generation": "fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk",
+          "generation_metrics": {
+            "elapsed_seconds": 1.3449206249788404,
+            "prompt_tokens": 25,
+            "generation_tokens": 24,
+            "prompt_tps": 73.88865012021313,
+            "generation_tps": 28.332953943370356
+          }
+        },
+        "code": {
+          "top10": [
+            {
+              "id": 58750,
+              "text": " fkk",
+              "logit": 7.109375
+            },
+            {
+              "id": 1358,
+              "text": "\n\n\n",
+              "logit": 6.5546875
+            },
+            {
+              "id": 56014,
+              "text": " $\\",
+              "logit": 6.4921875
+            },
+            {
+              "id": 271,
+              "text": "\n\n",
+              "logit": 6.30859375
+            },
+            {
+              "id": 248046,
+              "text": "<|im_end|>",
+              "logit": 5.9609375
+            },
+            {
+              "id": 198,
+              "text": "\n",
+              "logit": 5.94140625
+            },
+            {
+              "id": 1092,
+              "text": " what",
+              "logit": 5.7578125
+            },
+            {
+              "id": 3,
+              "text": "$",
+              "logit": 5.73828125
+            },
+            {
+              "id": 30,
+              "text": "?",
+              "logit": 5.62890625
+            },
+            {
+              "id": 1970,
+              "text": " code",
+              "logit": 5.4296875
+            }
+          ],
+          "logits_seconds": 0.28602241599583067,
+          "generation": "fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk fkk",
+          "generation_metrics": {
+            "elapsed_seconds": 1.4082457500044256,
+            "prompt_tokens": 26,
+            "generation_tokens": 24,
+            "prompt_tps": 73.69711125307326,
+            "generation_tps": 26.57082472824022
+          }
+        }
+      },
+      "vs_A_official": {
+        "fact": {
+          "kl_official_to_case": 13.716593348329042,
+          "logit_cosine": 0.48017474088027085,
+          "top10_overlap": 1
+        },
+        "math": {
+          "kl_official_to_case": 10.896678181823885,
+          "logit_cosine": 0.5387861257383515,
+          "top10_overlap": 0
+        },
+        "zh_math": {
+          "kl_official_to_case": 11.25611120722873,
+          "logit_cosine": 0.48591560197753686,
+          "top10_overlap": 0
+        },
+        "code": {
+          "kl_official_to_case": 11.49571481646221,
+          "logit_cosine": 0.5171018218814786,
+          "top10_overlap": 0
+        }
+      }
+    }
+  },
+  "peak_memory_gb": 14.440471716225147
+}

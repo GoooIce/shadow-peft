@@ -13,9 +13,14 @@ def _get_inner_model(model: nn.Module) -> nn.Module:
     """
     Return the inner backbone holding the decoder layer stack.
 
-    mlx-lm top-level models (e.g. `llama.Model`) keep it in `.model`; if the supplied
-    module already has `.layers`, it is returned as-is.
+    mlx-lm top-level models usually keep it in `.model`. Unified multimodal
+    wrappers such as Qwen3.5/Qwen3.6 add a `.language_model.model` level; descend
+    through that language wrapper before accepting a forwarded `.layers`
+    property so the returned list remains directly assignable.
     """
+    language_model = getattr(model, "language_model", None)
+    if isinstance(language_model, nn.Module):
+        return _get_inner_model(language_model)
     inner = getattr(model, "model", None)
     if isinstance(inner, nn.Module) and isinstance(getattr(inner, "layers", None), list):
         return inner
@@ -27,6 +32,21 @@ def _get_inner_model(model: nn.Module) -> nn.Module:
     )
 
 
+def _args_with_hidden_size(model: nn.Module):
+    """Find the nearest mlx-lm args object that owns text-model dimensions."""
+    candidates = (
+        model,
+        getattr(model, "language_model", None),
+        getattr(model, "model", None),
+        _get_inner_model(model),
+    )
+    for candidate in candidates:
+        args = getattr(candidate, "args", None)
+        if args is not None and hasattr(args, "hidden_size"):
+            return args
+    return None
+
+
 def _get_decoder_layers(model: nn.Module) -> tuple[nn.Module, list]:
     """Return (inner_backbone, layers_list)."""
     inner = _get_inner_model(model)
@@ -34,14 +54,38 @@ def _get_decoder_layers(model: nn.Module) -> tuple[nn.Module, list]:
 
 
 def _get_hidden_size(model: nn.Module) -> int:
-    args = getattr(model, "args", None)
-    if args is not None and hasattr(args, "hidden_size"):
+    args = _args_with_hidden_size(model)
+    if args is not None:
         return int(args.hidden_size)
     inner = _get_inner_model(model)
-    args = getattr(inner, "args", None)
-    if args is not None and hasattr(args, "hidden_size"):
-        return int(args.hidden_size)
+    embed_tokens = getattr(inner, "embed_tokens", None)
+    weight = getattr(embed_tokens, "weight", None)
+    if weight is not None and len(weight.shape) == 2:
+        return int(weight.shape[1])
     raise AttributeError("Unable to infer hidden size from model.args.")
+
+
+def _get_vocab_size(model: nn.Module) -> int:
+    args = _args_with_hidden_size(model)
+    if args is not None and hasattr(args, "vocab_size"):
+        return int(args.vocab_size)
+    inner = _get_inner_model(model)
+    embed_tokens = getattr(inner, "embed_tokens", None)
+    weight = getattr(embed_tokens, "weight", None)
+    if weight is not None and len(weight.shape) == 2:
+        return int(weight.shape[0])
+    raise AttributeError("Unable to infer vocabulary size from model args or embeddings.")
+
+
+def _get_lm_head(model: nn.Module) -> nn.Module | None:
+    """Resolve a possibly nested untied language-model head."""
+    head = getattr(model, "lm_head", None)
+    if isinstance(head, nn.Module):
+        return head
+    language_model = getattr(model, "language_model", None)
+    if isinstance(language_model, nn.Module):
+        return _get_lm_head(language_model)
+    return None
 
 
 def build_implicit_shadow_model(
@@ -62,7 +106,10 @@ def build_implicit_shadow_model(
     if num_shadow_layers < 1:
         raise ValueError(f"num_shadow_layers must be >= 1, got {num_shadow_layers}")
 
-    args = deepcopy(inner.args)
+    source_args = _args_with_hidden_size(base_model)
+    if source_args is None:
+        raise AttributeError("Unable to locate text-model args for implicit shadow.")
+    args = deepcopy(source_args)
     args.num_hidden_layers = int(num_shadow_layers)
 
     # Some archs (e.g. llama) build layers from `layer_types`, not `num_hidden_layers`.
@@ -92,7 +139,28 @@ def build_implicit_shadow_model(
             )
         args.head_dim = int(shadow_head_dim)
 
-    return type(inner)(args)
+    shadow = type(inner)(args)
+    # Qwen3.5's hybrid backbone caches representative linear/full-attention
+    # layer indices and eagerly constructs both masks on every forward. A
+    # reduced shadow may contain only one layer type. Point the missing type at
+    # a synthetic cache slot after the real layer caches; ShadowPeftModel adds
+    # that slot when it constructs the runtime cache.
+    shadow_layers = getattr(shadow, "layers", None)
+    if (
+        isinstance(shadow_layers, list)
+        and shadow_layers
+        and hasattr(shadow, "ssm_idx")
+        and hasattr(shadow, "fa_idx")
+        and all(hasattr(layer, "is_linear") for layer in shadow_layers)
+    ):
+        linear = [index for index, layer in enumerate(shadow_layers) if layer.is_linear]
+        full = [index for index, layer in enumerate(shadow_layers) if not layer.is_linear]
+        next_dummy = len(shadow_layers)
+        shadow.ssm_idx = linear[0] if linear else next_dummy
+        if not linear:
+            next_dummy += 1
+        shadow.fa_idx = full[0] if full else next_dummy
+    return shadow
 
 
 def dequantized_weight(module: nn.Module) -> mx.array:
@@ -143,9 +211,7 @@ def count_parameters(module: nn.Module) -> tuple[int, int]:
 def print_trainable_parameters(module: nn.Module) -> None:
     trainable, total = count_parameters(module)
     pct = (100.0 * trainable / total) if total else 0.0
-    print(
-        f"Trainable params: {trainable:,} || Total params: {total:,} || Trainable%: {pct:.2f}%"
-    )
+    print(f"Trainable params: {trainable:,} || Total params: {total:,} || Trainable%: {pct:.2f}%")
 
 
 def save_servable_model(model: nn.Module, save_directory: str | Path) -> None:

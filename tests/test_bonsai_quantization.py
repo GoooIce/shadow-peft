@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import weakref
+
 import pytest
 
 torch = pytest.importorskip("torch")
 
 from torch import nn  # noqa: E402
 
+import shadow_peft.quantization.affine_2bit as affine_2bit  # noqa: E402
 from shadow_peft import (  # noqa: E402
     QuantizedEmbedding2Bit,
     QuantizedLinear2Bit,
@@ -85,6 +88,19 @@ def test_bonsai_defaults_match_report_reference_and_lsb_packing():
     codes = _unpack_codes(actual[0])
     assert codes.min().item() >= 0
     assert codes.max().item() <= 2
+
+
+def test_bonsai_row_chunking_is_bit_exact(monkeypatch):
+    torch.manual_seed(17)
+    weight = torch.randn(7, 64, dtype=torch.float16)
+    expected = _report_reference(weight, group_size=32)
+
+    # Force four row chunks (2 + 2 + 2 + 1) in a tiny fixture.
+    monkeypatch.setattr(affine_2bit, "_BONSAI_MAX_CHUNK_ELEMENTS", 128)
+    actual = quantize_2bit_bonsai(weight, group_size=32)
+
+    for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
+        assert torch.equal(actual_tensor, expected_tensor)
 
 
 def test_bonsai_strict_threshold_keeps_equal_boundaries_zero():
@@ -216,6 +232,31 @@ def test_quantize_model_bonsai_quantizes_tied_head_and_preserves_eval_mode():
     assert manifest["quantization"]["quantize_tied_weights"] is True
     assert torch.equal(model.embed_tokens.weight, model.lm_head.weight)
     assert torch.equal(model.embed_tokens.scales, model.lm_head.scales)
+
+
+def test_quantize_model_releases_replaced_untied_weights(monkeypatch):
+    class TwoLinears(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.first = nn.Linear(32, 32, bias=False)
+            self.second = nn.Linear(32, 32, bias=False)
+
+    original = affine_2bit.quantize_2bit_bonsai
+    previous_weight: weakref.ReferenceType[torch.Tensor] | None = None
+
+    def tracking_quantizer(weight, *args, **kwargs):
+        nonlocal previous_weight
+        if previous_weight is not None:
+            assert previous_weight() is None
+        previous_weight = weakref.ref(weight)
+        return original(weight, *args, **kwargs)
+
+    monkeypatch.setattr(affine_2bit, "quantize_2bit_bonsai", tracking_quantizer)
+    model = TwoLinears().half()
+    quantize_model_2bit(model, group_size=32, method="bonsai")
+
+    assert isinstance(model.first, QuantizedLinear2Bit)
+    assert isinstance(model.second, QuantizedLinear2Bit)
 
 
 @pytest.mark.parametrize(

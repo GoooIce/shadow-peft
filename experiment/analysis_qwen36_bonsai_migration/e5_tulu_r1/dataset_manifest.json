@@ -1,0 +1,51 @@
+{
+  "dataset_dir": "/Users/devel0per/.cache/modelscope/datasets/allenai--tulu-3-sft-mixture/snapshots/master",
+  "official_tokenizer": "/Users/devel0per/.cache/modelscope/models/prism-ml--Ternary-Bonsai-27B-mlx-2bit/snapshots/master",
+  "train_samples": 64,
+  "eval_samples": 16,
+  "max_length": 128,
+  "seed": 17,
+  "sha256": "548651cdaef7951b3a97dbd0e3c698d568fdd364eff23bd811a899ad8541bd3f",
+  "tokens": 9238,
+  "tokens_by_split": {
+    "train": 7431,
+    "eval": 1807
+  },
+  "selected_by_split": {
+    "eval": 16,
+    "train": 64
+  },
+  "selected_by_bucket": {
+    "multilingual": 16,
+    "math": 16,
+    "code": 16,
+    "general": 32
+  },
+  "selected_by_source": {
+    "ai2-adapt-dev/tulu_v3.9_aya_100k": 16,
+    "ai2-adapt-dev/personahub_math_v5_regen_149960": 7,
+    "ai2-adapt-dev/personahub_code_v2_34999": 1,
+    "ai2-adapt-dev/flan_v2_converted": 15,
+    "ai2-adapt-dev/personahub_ifdata_manual_seed_v3_29980": 5,
+    "allenai/tulu-3-sft-personas-math-grade": 3,
+    "ai2-adapt-dev/evol_codealpaca_heval_decontaminated": 15,
+    "ai2-adapt-dev/tulu_v3.9_table_gpt_5k": 3,
+    "ai2-adapt-dev/tulu_v3.9_wildchat_100k": 8,
+    "ai2-adapt-dev/numinamath_tir_math_decontaminated": 2,
+    "ai2-adapt-dev/tulu_v3.9_open_math_2_gsm8k_50k": 4,
+    "ai2-adapt-dev/oasst1_converted": 1
+  },
+  "scanned_rows": 939343,
+  "eligible_by_bucket": {
+    "general": 262574,
+    "math": 334252,
+    "code": 142275,
+    "multilingual": 100000
+  },
+  "excluded_by_source": {
+    "ai2-adapt-dev/tulu_hard_coded_repeated_10": 240,
+    "invalid_messages": 2,
+    "ai2-adapt-dev/tulu_v3.9_wildjailbreak_decontaminated_50k": 50000,
+    "ai2-adapt-dev/tulu_v3.9_synthetic_finalresp_wildguardmixtrain_decontaminated_50k": 50000
+  }
+}

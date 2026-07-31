@@ -224,3 +224,13 @@ experiment/runs_5M/
 gemma-4-12b-it-mlx-2bit/
 gemma-4-12b-it-torch-1bit/
 gemma-4-12b-it-torch-2bit/
+gemma-4-12b-it-mlx-2bit-v*/
+gemma-4-12b-it-torch-2bit-v*/
+qwen3.6-27b-mlx-2bit*/
+
+# Generated Qwen/Bonsai migration datasets, teacher caches, and adapters.
+# Reports, manifests, and compact result JSON files remain trackable.
+experiment/analysis_qwen36_bonsai_migration/**/adapter/
+experiment/analysis_qwen36_bonsai_migration/**/dataset.jsonl
+experiment/analysis_qwen36_bonsai_migration/**/teacher_cache/
+experiment/analysis_qwen36_bonsai_migration/**/teacher_topk.npz

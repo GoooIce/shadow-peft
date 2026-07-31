@@ -1,0 +1,1147 @@
+{
+  "protocol": {
+    "official_model": "/Users/devel0per/.cache/modelscope/models/prism-ml--Ternary-Bonsai-27B-mlx-2bit/snapshots/master",
+    "ptq_model": "/Users/devel0per/Code/shadow-peft/qwen3.6-27b-mlx-2bit-v2",
+    "quantized_matrices": 498,
+    "main_parameter_arrays": 1494,
+    "aux_parameter_arrays": 353,
+    "main_parameter_values": 2101043200,
+    "aux_parameter_values": 2645504,
+    "max_generation_tokens": 24,
+    "greedy": true,
+    "thinking": false,
+    "prompts": [
+      {
+        "id": "fact",
+        "text": "What is the capital of France? Answer briefly."
+      },
+      {
+        "id": "math",
+        "text": "Calculate 17 * 23. Give only the result."
+      },
+      {
+        "id": "zh_math",
+        "text": "请计算 18 × 3，只给出答案。"
+      },
+      {
+        "id": "code",
+        "text": "Write a Python function add(a, b) that returns their sum."
+      }
+    ]
+  },
+  "cases": {
+    "A_official_main_official_aux": {
+      "prompts": {
+        "fact": {
+          "top10": [
+            {
+              "id": 57590,
+              "text": "Paris",
+              "logit": 21.28125
+            },
+            {
+              "id": 760,
+              "text": "The",
+              "logit": 14.4921875
+            },
+            {
+              "id": 11751,
+              "text": " Paris",
+              "logit": 14.2265625
+            },
+            {
+              "id": 4132,
+              "text": "Par",
+              "logit": 13.203125
+            },
+            {
+              "id": 1671,
+              "text": "par",
+              "logit": 11.28125
+            },
+            {
+              "id": 47358,
+              "text": "France",
+              "logit": 11.125
+            },
+            {
+              "id": 248046,
+              "text": "<|im_end|>",
+              "logit": 11.0859375
+            },
+            {
+              "id": 332,
+              "text": "**",
+              "logit": 11.078125
+            },
+            {
+              "id": 38261,
+              "text": "London",
+              "logit": 10.7421875
+            },
+            {
+              "id": 91149,
+              "text": "Berlin",
+              "logit": 10.71875
+            }
+          ],
+          "logits_seconds": 1.2836694580037147,
+          "generation": "Paris",
+          "generation_metrics": {
+            "elapsed_seconds": 2.2716705419879872,
+            "prompt_tokens": 22,
+            "generation_tokens": 2,
+            "prompt_tps": 55.94284675343872,
+            "generation_tps": 52.47254983713434
+          }
+        },
+        "math": {
+          "top10": [
+            {
+              "id": 18,
+              "text": "3",
+              "logit": 20.921875
+            },
+            {
+              "id": 220,
+              "text": " ",
+              "logit": 18.078125
+            },
+            {
+              "id": 16,
+              "text": "1",
+              "logit": 14.453125
+            },
+            {
+              "id": 19,
+              "text": "4",
+              "logit": 13.3125
+            },
+            {
+              "id": 760,
+              "text": "The",
+              "logit": 12.6953125
+            },
+            {
+              "id": 17,
+              "text": "2",
+              "logit": 11.765625
+            },
+            {
+              "id": 20,
+              "text": "5",
+              "logit": 11.71875
+            },
+            {
+              "id": 15,
+              "text": "0",
+              "logit": 11.3125
+            },
+            {
+              "id": 71093,
+              "text": "```",
+              "logit": 11.2421875
+            },
+            {
+              "id": 24,
+              "text": "9",
+              "logit": 10.7734375
+            }
+          ],
+          "logits_seconds": 0.30195825002738275,
+          "generation": "391",
+          "generation_metrics": {
+            "elapsed_seconds": 0.6625057080236729,
+            "prompt_tokens": 26,
+            "generation_tokens": 4,
+            "prompt_tps": 74.43877465591655,
+            "generation_tps": 35.635378797897836
+          }
+        },
+        "zh_math": {
+          "top10": [
+            {
+              "id": 20,
+              "text": "5",
+              "logit": 20.703125
+            },
+            {
+              "id": 220,
+              "text": " ",
+              "logit": 17.65625
+            },
+            {
+              "id": 16,
+              "text": "1",
+              "logit": 14.2734375
+            },
+            {
+              "id": 21,
+              "text": "6",
+              "logit": 12.9921875
+            },
+            {
+              "id": 18,
+              "text": "3",
+              "logit": 12.5390625
+            },
+            {
+              "id": 19,
+              "text": "4",
+              "logit": 11.953125
+            },
+            {
+              "id": 17,
+              "text": "2",
+              "logit": 11.640625
+            },
+            {
+              "id": 15,
+              "text": "0",
+              "logit": 11.1875
+            },
+            {
+              "id": 23,
+              "text": "8",
+              "logit": 11.1171875
+            },
+            {
+              "id": 24,
+              "text": "9",
+              "logit": 10.8671875
+            }
+          ],
+          "logits_seconds": 0.28288004198111594,
+          "generation": "54",
+          "generation_metrics": {
+            "elapsed_seconds": 0.6337208749901038,
+            "prompt_tokens": 25,
+            "generation_tokens": 3,
+            "prompt_tps": 70.2740111844933,
+            "generation_tps": 40.00493394216484
+          }
+        },
+        "code": {
+          "top10": [
+            {
+              "id": 71093,
+              "text": "```",
+              "logit": 20.640625
+            },
+            {
+              "id": 8160,
+              "text": "Here",
+              "logit": 17.375
+            },
+            {
+              "id": 52451,
+              "text": " ```",
+              "logit": 15.8984375
+            },
+            {
+              "id": 727,
+              "text": "def",
+              "logit": 15.2109375
+            },
+            {
+              "id": 38493,
+              "text": "Sure",
+              "logit": 13.4375
+            },
+            {
+              "id": 2056,
+              "text": "Of",
+              "logit": 13.140625
+            },
+            {
+              "id": 2,
+              "text": "#",
+              "logit": 12.984375
+            },
+            {
+              "id": 2523,
+              "text": "You",
+              "logit": 12.6796875
+            },
+            {
+              "id": 50821,
+              "text": "Actually",
+              "logit": 12.6640625
+            },
+            {
+              "id": 687,
+              "text": " def",
+              "logit": 12.515625
+            }
+          ],
+          "logits_seconds": 0.2875049169815611,
+          "generation": "```python\ndef add(a, b):\n    return a + b\n```",
+          "generation_metrics": {
+            "elapsed_seconds": 1.1921211660082918,
+            "prompt_tokens": 26,
+            "generation_tokens": 18,
+            "prompt_tps": 73.14614952450418,
+            "generation_tps": 28.148059065363306
+          }
+        }
+      },
+      "vs_A_official": {
+        "fact": {
+          "kl_official_to_case": 0.0,
+          "logit_cosine": 1.0,
+          "top10_overlap": 10
+        },
+        "math": {
+          "kl_official_to_case": 0.0,
+          "logit_cosine": 1.0,
+          "top10_overlap": 10
+        },
+        "zh_math": {
+          "kl_official_to_case": 0.0,
+          "logit_cosine": 1.0,
+          "top10_overlap": 10
+        },
+        "code": {
+          "kl_official_to_case": 0.0,
+          "logit_cosine": 1.0,
+          "top10_overlap": 10
+        }
+      }
+    },
+    "B_official_main_qwen_aux": {
+      "prompts": {
+        "fact": {
+          "top10": [
+            {
+              "id": 57590,
+              "text": "Paris",
+              "logit": 19.796875
+            },
+            {
+              "id": 760,
+              "text": "The",
+              "logit": 15.1015625
+            },
+            {
+              "id": 332,
+              "text": "**",
+              "logit": 14.765625
+            },
+            {
+              "id": 4132,
+              "text": "Par",
+              "logit": 12.9453125
+            },
+            {
+              "id": 11751,
+              "text": " Paris",
+              "logit": 12.6640625
+            },
+            {
+              "id": 248068,
+              "text": "<think>",
+              "logit": 11.390625
+            },
+            {
+              "id": 248046,
+              "text": "<|im_end|>",
+              "logit": 11.2421875
+            },
+            {
+              "id": 16,
+              "text": "1",
+              "logit": 10.96875
+            },
+            {
+              "id": 38261,
+              "text": "London",
+              "logit": 9.9921875
+            },
+            {
+              "id": 47358,
+              "text": "France",
+              "logit": 9.9375
+            }
+          ],
+          "logits_seconds": 0.2925691250129603,
+          "generation": "Paris",
+          "generation_metrics": {
+            "elapsed_seconds": 0.5802125410118606,
+            "prompt_tokens": 22,
+            "generation_tokens": 2,
+            "prompt_tps": 62.302450789939094,
+            "generation_tps": 54.32482217102046
+          }
+        },
+        "math": {
+          "top10": [
+            {
+              "id": 18,
+              "text": "3",
+              "logit": 17.390625
+            },
+            {
+              "id": 16,
+              "text": "1",
+              "logit": 17.0625
+            },
+            {
+              "id": 19,
+              "text": "4",
+              "logit": 15.796875
+            },
+            {
+              "id": 220,
+              "text": " ",
+              "logit": 15.578125
+            },
+            {
+              "id": 17,
+              "text": "2",
+              "logit": 14.7265625
+            },
+            {
+              "id": 22,
+              "text": "7",
+              "logit": 14.5078125
+            },
+            {
+              "id": 23,
+              "text": "8",
+              "logit": 14.4765625
+            },
+            {
+              "id": 21,
+              "text": "6",
+              "logit": 14.3359375
+            },
+            {
+              "id": 24,
+              "text": "9",
+              "logit": 14.28125
+            },
+            {
+              "id": 20,
+              "text": "5",
+              "logit": 14.1796875
+            }
+          ],
+          "logits_seconds": 0.28375695800059475,
+          "generation": "399",
+          "generation_metrics": {
+            "elapsed_seconds": 0.6490292920207139,
+            "prompt_tokens": 26,
+            "generation_tokens": 4,
+            "prompt_tps": 73.97748350984156,
+            "generation_tps": 36.01092020081323
+          }
+        },
+        "zh_math": {
+          "top10": [
+            {
+              "id": 20,
+              "text": "5",
+              "logit": 18.9375
+            },
+            {
+              "id": 220,
+              "text": " ",
+              "logit": 13.609375
+            },
+            {
+              "id": 16,
+              "text": "1",
+              "logit": 13.484375
+            },
+            {
+              "id": 21,
+              "text": "6",
+              "logit": 12.5546875
+            },
+            {
+              "id": 248068,
+              "text": "<think>",
+              "logit": 12.3203125
+            },
+            {
+              "id": 18,
+              "text": "3",
+              "logit": 12.2578125
+            },
+            {
+              "id": 17,
+              "text": "2",
+              "logit": 11.90625
+            },
+            {
+              "id": 19,
+              "text": "4",
+              "logit": 11.7734375
+            },
+            {
+              "id": 15,
+              "text": "0",
+              "logit": 11.46875
+            },
+            {
+              "id": 13682,
+              "text": "$$",
+              "logit": 11.3203125
+            }
+          ],
+          "logits_seconds": 0.28343758298433386,
+          "generation": "51",
+          "generation_metrics": {
+            "elapsed_seconds": 0.6209391249867622,
+            "prompt_tokens": 25,
+            "generation_tokens": 3,
+            "prompt_tps": 71.13695240366135,
+            "generation_tps": 40.40478864377719
+          }
+        },
+        "code": {
+          "top10": [
+            {
+              "id": 71093,
+              "text": "```",
+              "logit": 19.828125
+            },
+            {
+              "id": 8160,
+              "text": "Here",
+              "logit": 18.375
+            },
+            {
+              "id": 2056,
+              "text": "Of",
+              "logit": 16.234375
+            },
+            {
+              "id": 1206,
+              "text": "To",
+              "logit": 16.0
+            },
+            {
+              "id": 727,
+              "text": "def",
+              "logit": 15.0078125
+            },
+            {
+              "id": 38493,
+              "text": "Sure",
+              "logit": 14.390625
+            },
+            {
+              "id": 2,
+              "text": "#",
+              "logit": 14.0390625
+            },
+            {
+              "id": 2523,
+              "text": "You",
+              "logit": 13.4375
+            },
+            {
+              "id": 92157,
+              "text": "Certainly",
+              "logit": 13.421875
+            },
+            {
+              "id": 760,
+              "text": "The",
+              "logit": 13.1328125
+            }
+          ],
+          "logits_seconds": 0.2864592080004513,
+          "generation": "```python\ndef add(a, b):\n    return a + b\n```",
+          "generation_metrics": {
+            "elapsed_seconds": 1.1925703749875538,
+            "prompt_tokens": 26,
+            "generation_tokens": 18,
+            "prompt_tps": 73.61386514622257,
+            "generation_tps": 28.35534473106357
+          }
+        }
+      },
+      "vs_A_official": {
+        "fact": {
+          "kl_official_to_case": 0.013674159035496002,
+          "logit_cosine": 0.9678166320355697,
+          "top10_overlap": 8
+        },
+        "math": {
+          "kl_official_to_case": 0.7744015841990805,
+          "logit_cosine": 0.9670885533111203,
+          "top10_overlap": 7
+        },
+        "zh_math": {
+          "kl_official_to_case": 0.07037584505514258,
+          "logit_cosine": 0.9377207693096197,
+          "top10_overlap": 8
+        },
+        "code": {
+          "kl_official_to_case": 0.17479759886618443,
+          "logit_cosine": 0.9451799503870345,
+          "top10_overlap": 7
+        }
+      }
+    },
+    "C_ptq_main_official_aux": {
+      "prompts": {
+        "fact": {
+          "top10": [
+            {
+              "id": 1092,
+              "text": " what",
+              "logit": 10.546875
+            },
+            {
+              "id": 46861,
+              "text": " newcom",
+              "logit": 8.6875
+            },
+            {
+              "id": 168945,
+              "text": "<unk",
+              "logit": 8.40625
+            },
+            {
+              "id": 58750,
+              "text": " fkk",
+              "logit": 8.09375
+            },
+            {
+              "id": 12989,
+              "text": " volunte",
+              "logit": 7.98828125
+            },
+            {
+              "id": 107653,
+              "text": "不胜收",
+              "logit": 7.57421875
+            },
+            {
+              "id": 3069,
+              "text": " why",
+              "logit": 7.33984375
+            },
+            {
+              "id": 12195,
+              "text": "what",
+              "logit": 7.3203125
+            },
+            {
+              "id": 238919,
+              "text": "Kelu",
+              "logit": 7.27734375
+            },
+            {
+              "id": 361,
+              "text": " <",
+              "logit": 7.1875
+            }
+          ],
+          "logits_seconds": 0.2930656669777818,
+          "generation": "what does what does done about what is done about done what is done about done what is done about done what is done",
+          "generation_metrics": {
+            "elapsed_seconds": 1.406273542001145,
+            "prompt_tokens": 22,
+            "generation_tokens": 24,
+            "prompt_tps": 64.02241166541508,
+            "generation_tps": 27.660235127671392
+          }
+        },
+        "math": {
+          "top10": [
+            {
+              "id": 2873,
+              "text": " give",
+              "logit": 9.1484375
+            },
+            {
+              "id": 2574,
+              "text": " given",
+              "logit": 8.8828125
+            },
+            {
+              "id": 348,
+              "text": " *",
+              "logit": 8.5859375
+            },
+            {
+              "id": 313,
+              "text": " {",
+              "logit": 8.4921875
+            },
+            {
+              "id": 168945,
+              "text": "<unk",
+              "logit": 8.4609375
+            },
+            {
+              "id": 361,
+              "text": " <",
+              "logit": 8.1640625
+            },
+            {
+              "id": 1228,
+              "text": " test",
+              "logit": 8.125
+            },
+            {
+              "id": 33963,
+              "text": "Give",
+              "logit": 8.09375
+            },
+            {
+              "id": 1132,
+              "text": " only",
+              "logit": 7.9140625
+            },
+            {
+              "id": 12989,
+              "text": " volunte",
+              "logit": 7.75390625
+            }
+          ],
+          "logits_seconds": 0.28965900000184774,
+          "generation": "give only the result about given effect given by given effect given by given effect given by given effect given by given effect given",
+          "generation_metrics": {
+            "elapsed_seconds": 1.407058999990113,
+            "prompt_tokens": 26,
+            "generation_tokens": 24,
+            "prompt_tps": 73.1443059600405,
+            "generation_tps": 27.76162902485495
+          }
+        },
+        "zh_math": {
+          "top10": [
+            {
+              "id": 168945,
+              "text": "<unk",
+              "logit": 8.2109375
+            },
+            {
+              "id": 46861,
+              "text": " newcom",
+              "logit": 7.56640625
+            },
+            {
+              "id": 361,
+              "text": " <",
+              "logit": 7.33203125
+            },
+            {
+              "id": 1228,
+              "text": " test",
+              "logit": 7.22265625
+            },
+            {
+              "id": 58750,
+              "text": " fkk",
+              "logit": 6.88671875
+            },
+            {
+              "id": 97792,
+              "text": "计算",
+              "logit": 6.875
+            },
+            {
+              "id": 114649,
+              "text": "个人页",
+              "logit": 6.80859375
+            },
+            {
+              "id": 2100,
+              "text": " target",
+              "logit": 6.80078125
+            },
+            {
+              "id": 4558,
+              "text": " \n\n",
+              "logit": 6.78515625
+            },
+            {
+              "id": 27,
+              "text": "<",
+              "logit": 6.6328125
+            }
+          ],
+          "logits_seconds": 0.29162637499393895,
+          "generation": "<unk newcom<unk> newcom<unk> newcom<unk> newcom<unk> newcom<unk> newcom<unk> newcom<unk> newcom<unk",
+          "generation_metrics": {
+            "elapsed_seconds": 1.4351573339954484,
+            "prompt_tokens": 25,
+            "generation_tokens": 24,
+            "prompt_tps": 67.93169060941484,
+            "generation_tps": 27.488540931817376
+          }
+        },
+        "code": {
+          "top10": [
+            {
+              "id": 884,
+              "text": " add",
+              "logit": 10.046875
+            },
+            {
+              "id": 3165,
+              "text": " write",
+              "logit": 9.3203125
+            },
+            {
+              "id": 698,
+              "text": "add",
+              "logit": 9.0546875
+            },
+            {
+              "id": 46861,
+              "text": " newcom",
+              "logit": 8.421875
+            },
+            {
+              "id": 58750,
+              "text": " fkk",
+              "logit": 8.3515625
+            },
+            {
+              "id": 12989,
+              "text": " volunte",
+              "logit": 8.2421875
+            },
+            {
+              "id": 168945,
+              "text": "<unk",
+              "logit": 8.1953125
+            },
+            {
+              "id": 27,
+              "text": "<",
+              "logit": 8.1875
+            },
+            {
+              "id": 460,
+              "text": " return",
+              "logit": 8.109375
+            },
+            {
+              "id": 4775,
+              "text": "write",
+              "logit": 7.859375
+            }
+          ],
+          "logits_seconds": 0.2989018749794923,
+          "generation": "add a description about their own role add a description about their own role add a description about their own role add a description",
+          "generation_metrics": {
+            "elapsed_seconds": 1.433268541994039,
+            "prompt_tokens": 26,
+            "generation_tokens": 24,
+            "prompt_tps": 71.20247754283291,
+            "generation_tps": 27.551677550938404
+          }
+        }
+      },
+      "vs_A_official": {
+        "fact": {
+          "kl_official_to_case": 11.517047828315457,
+          "logit_cosine": 0.21166463889655968,
+          "top10_overlap": 0
+        },
+        "math": {
+          "kl_official_to_case": 9.516363666655414,
+          "logit_cosine": 0.3293502539554759,
+          "top10_overlap": 0
+        },
+        "zh_math": {
+          "kl_official_to_case": 9.603369349298077,
+          "logit_cosine": 0.3529489024788712,
+          "top10_overlap": 0
+        },
+        "code": {
+          "kl_official_to_case": 9.106558221799212,
+          "logit_cosine": 0.42012948966598856,
+          "top10_overlap": 0
+        }
+      }
+    },
+    "D_ptq_main_qwen_aux": {
+      "prompts": {
+        "fact": {
+          "top10": [
+            {
+              "id": 1092,
+              "text": " what",
+              "logit": 14.1484375
+            },
+            {
+              "id": 579,
+              "text": "'s",
+              "logit": 11.7265625
+            },
+            {
+              "id": 1204,
+              "text": " how",
+              "logit": 11.2578125
+            },
+            {
+              "id": 864,
+              "text": " which",
+              "logit": 10.53125
+            },
+            {
+              "id": 369,
+              "text": " is",
+              "logit": 10.2578125
+            },
+            {
+              "id": 883,
+              "text": " about",
+              "logit": 9.828125
+            },
+            {
+              "id": 1503,
+              "text": " does",
+              "logit": 9.6640625
+            },
+            {
+              "id": 725,
+              "text": "’s",
+              "logit": 9.6484375
+            },
+            {
+              "id": 1332,
+              "text": " where",
+              "logit": 9.484375
+            },
+            {
+              "id": 852,
+              "text": " who",
+              "logit": 9.4765625
+            }
+          ],
+          "logits_seconds": 0.29308537498582155,
+          "generation": "what's what's what's what's what's what's what's what's what's what's what's what's",
+          "generation_metrics": {
+            "elapsed_seconds": 1.4244724590098485,
+            "prompt_tokens": 22,
+            "generation_tokens": 24,
+            "prompt_tps": 61.67570075353807,
+            "generation_tps": 27.45195789259483
+          }
+        },
+        "math": {
+          "top10": [
+            {
+              "id": 579,
+              "text": "'s",
+              "logit": 10.6953125
+            },
+            {
+              "id": 6587,
+              "text": " wants",
+              "logit": 10.2109375
+            },
+            {
+              "id": 725,
+              "text": "’s",
+              "logit": 9.3828125
+            },
+            {
+              "id": 1092,
+              "text": " what",
+              "logit": 9.2734375
+            },
+            {
+              "id": 5435,
+              "text": " contains",
+              "logit": 9.1015625
+            },
+            {
+              "id": 5387,
+              "text": " himself",
+              "logit": 9.0390625
+            },
+            {
+              "id": 264,
+              "text": " a",
+              "logit": 9.0234375
+            },
+            {
+              "id": 491,
+              "text": " new",
+              "logit": 8.8984375
+            },
+            {
+              "id": 682,
+              "text": " has",
+              "logit": 8.890625
+            },
+            {
+              "id": 1503,
+              "text": " does",
+              "logit": 8.65625
+            }
+          ],
+          "logits_seconds": 0.2931593749963213,
+          "generation": "'s wants what's wants what's wants what's where's what's where's where's where's where's where's",
+          "generation_metrics": {
+            "elapsed_seconds": 1.4240893340029288,
+            "prompt_tokens": 26,
+            "generation_tokens": 24,
+            "prompt_tps": 72.70146279566504,
+            "generation_tps": 27.683322601053906
+          }
+        },
+        "zh_math": {
+          "top10": [
+            {
+              "id": 96434,
+              "text": "话",
+              "logit": 8.859375
+            },
+            {
+              "id": 96444,
+              "text": "论",
+              "logit": 8.0625
+            },
+            {
+              "id": 220,
+              "text": " ",
+              "logit": 7.921875
+            },
+            {
+              "id": 101587,
+              "text": "的话",
+              "logit": 7.90234375
+            },
+            {
+              "id": 96022,
+              "text": "位",
+              "logit": 7.8984375
+            },
+            {
+              "id": 96407,
+              "text": "什么",
+              "logit": 7.8359375
+            },
+            {
+              "id": 96711,
+              "text": "则",
+              "logit": 7.7578125
+            },
+            {
+              "id": 96115,
+              "text": "自己",
+              "logit": 7.72265625
+            },
+            {
+              "id": 96176,
+              "text": "项",
+              "logit": 7.53125
+            },
+            {
+              "id": 95762,
+              "text": "有",
+              "logit": 7.21484375
+            }
+          ],
+          "logits_seconds": 0.2926460420130752,
+          "generation": "话论话论论论论论论论论论论论论论论论论论论论论论",
+          "generation_metrics": {
+            "elapsed_seconds": 1.4324150409956928,
+            "prompt_tokens": 25,
+            "generation_tokens": 24,
+            "prompt_tps": 69.07948256939576,
+            "generation_tps": 27.58887857837106
+          }
+        },
+        "code": {
+          "top10": [
+            {
+              "id": 579,
+              "text": "'s",
+              "logit": 12.546875
+            },
+            {
+              "id": 6587,
+              "text": " wants",
+              "logit": 11.484375
+            },
+            {
+              "id": 1092,
+              "text": " what",
+              "logit": 10.8671875
+            },
+            {
+              "id": 709,
+              "text": " function",
+              "logit": 10.2421875
+            },
+            {
+              "id": 725,
+              "text": "’s",
+              "logit": 9.984375
+            },
+            {
+              "id": 3520,
+              "text": " makes",
+              "logit": 9.8359375
+            },
+            {
+              "id": 682,
+              "text": " has",
+              "logit": 9.71875
+            },
+            {
+              "id": 264,
+              "text": " a",
+              "logit": 9.5078125
+            },
+            {
+              "id": 1503,
+              "text": " does",
+              "logit": 9.4609375
+            },
+            {
+              "id": 5435,
+              "text": " contains",
+              "logit": 9.453125
+            }
+          ],
+          "logits_seconds": 0.2930776250141207,
+          "generation": "'s's what's what's what's what's what's what's what's what's what's what's what's",
+          "generation_metrics": {
+            "elapsed_seconds": 1.4193382499797735,
+            "prompt_tokens": 26,
+            "generation_tokens": 24,
+            "prompt_tps": 73.33677124925936,
+            "generation_tps": 27.49869574309268
+          }
+        }
+      },
+      "vs_A_official": {
+        "fact": {
+          "kl_official_to_case": 14.763202654625385,
+          "logit_cosine": 0.41642114587337004,
+          "top10_overlap": 0
+        },
+        "math": {
+          "kl_official_to_case": 10.201209290383915,
+          "logit_cosine": 0.49545306228798663,
+          "top10_overlap": 0
+        },
+        "zh_math": {
+          "kl_official_to_case": 12.051003978569556,
+          "logit_cosine": 0.5218600936904711,
+          "top10_overlap": 1
+        },
+        "code": {
+          "kl_official_to_case": 11.678325556538482,
+          "logit_cosine": 0.4214066280396532,
+          "top10_overlap": 0
+        }
+      }
+    }
+  },
+  "peak_memory_gb": 14.440471716225147
+}

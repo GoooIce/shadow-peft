@@ -1,0 +1,38 @@
+{
+  "offline_code_reproduction": {
+    "v2_8ls_code_agreement": 0.8143453041425817,
+    "v3_oneshot_code_agreement": 0.8780974902561945,
+    "official_zero_rate": 0.29701406954092197,
+    "v2_8ls_zero_rate": 0.4596377211549452,
+    "v3_oneshot_zero_rate": 0.311464878466757
+  },
+  "official_aux": {
+    "v2_8ls": {
+      "mean_kl": 9.93583476651704,
+      "mean_logit_cosine": 0.32852332124922384,
+      "top10_overlap": 0,
+      "top10_total": 40
+    },
+    "v3_oneshot": {
+      "mean_kl": 11.439768869089932,
+      "mean_logit_cosine": 0.5139940229491459,
+      "top10_overlap": 1,
+      "top10_total": 40
+    }
+  },
+  "qwen_aux": {
+    "v2_8ls": {
+      "mean_kl": 12.173435370029335,
+      "mean_logit_cosine": 0.46378523247287023,
+      "top10_overlap": 1,
+      "top10_total": 40
+    },
+    "v3_oneshot": {
+      "mean_kl": 11.841274388460967,
+      "mean_logit_cosine": 0.5054945726194094,
+      "top10_overlap": 1,
+      "top10_total": 40
+    }
+  },
+  "conclusion": "One-shot absmean/0.5 improves offline code agreement and the all-PTQ first-token distribution slightly, but does not recover semantic generation. Pure threshold/scale PTQ is insufficient."
+}

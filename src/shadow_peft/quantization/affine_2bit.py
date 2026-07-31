@@ -39,6 +39,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 _EPS = 1e-8
+# Keep the temporary fp32/ternary/int64 working set bounded when quantizing
+# vocabulary tables and other very large matrices. Bonsai statistics are
+# independent per row/group, so row chunking is bit-identical to processing
+# the full tensor at once.
+_BONSAI_MAX_CHUNK_ELEMENTS = 8 * 1024 * 1024
 
 
 def _check_group_size(group_size: int) -> None:
@@ -168,51 +173,76 @@ def quantize_2bit_bonsai(
         weight = weight.to(torch.float16)
         dtype = weight.dtype
 
-    groups = weight.reshape(out_features, in_features // group_size, group_size).float()
+    rows_per_chunk = max(1, _BONSAI_MAX_CHUNK_ELEMENTS // in_features)
+    packed_chunks: list[torch.Tensor] = []
+    scale_chunks: list[torch.Tensor] = []
+    bias_chunks: list[torch.Tensor] = []
 
-    scales = groups.abs().mean(dim=-1).clamp_min(_EPS)
-
-    def assign(current_scales: torch.Tensor) -> torch.Tensor:
+    def assign(
+        chunk_groups: torch.Tensor, current_scales: torch.Tensor
+    ) -> torch.Tensor:
         threshold = thr_ratio * current_scales.unsqueeze(-1)
         # Strict comparisons are intentional: values exactly at either
         # threshold belong to the zero level, matching the report pseudocode.
         return torch.where(
-            groups > threshold,
-            torch.ones_like(groups),
-            torch.where(groups < -threshold, -torch.ones_like(groups), 0.0),
+            chunk_groups > threshold,
+            torch.ones_like(chunk_groups),
+            torch.where(
+                chunk_groups < -threshold, -torch.ones_like(chunk_groups), 0.0
+            ),
         )
 
-    # refine_iters=0 is a useful no-refit baseline.  For N>0 this is exactly N
-    # assignment -> least-squares steps; the returned scale is fitted to the
-    # returned assignment rather than to a subsequently changed assignment.
-    ternary = assign(scales)
-    for iteration in range(refine_iters):
-        denom = (ternary * ternary).sum(dim=-1).clamp_min(1.0)
-        scales = ((groups * ternary).sum(dim=-1) / denom).abs().clamp_min(_EPS)
-        if iteration + 1 < refine_iters:
-            ternary = assign(scales)
+    for row_start in range(0, out_features, rows_per_chunk):
+        row_end = min(row_start + rows_per_chunk, out_features)
+        groups = (
+            weight[row_start:row_end]
+            .reshape(row_end - row_start, in_features // group_size, group_size)
+            .float()
+        )
 
-    # Map ternary {-1,0,+1} -> code {0,1,2}. Code 3 is never produced.
-    code = (ternary + 1.0).to(torch.int64)  # -1->0, 0->1, +1->2
+        scales = groups.abs().mean(dim=-1).clamp_min(_EPS)
 
-    # Pack 16 2-bit codes per int32 word, LSB-first.
-    n_words = in_features // 16
-    code = code.reshape(out_features, n_words, 16)
-    shifts = 2 ** (2 * torch.arange(16, dtype=torch.int64, device=weight.device))
-    packed = (code * shifts).sum(dim=-1)  # values in [0, 2^32)
-    packed = (packed & 0xFFFFFFFF).to(torch.int32)  # wrap to int32 bit pattern
+        # refine_iters=0 is a useful no-refit baseline. For N>0 this is exactly
+        # N assignment -> least-squares steps; the returned scale is fitted to
+        # the returned assignment rather than to a subsequently changed one.
+        ternary = assign(groups, scales)
+        for iteration in range(refine_iters):
+            denom = (ternary * ternary).sum(dim=-1).clamp_min(1.0)
+            scales = ((groups * ternary).sum(dim=-1) / denom).abs().clamp_min(_EPS)
+            if iteration + 1 < refine_iters:
+                ternary = assign(groups, scales)
 
-    # 1e-8 rounds to zero in fp16. Replace only values that actually rounded
-    # to zero; valid fp16 subnormal scales must not be inflated. Code 1 plus
-    # bias=-scale still reconstructs an all-zero group exactly.
-    stored_scales = scales.to(dtype)
-    stored_scales = torch.where(
-        stored_scales == 0,
-        torch.full_like(stored_scales, torch.finfo(dtype).tiny),
-        stored_scales,
+        # Map ternary {-1,0,+1} -> code {0,1,2}. Code 3 is never produced.
+        code = (ternary + 1.0).to(torch.int64)
+
+        # Pack 16 2-bit codes per int32 word, LSB-first.
+        n_words = in_features // 16
+        code = code.reshape(row_end - row_start, n_words, 16)
+        shifts = 2 ** (
+            2 * torch.arange(16, dtype=torch.int64, device=weight.device)
+        )
+        packed = (code * shifts).sum(dim=-1)
+        packed = (packed & 0xFFFFFFFF).to(torch.int32)
+
+        # 1e-8 rounds to zero in fp16. Replace only values that actually
+        # rounded to zero; valid fp16 subnormal scales must not be inflated.
+        stored_scales = scales.to(dtype)
+        stored_scales = torch.where(
+            stored_scales == 0,
+            torch.full_like(stored_scales, torch.finfo(dtype).tiny),
+            stored_scales,
+        )
+        packed_chunks.append(packed)
+        scale_chunks.append(stored_scales)
+        bias_chunks.append(-stored_scales)
+
+    if len(packed_chunks) == 1:
+        return packed_chunks[0], scale_chunks[0], bias_chunks[0]
+    return (
+        torch.cat(packed_chunks, dim=0),
+        torch.cat(scale_chunks, dim=0),
+        torch.cat(bias_chunks, dim=0),
     )
-    biases = -stored_scales
-    return packed, stored_scales, biases
 
 
 def dequantize_2bit_ternary(
@@ -519,11 +549,22 @@ def quantize_model_2bit(
     tied: list[str] = []
     quantized_tied: list[str] = []
     trimmed: dict[str, list[int]] = {}
-    replaced_weights: list[torch.Tensor] = []
+    # Keep only names and original data pointers. Holding a materialized
+    # ``list(model.named_modules())`` or the tensors themselves prevents
+    # replaced BF16 weights from being released, which is prohibitive for a
+    # 27B checkpoint. Capturing all pointers up front also avoids false tied
+    # detections if the allocator later reuses a freed address.
+    module_weights = [
+        (name, module.weight.data_ptr())
+        for name, module in model.named_modules()
+        if isinstance(module, (nn.Linear, nn.Embedding))
+    ]
+    replaced_weight_ptrs: set[int] = set()
 
-    for name, module in list(model.named_modules()):
+    for name, original_weight_ptr in module_weights:
+        module = model.get_submodule(name)
         if not isinstance(module, (nn.Linear, nn.Embedding)):
-            continue
+            raise RuntimeError(f"quantizable module {name!r} changed during replacement")
         matched = next((p for p in skip_patterns if p in name), None)
         if matched is not None:
             skipped[name] = f"matched skip pattern '{matched}'"
@@ -532,9 +573,7 @@ def quantize_model_2bit(
         parent_name, _, child_name = name.rpartition(".")
         parent = model.get_submodule(parent_name) if parent_name else model
 
-        is_tied = any(
-            weight is w or weight.data_ptr() == w.data_ptr() for w in replaced_weights
-        )
+        is_tied = original_weight_ptr in replaced_weight_ptrs
         if is_tied and not resolved_quantize_tied:
             tied.append(name)
             # Keep a tied lm_head dimensionally consistent with a trimmed
@@ -611,7 +650,7 @@ def quantize_model_2bit(
             )
         new_module.train(module.training)
         setattr(parent, child_name, new_module)
-        replaced_weights.append(weight)
+        replaced_weight_ptrs.add(original_weight_ptr)
         quantized.append(name)
         if is_tied:
             quantized_tied.append(name)

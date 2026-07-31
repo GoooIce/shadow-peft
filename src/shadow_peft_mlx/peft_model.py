@@ -7,7 +7,7 @@ from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_flatten
-from mlx_lm.models.cache import KVCache
+from mlx_lm.models.cache import ArraysCache, KVCache
 
 from .config import ShadowConfig
 from .model_utils import (
@@ -140,17 +140,24 @@ class ShadowPeftModel(nn.Module):
         else:
             self.shadow_model = _get_inner_model(shadow_model)
 
+        # Resolve the shadow width before embedding sharing removes the shadow
+        # table. Some nested mlx-lm backbones (Qwen3.5/Qwen3.6) keep ModelArgs on
+        # their parent text wrapper rather than on the inner backbone itself.
+        shadow_hidden_size = _get_hidden_size(self.shadow_model)
+
         # Embedding sharing policy (mirrors the torch implementation):
         # - implicit shadow: always share base embeddings, drop the shadow table
         # - explicit shadow without `embed_tokens`: share base embeddings
         self._share_base_embeddings = not self._explicit_shadow_model
         if self._explicit_shadow_model and getattr(self.shadow_model, "embed_tokens", None) is None:
             self._share_base_embeddings = True
-        if self._share_base_embeddings and getattr(self.shadow_model, "embed_tokens", None) is not None:
+        if (
+            self._share_base_embeddings
+            and getattr(self.shadow_model, "embed_tokens", None) is not None
+        ):
             self.shadow_model.embed_tokens = None
 
         # If the shadow hidden size differs from the base, project into base hidden size.
-        shadow_hidden_size = _get_hidden_size(self.shadow_model)
         self.shadow_hidden_size = int(shadow_hidden_size)
         self.base_hidden_size = int(hidden_size)
         if shadow_hidden_size != hidden_size:
@@ -187,9 +194,7 @@ class ShadowPeftModel(nn.Module):
                 else:
                     # The base already carries a stale wrapper from another adapter:
                     # wrap the original layer, not the old wrapper.
-                    wrapped.append(
-                        _ShadowLayerWrapper(layer.layer, layer_idx=i, adapter=self)
-                    )
+                    wrapped.append(_ShadowLayerWrapper(layer.layer, layer_idx=i, adapter=self))
             else:
                 wrapped.append(_ShadowLayerWrapper(layer, layer_idx=i, adapter=self))
         base_inner.layers = wrapped
@@ -221,7 +226,9 @@ class ShadowPeftModel(nn.Module):
             if input_embeddings is None:
                 base_inner = _get_inner_model(self.base_model)
                 input_embeddings = base_inner.embed_tokens(input_ids)
-            out = self.shadow_model(input_ids, cache=shadow_cache, input_embeddings=input_embeddings)
+            out = self.shadow_model(
+                input_ids, cache=shadow_cache, input_embeddings=input_embeddings
+            )
         else:
             out = self.shadow_model(input_ids, cache=shadow_cache)
         if self.shadow_hidden_projection is not None:
@@ -244,8 +251,23 @@ class ShadowPeftModel(nn.Module):
         first = cache[0] if isinstance(cache, (list, tuple)) else cache
         offset = getattr(first, "offset", 0) if first is not None else 0
         if offset == 0:
-            num_shadow_layers = len(_get_decoder_layers(self.shadow_model)[1])
-            self._runtime.shadow_cache = [KVCache() for _ in range(num_shadow_layers)]
+            shadow_layers = _get_decoder_layers(self.shadow_model)[1]
+            # Qwen3.5/Qwen3.6 hybrid backbones use ArraysCache for their
+            # linear-attention layers and KVCache for full attention. A plain
+            # KVCache fails during chunked prefill because the SSM mask expects
+            # ArraysCache.make_mask().
+            self._runtime.shadow_cache = [
+                ArraysCache(size=2) if getattr(layer, "is_linear", False) else KVCache()
+                for layer in shadow_layers
+            ]
+            ssm_idx = getattr(self.shadow_model, "ssm_idx", -1)
+            fa_idx = getattr(self.shadow_model, "fa_idx", -1)
+            required_size = max(len(shadow_layers), ssm_idx + 1, fa_idx + 1)
+            while len(self._runtime.shadow_cache) < required_size:
+                index = len(self._runtime.shadow_cache)
+                self._runtime.shadow_cache.append(
+                    ArraysCache(size=2) if index == ssm_idx else KVCache()
+                )
         return self._runtime.shadow_cache
 
     def forward_with_shadow(

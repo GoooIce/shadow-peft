@@ -1,0 +1,79 @@
+{
+  "dataset_dir": "/Users/devel0per/.cache/modelscope/datasets/allenai--tulu-3-sft-mixture/snapshots/master",
+  "official_tokenizer": "/Users/devel0per/.cache/modelscope/models/prism-ml--Ternary-Bonsai-27B-mlx-2bit/snapshots/master",
+  "train_samples": 1024,
+  "eval_samples": 64,
+  "max_length": 4096,
+  "max_assistant_tokens": 128,
+  "seed": 17,
+  "sha256": "63f738ee8192032b6713be388d540cd3b6908a89f9fc817d17c78ca120197839",
+  "selected_by_split": {
+    "train": 1024,
+    "eval": 64
+  },
+  "selected_by_bucket": {
+    "multilingual": 218,
+    "general": 434,
+    "math": 218,
+    "code": 218
+  },
+  "selected_by_source": {
+    "ai2-adapt-dev/tulu_v3.9_aya_100k": 218,
+    "ai2-adapt-dev/flan_v2_converted": 183,
+    "ai2-adapt-dev/personahub_math_v5_regen_149960": 97,
+    "ai2-adapt-dev/tulu_v3.9_open_math_2_gsm8k_50k": 33,
+    "ai2-adapt-dev/tulu_v3.9_table_gpt_5k": 12,
+    "ai2-adapt-dev/personahub_code_v2_34999": 42,
+    "ai2-adapt-dev/tulu_v3.9_wildchat_100k": 123,
+    "ai2-adapt-dev/tulu_v3.9_sciriff_10k": 21,
+    "ai2-adapt-dev/evol_codealpaca_heval_decontaminated": 176,
+    "ai2-adapt-dev/numinamath_tir_math_decontaminated": 39,
+    "allenai/tulu-3-sft-personas-math-grade": 39,
+    "ai2-adapt-dev/personahub_ifdata_manual_seed_v3_29980": 53,
+    "ai2-adapt-dev/oasst1_converted": 13,
+    "ai2-adapt-dev/tulu_v3.9_personahub_math_interm_algebra_20k": 10,
+    "ai2-adapt-dev/coconot_converted": 22,
+    "ai2-adapt-dev/no_robots_converted": 7
+  },
+  "context_tokens": 602957,
+  "assistant_tokens": 97707,
+  "context_length": {
+    "min": 22,
+    "mean": 554.1884191176471,
+    "p50": 396.5,
+    "p90": 1251.3000000000002,
+    "p99": 2817.759999999982,
+    "max": 4096,
+    "at_4096": 4
+  },
+  "assistant_token_count": {
+    "min": 1,
+    "mean": 89.80422794117646,
+    "max": 128
+  },
+  "rejected": {
+    "ValueError": 266,
+    "no_assistant_within_context": 17
+  },
+  "scan": {
+    "scanned_rows": 939343,
+    "eligible_by_bucket": {
+      "general": 262574,
+      "math": 334252,
+      "code": 142275,
+      "multilingual": 100000
+    },
+    "excluded_by_source": {
+      "ai2-adapt-dev/tulu_hard_coded_repeated_10": 240,
+      "invalid_messages": 2,
+      "ai2-adapt-dev/tulu_v3.9_wildjailbreak_decontaminated_50k": 50000,
+      "ai2-adapt-dev/tulu_v3.9_synthetic_finalresp_wildguardmixtrain_decontaminated_50k": 50000
+    },
+    "selected_by_bucket": {
+      "general": 871,
+      "multilingual": 435,
+      "math": 435,
+      "code": 435
+    }
+  }
+}
