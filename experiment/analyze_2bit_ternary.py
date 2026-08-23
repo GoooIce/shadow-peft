@@ -31,6 +31,7 @@ from transformers import AutoModelForCausalLM
 from shadow_peft.quantization import (
     dequantize_2bit_ternary,
     quantize_2bit_ternary,
+    unpack_codes,
 )
 
 GROUP_SIZE = 128
@@ -55,9 +56,8 @@ def layer_metrics(name: str, w_fp16: torch.Tensor, refine_iters: int) -> dict:
     )
     deq = dequantize_2bit_ternary(packed, scales, biases, group_size=GROUP_SIZE)
 
-    # Unpack codes to compute distribution
-    shifts = 2 * torch.arange(16, dtype=torch.int32)
-    codes = ((packed.unsqueeze(-1) >> shifts) & 0b11).reshape(-1)
+    # Unpack codes to compute distribution (via the codec — one home for unpacking)
+    codes = unpack_codes(packed, 2).reshape(-1)
     code_counts = torch.bincount(codes, minlength=4).float()
     total = code_counts.sum()
     code_fracs = (code_counts / total).tolist()

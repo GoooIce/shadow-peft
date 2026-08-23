@@ -12,12 +12,17 @@ from __future__ import annotations
 
 import gc
 import math
+import sys
+from pathlib import Path
 
 import mlx.core as mx
 from mlx_lm import load, stream_generate
 from mlx_lm.sample_utils import make_sampler
 
-from shadow_peft_mlx import quantize_model_1bit
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lab.atoms import load_wikitext2_test_text  # noqa: E402
+
+from shadow_peft_mlx import quantize_model_1bit  # noqa: E402
 
 CHUNK = 512
 MAX_CHUNKS = 40  # ~20k tokens, enough for a stable comparison
@@ -74,10 +79,7 @@ def unload(model) -> None:
 
 
 def main() -> None:
-    from datasets import load_dataset
-
-    ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-    text = "\n".join(line for line in ds["text"] if line.strip())[:200_000]
+    text = load_wikitext2_test_text()
 
     # 1. fp16 upper bound
     model, tokenizer = load("Qwen/Qwen3-1.7B")

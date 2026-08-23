@@ -1,10 +1,9 @@
 """Adapter registry: holds all specialist adapter weights and swaps them on demand.
 
 Torch-specific. One live ``ShadowForCausalLM`` serves all specialists; swapping
-is an in-place weight overwrite of the four adapter modules via
-``ShadowPeftModel.load_adapter_state_dict``. Because shadow is **stateful**
-(each adapter carries its own evolving shadow hidden state + shadow KV-cache),
-a swap must also reset ``_shadow_cache`` so the new adapter starts clean.
+goes through ``ShadowPeftModel.swap_adapter``, which overwrites the four
+adapter modules in place and resets the shadow runtime state (hidden states +
+shadow KV-cache) atomically.
 
 Base model weights are never touched by a swap -- they stay resident on device.
 Adapter state dicts live on CPU and are only moved onto the live model on swap.
@@ -104,10 +103,9 @@ class AdapterRegistry:
             raise KeyError(f"Unknown specialist: {specialist!r}")
 
         peft: ShadowPeftModel = self.model.peft_model
-        peft.load_adapter_state_dict(self._adapter_states[specialist])
-        # Shadow is stateful: the shadow backbone weights just changed, so its
-        # KV-cache is now invalid. Force a clean rebuild on the next forward.
-        peft._shadow_cache = None
+        # swap_adapter loads the four adapter modules in place AND resets the
+        # shadow runtime state (hidden states + KV-cache) in one atomic step.
+        peft.swap_adapter(self._adapter_states[specialist])
 
         self._swap_task_heads(specialist)
         self._current = specialist

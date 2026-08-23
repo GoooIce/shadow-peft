@@ -19,6 +19,7 @@ from mlx_lm.sample_utils import make_sampler
 
 sys.path.insert(0, str(Path(__file__).parent))
 from compare_bonsai_1bit import PROMPTS, perplexity  # noqa: E402
+from lab.atoms import load_wikitext2_test_text  # noqa: E402
 
 from shadow_peft_mlx import quantize_model_1bit  # noqa: E402
 
@@ -36,10 +37,7 @@ def sample_generation(model, tokenizer, prompt: str) -> str:
 
 
 def main() -> None:
-    from datasets import load_dataset
-
-    ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-    text = "\n".join(line for line in ds["text"] if line.strip())[:200_000]
+    text = load_wikitext2_test_text()
 
     print("\n| model | PPL |", flush=True)
     print("|---|---:|")

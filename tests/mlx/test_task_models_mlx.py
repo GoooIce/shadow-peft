@@ -141,3 +141,26 @@ def test_seqcls_shadow_only_mode(llama_factory, shadow_cfg):
     out = cls(ids, labels=mx.array([1]))
     assert mx.abs(out.logits - out.shadow_logits).max().item() == 0.0
     assert out.loss is not None
+
+
+def test_seqcls_attention_aware_pooling(llama_factory, shadow_cfg):
+    """Right-padded batches must classify like unpadded ones (torch parity).
+
+    The pre-fix bug pooled blindly at position -1, i.e. on padding tokens.
+    Note: full *left*-pad parity additionally needs mask-aware forwards
+    through the base model (the MLX forward chain has no mask plumbing yet);
+    pooling semantics themselves are what this pins.
+    """
+    cls = ShadowForSequenceClassification(
+        get_shadow_model(llama_factory(seed=21), shadow_cfg), num_labels=4
+    )
+    cls.eval()
+    ids = mx.array([[1, 5, 7, 9, 3]])
+    pad = mx.zeros((1, 4), dtype=ids.dtype)
+    right_padded = mx.concatenate([ids, pad], axis=1)
+    mask = mx.concatenate([mx.ones((1, 5), dtype=mx.int32), mx.zeros((1, 4), dtype=mx.int32)], axis=1)
+
+    out_plain = cls(ids)
+    out_padded = cls(right_padded, attention_mask=mask)
+    assert mx.allclose(out_plain.logits, out_padded.logits, atol=1e-4)
+    assert mx.allclose(out_plain.shadow_logits, out_padded.shadow_logits, atol=1e-4)

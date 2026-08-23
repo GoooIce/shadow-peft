@@ -382,3 +382,35 @@ def test_engine_metadata_overrides_stickiness(tmp_path):
     _, info = engine.generate("alpha query", metadata={"force": "beta"}, session=sess, max_new_tokens=1)
     assert info["specialist"] == "beta"
     assert info["reason"] == "metadata_rule"
+
+
+def test_swap_adapter_clears_shadow_runtime_state(tmp_path):
+    """The swap seam: weights load AND the shadow runtime state resets, atomically."""
+    engine, model = _engine_with_two_specialists(tmp_path)
+    peft = model.peft_model
+    engine.registry.ensure("alpha")
+    # Plant stale runtime state as an interrupted generation would leave behind.
+    peft._shadow_cache = "stale"
+    peft._shadow_hidden_states = "stale"
+    beta_sd = engine.registry._adapter_states["beta"]
+    peft.swap_adapter(beta_sd)
+    assert peft._shadow_cache is None
+    assert peft._shadow_hidden_states is None
+    key = "shadow_model.layers.0.self_attn.q_proj.weight"
+    assert torch.equal(peft.adapter_state_dict()[key], beta_sd[key])
+
+
+def test_harness_core_is_single_source():
+    """torch and MLX harness types are the same backend-free classes from shadow_core."""
+    import shadow_core
+    import shadow_peft
+    import shadow_peft_mlx
+
+    assert shadow_peft.ShadowConfig is shadow_core.ShadowConfig
+    assert shadow_peft_mlx.ShadowConfig is shadow_core.ShadowConfig
+    from shadow_peft.harness import Router as RouterTorch
+    from shadow_peft_mlx.harness import Router as RouterMlx
+    from shadow_core.harness import Router as RouterCore
+
+    assert RouterTorch is RouterCore
+    assert RouterMlx is RouterCore

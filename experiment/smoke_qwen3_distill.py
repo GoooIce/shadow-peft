@@ -1,29 +1,32 @@
-"""
-Smoke test: 1-bit packed Qwen3-1.7B + Shadow adapter + teacher distillation (torch).
+"""Smoke test: packed quantized Qwen3 + Shadow adapter + teacher distillation (torch).
 
-Verifies the full recovery path end-to-end:
-  1. Qwen3-1.7B quantizes to 1-bit in place and still forwards (garbage is OK,
-     NaN is not).
+Verifies the full recovery path end-to-end, for either bit-width:
+  1. Qwen3 quantizes to 1-bit (binary) or 2-bit (ternary) in place and
+     still forwards (garbage is OK, NaN is not).
   2. The Shadow adapter wraps the quantized base and trains.
-  3. KL distillation from the fp16 teacher flows gradients into shadow params
-     only, leaving packed int32 weights bit-identical.
+  3. KL distillation from the full-precision teacher flows gradients into
+     shadow params only, leaving packed int32 weights bit-identical.
 
-Run: .venv/bin/python experiment/smoke_qwen3_1bit_distill.py
+Run: python experiment/smoke_qwen3_distill.py --bits 1
+     python experiment/smoke_qwen3_distill.py --bits 2 --model /path/to/local
 """
 
 from __future__ import annotations
+
+import argparse
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from shadow_peft import ShadowConfig, ShadowForCausalLM, get_shadow_model
-from shadow_peft.quantization import quantize_model_1bit
+from shadow_peft.quantization import quantize_model_1bit, quantize_model_2bit
 
-MODEL = "Qwen/Qwen3-1.7B"
-DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
-DTYPE = torch.float16
 GROUP_SIZE = 128
 STEPS = 10
+
+# fp16 training diverges (loss -> nan) at lr=3e-4 under 2-bit ternary.
+_DTYPES = {1: torch.float16, 2: torch.bfloat16}
+_REFINE_ITERS = {1: 0, 2: 8}
 
 SENTENCES = [
     "The capital of France is Paris, a city known for the Eiffel Tower.",
@@ -38,40 +41,58 @@ SENTENCES = [
 
 
 def main() -> None:
-    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--bits", type=int, choices=[1, 2], default=1)
+    ap.add_argument("--model", default="Qwen/Qwen3-1.7B", help="HF model id or local path")
+    args = ap.parse_args()
 
-    # --- 1. quantize the base to 1-bit -------------------------------------
-    base = AutoModelForCausalLM.from_pretrained(MODEL, dtype=DTYPE).to(DEVICE)
-    manifest = quantize_model_1bit(base, group_size=GROUP_SIZE)
+    device = (
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps"
+        if torch.backends.mps.is_available()
+        else "cpu"
+    )
+    dtype = _DTYPES[args.bits]
+    label = "1-bit" if args.bits == 1 else "ternary 2-bit"
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+
+    # --- 1. quantize the base ---
+    base = AutoModelForCausalLM.from_pretrained(args.model, dtype=dtype).to(device)
+    if args.bits == 1:
+        manifest = quantize_model_1bit(base, group_size=GROUP_SIZE)
+    else:
+        manifest = quantize_model_2bit(base, group_size=GROUP_SIZE, refine_iters=_REFINE_ITERS[args.bits])
     print(
         f"quantized={len(manifest['quantized'])} "
         f"skipped={len(manifest['skipped'])} tied={manifest['tied']}"
     )
     base.eval()
 
-    batch = tokenizer(SENTENCES, return_tensors="pt", padding=True).to(DEVICE)
+    batch = tokenizer(SENTENCES, return_tensors="pt", padding=True).to(device)
     labels = batch.input_ids.clone()
     labels[batch.attention_mask == 0] = -100
 
     with torch.no_grad():
         ref = base(**batch)
-    assert torch.isfinite(ref.logits).all(), "1-bit forward produced NaN/Inf"
-    print(f"1-bit forward OK: logits {tuple(ref.logits.shape)}")
+    assert torch.isfinite(ref.logits).all(), f"{label} forward produced NaN/Inf"
+    print(f"{label} forward OK: logits {tuple(ref.logits.shape)}")
 
-    # --- 2. teacher (fp16, frozen, same device) -----------------------------
-    teacher = AutoModelForCausalLM.from_pretrained(MODEL, dtype=DTYPE).to(DEVICE)
+    # --- 2. teacher (full precision, frozen, same device) ---
+    teacher = AutoModelForCausalLM.from_pretrained(args.model, dtype=dtype).to(device)
     teacher.eval()
     for p in teacher.parameters():
         p.requires_grad_(False)
 
-    # --- 3. shadow wrap + distillation --------------------------------------
+    # --- 3. shadow wrap + distillation ---
     cfg = ShadowConfig(num_shadow_layers=2, dropout=0.0)
     task = ShadowForCausalLM(
         get_shadow_model(base, cfg),
         distill_weight=1.0,
         distill_temperature=1.0,
     )
-    task.to(DEVICE)
+    task.to(device)
     task.train()
 
     packed_before = base.model.layers[0].self_attn.q_proj.weight.clone()
@@ -97,8 +118,8 @@ def main() -> None:
         )
 
     packed_after = base.model.layers[0].self_attn.q_proj.weight
-    assert torch.equal(packed_before, packed_after), "packed 1-bit weights changed!"
-    print("packed 1-bit weights untouched by training: OK")
+    assert torch.equal(packed_before, packed_after), f"packed {label} weights changed!"
+    print(f"packed {label} weights untouched by training: OK")
     print("SMOKE TEST PASSED")
 
 

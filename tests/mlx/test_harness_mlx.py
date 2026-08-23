@@ -274,3 +274,83 @@ def test_registry_unknown_specialist_raises(tmp_path):
     engine, _task = _engine_with_two_specialists(tmp_path)
     with pytest.raises(KeyError):
         engine.registry.ensure("nope")
+
+
+def test_router_priority_breaks_ties():
+    r = Router(_router_cfg())
+    # Both 'medical' (priority 1) and 'code' (priority 2) keywords present -> code wins.
+    assert r.route("diagnose this python function").specialist == "code"
+
+
+def test_router_sticky_disabled_when_config_says_so():
+    cfg = ShadowHarnessConfig(
+        specialists=[
+            SpecialistConfig(name="code", keywords=["python"]),
+            SpecialistConfig(name="general"),
+        ],
+        default_specialist="general",
+        sticky_sessions=False,
+    )
+    r = Router(cfg)
+    sess = Session()
+    sess.bind("code")
+    # sticky off -> no keyword hit -> fallback
+    assert r.route("hello world", session=sess).specialist == "general"
+
+
+def test_session_reset_clears_state():
+    s = Session()
+    s.bind("code")
+    s.add_turn("user", "hi")
+    s.reset()
+    assert s.specialist is None
+    assert s.history == []
+
+
+def test_session_auto_id():
+    s = Session()
+    assert s.session_id != ""
+    assert len(s.session_id) == 12
+
+
+def test_config_specialist_lookup():
+    cfg = _router_cfg()
+    assert cfg.specialist("code").priority == 2
+    with pytest.raises(KeyError):
+        cfg.specialist("nope")
+
+
+def test_engine_metadata_overrides_stickiness(tmp_path):
+    engine, _task = _engine_with_two_specialists(tmp_path)
+    sess = engine.session()
+    engine.generate("alpha query", session=sess, max_tokens=1)
+    assert sess.specialist == "alpha"
+
+    # Swap in a config with a metadata rule that forces beta.
+    cfg = ShadowHarnessConfig(
+        specialists=[
+            SpecialistConfig(name="alpha", keywords=["alpha"]),
+            SpecialistConfig(name="beta"),
+            SpecialistConfig(name="general"),
+        ],
+        default_specialist="general",
+        rules=[RoutingRule(field="force", value="beta", specialist="beta")],
+    )
+    engine.config = cfg
+    engine.router = Router(cfg)
+    _, info = engine.generate("alpha query", metadata={"force": "beta"}, session=sess, max_tokens=1)
+    assert info["specialist"] == "beta"
+    assert info["reason"] == "metadata_rule"
+
+
+def test_swap_adapter_clears_shadow_runtime_state():
+    """The swap seam: weights load AND the shadow runtime state resets, atomically."""
+    task = _build_task()
+    peft = task.peft_model
+    # Plant stale runtime state as an interrupted generation would leave behind.
+    peft._runtime.shadow_cache = ["stale"]
+    peft._runtime.shadow_hidden_states = "stale"
+    state = peft.adapter_parameters()
+    peft.swap_adapter(state)
+    assert peft._runtime.shadow_cache is None
+    assert peft._runtime.shadow_hidden_states is None

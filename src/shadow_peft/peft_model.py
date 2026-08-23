@@ -722,6 +722,20 @@ class ShadowPeftModel(nn.Module):
         self.shadow_injection_model.load_state_dict(sub("shadow_injection_model"), strict=True)
         self.shadow_update_model.load_state_dict(sub("shadow_update_model"), strict=True)
 
+    def swap_adapter(self, state: dict[str, torch.Tensor]) -> None:
+        """Atomically swap in another specialist's adapter and reset shadow state.
+
+        The single public entry point for adapter hot-swapping (used by the
+        harness registry). Shadow is **stateful** — its evolving hidden states
+        and shadow KV-cache belong to the adapter that produced them — so a
+        weight swap must also clear them or the next adapter silently reads
+        the previous adapter's cache. That ordering constraint lives here,
+        not in callers.
+        """
+        self.load_adapter_state_dict(state)
+        self._shadow_hidden_states = None
+        self._shadow_cache = None
+
     @torch.no_grad()
     def export_shadow(self) -> PreTrainedModel:
         """

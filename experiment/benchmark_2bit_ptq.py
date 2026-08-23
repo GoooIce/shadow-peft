@@ -17,12 +17,16 @@ from __future__ import annotations
 
 import argparse
 import gc
-import math
+import sys
+from pathlib import Path
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from shadow_peft.quantization import quantize_model_2bit
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lab.atoms import eval_ppl as perplexity, load_wikitext2_test_text  # noqa: E402
+
+from shadow_peft.quantization import quantize_model_2bit  # noqa: E402
 
 MODEL = "Qwen/Qwen3-1.7B"
 DEVICE = (
@@ -33,24 +37,7 @@ DEVICE = (
     else "cpu"
 )
 DTYPE = torch.float16
-CHUNK = 512
-MAX_CHUNKS = 40  # ~20k tokens
-
-
-@torch.no_grad()
-def perplexity(model, tokenizer, text: str) -> float:
-    ids = tokenizer.encode(text)
-    model.eval()
-    total_nll, total_tok = 0.0, 0
-    limit = min(len(ids), CHUNK * MAX_CHUNKS) - CHUNK - 1
-    for start in range(0, limit, CHUNK):
-        x = torch.tensor(ids[start : start + CHUNK + 1], device=DEVICE)[None]
-        logits = model(input_ids=x).logits.float()
-        logp = logits[:, :-1] - torch.logsumexp(logits[:, :-1], -1, keepdim=True)
-        tgt = x[:, 1:]
-        total_nll += -logp.gather(-1, tgt.unsqueeze(-1)).sum().item()
-        total_tok += tgt.numel()
-    return math.exp(total_nll / total_tok)
+CHUNKS = 40  # ~20k tokens
 
 
 def main() -> None:
@@ -69,18 +56,7 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    from datasets import load_dataset
-    from huggingface_hub import hf_hub_download
-
-    # Load wikitext-2 via a single parquet shard. The standard
-    # ``load_dataset("wikitext", ...)`` path is blocked on recent
-    # huggingface_hub (the single-segment "wikitext" repo id breaks the
-    # ``hf://`` URI parser), so fetch the parquet file directly instead.
-    parquet = hf_hub_download(
-        "wikitext", "wikitext-2-raw-v1/test-00000-of-00001.parquet", repo_type="dataset"
-    )
-    ds = load_dataset("parquet", data_files=parquet, split="train")
-    text = "\n".join(line for line in ds["text"] if line.strip())[:200_000]
+    text = load_wikitext2_test_text()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 
@@ -89,7 +65,7 @@ def main() -> None:
 
     # fp16 baseline
     model = AutoModelForCausalLM.from_pretrained(args.model, dtype=DTYPE).to(DEVICE)
-    ppl = perplexity(model, tokenizer, text)
+    ppl = perplexity(model, tokenizer, text, chunks=CHUNKS, device=DEVICE)
     print(f"| {args.model} fp16 | {ppl:.2f} |", flush=True)
     del model
     gc.collect()
@@ -107,7 +83,7 @@ def main() -> None:
         )
         n_quant = len(manifest["quantized"])
         model.eval()
-        ppl = perplexity(model, tokenizer, text)
+        ppl = perplexity(model, tokenizer, text, chunks=CHUNKS, device=DEVICE)
         print(
             f"| ternary 2-bit PTQ thr={args.thr_ratio} refine={iters} "
             f"({n_quant} modules) | {ppl:.2f} |",

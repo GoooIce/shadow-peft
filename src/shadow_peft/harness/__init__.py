@@ -1,8 +1,7 @@
 """Mixture-of-Shadow harness: request-level routing across multiple shadow adapters.
 
 One base model serves many specialists. Adapters are swapped in place via
-``ShadowPeftModel.load_adapter_state_dict``; because shadow is stateful, a swap
-also resets the shadow KV-cache. See :class:`~shadow_peft.harness.ShadowEngine`.
+``ShadowPeftModel.swap_adapter`` (weights + shadow-state reset, atomically). See :class:`~shadow_peft.harness.ShadowEngine`.
 
 Public API
 ----------

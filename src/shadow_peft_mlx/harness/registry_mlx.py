@@ -107,11 +107,9 @@ class AdapterRegistryMlx:
             raise KeyError(f"Unknown specialist: {specialist!r}")
 
         peft: ShadowPeftModel = self.model.peft_model
-        # load_weights accepts list[(name, array)] for in-memory dicts.
-        peft.load_weights(list(self._adapter_states[specialist].items()), strict=False)
-        # Shadow is stateful: the shadow backbone weights just changed, so its
-        # KV-cache is now invalid. Force a clean rebuild on the next forward.
-        peft._runtime.shadow_cache = None
+        # swap_adapter loads the adapter parameters in place AND resets the
+        # shadow runtime state (hidden states + KV-cache) in one atomic step.
+        peft.swap_adapter(self._adapter_states[specialist])
 
         self._swap_task_heads(specialist)
         self._current = specialist

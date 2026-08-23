@@ -278,11 +278,21 @@ class ShadowForSequenceClassification(nn.Module):
     def __call__(
         self,
         input_ids: mx.array,
+        attention_mask: mx.array | None = None,
         labels: mx.array | None = None,
     ) -> ShadowSequenceClassifierOutput:
+        def _pool(hidden: mx.array) -> mx.array:
+            # Attention-aware pooling (mirrors torch): take the last unmasked
+            # token so left-padded batches classify correctly.
+            if attention_mask is None:
+                return hidden[:, -1, :]
+            counts = attention_mask.astype(mx.int32).sum(axis=1) - 1
+            counts = mx.maximum(counts, 0)
+            return hidden[mx.arange(hidden.shape[0]), counts]
+
         if self.inference_mode == "shadow_only":
             shadow_hidden = self.peft_model._compute_shadow_hidden(input_ids, shadow_cache=None)
-            shadow_logits = self.shadow_classifier_head(shadow_hidden[:, -1, :])
+            shadow_logits = self.shadow_classifier_head(_pool(shadow_hidden))
             loss = None
             if labels is not None:
                 loss = nn.losses.cross_entropy(shadow_logits, labels, reduction="mean")
@@ -291,8 +301,8 @@ class ShadowForSequenceClassification(nn.Module):
             )
 
         hidden, shadow_hidden = self.peft_model.forward_hidden(input_ids)
-        base_logits = self.classifier_head(hidden[:, -1, :])
-        shadow_logits = self.shadow_classifier_head(shadow_hidden[:, -1, :])
+        base_logits = self.classifier_head(_pool(hidden))
+        shadow_logits = self.shadow_classifier_head(_pool(shadow_hidden))
 
         loss = None
         if labels is not None:

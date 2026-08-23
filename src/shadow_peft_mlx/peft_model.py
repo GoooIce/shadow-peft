@@ -332,6 +332,18 @@ class ShadowPeftModel(nn.Module):
     def print_trainable_parameters(self) -> None:
         print_trainable_parameters(self)
 
+    def swap_adapter(self, state: dict) -> None:
+        """Atomically swap in another specialist's adapter and reset shadow state.
+
+        Mirrors the torch implementation: loads the adapter parameters in
+        place and resets the shadow runtime state (hidden states + shadow
+        KV-cache) so the next adapter starts clean — shadow is **stateful**,
+        and a stale cache would silently mix adapters. The ordering
+        constraint lives here, not in callers.
+        """
+        self.load_weights(list(state.items()), strict=False)
+        self._runtime = _RuntimeState()
+
     # ---- save / load -------------------------------------------------------------
 
     def adapter_parameters(self) -> dict[str, mx.array]:

@@ -34,7 +34,7 @@ from transformers import (
     set_seed,
 )
 
-from data_utils import (
+from lab.data import (
     extract_gsm8k_final_answer,
     tokenize_and_group,
 )

@@ -2,8 +2,7 @@
 
 MLX counterpart of ``shadow_peft.harness``. One base model serves many
 specialists; adapters are swapped in place via
-``ShadowPeftModel.load_weights(..., strict=False)``; because shadow is
-stateful, a swap also resets ``_runtime.shadow_cache``. See
+``ShadowPeftModel.swap_adapter`` (weights + shadow-state reset, atomically). See
 :class:`~shadow_peft_mlx.harness.ShadowEngineMlx`.
 
 Public API
