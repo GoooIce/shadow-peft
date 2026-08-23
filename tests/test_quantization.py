@@ -362,6 +362,41 @@ def test_save_load_roundtrip_through_loader(scheme, tmp_path: Path):
 
 
 @pytest.mark.parametrize("scheme", SCHEMES, ids=scheme_ids)
+def test_save_load_roundtrip_with_skip_patterns_derived_from_manifest(scheme, tmp_path: Path):
+    """A checkpoint saved with custom skip patterns loads with DEFAULT loader
+    arguments: the loader derives the skips from the manifest itself."""
+    torch.manual_seed(0)
+    model1 = _tiny_llama().half()
+    model1.eval()
+    skip = "model.layers.0"
+    manifest = quantize_model(model1, scheme, group_size=32, skip_patterns=(skip,))
+    # The pattern skips modules that would otherwise be quantized.
+    assert isinstance(model1.model.layers[0].self_attn.q_proj, nn.Linear)
+    linear_cls, _ = classes_for_scheme(scheme)
+    assert isinstance(model1.model.layers[1].self_attn.q_proj, linear_cls)
+
+    input_ids = torch.randint(0, model1.config.vocab_size, (2, 8))
+    with torch.no_grad():
+        out1 = model1(input_ids=input_ids).logits
+
+    save_dir = tmp_path / "quantized"
+    save_quantized_checkpoint(model1, manifest, save_dir)
+
+    torch.manual_seed(1234)  # different init weights: they must be overwritten
+    model2 = _tiny_llama().half()
+    loaded_manifest = load_quantized_checkpoint(model2, save_dir)  # default args
+    # (a) the skipped module stays a plain Linear, (b) others are quantized.
+    assert isinstance(model2.model.layers[0].self_attn.q_proj, nn.Linear)
+    assert not isinstance(model2.model.layers[0].self_attn.q_proj, linear_cls)
+    assert isinstance(model2.model.layers[1].self_attn.q_proj, linear_cls)
+    assert loaded_manifest["quantization"]["bits"] == scheme.bits
+    model2.eval()
+    with torch.no_grad():
+        out2 = model2(input_ids=input_ids).logits
+    assert torch.equal(out1, out2)
+
+
+@pytest.mark.parametrize("scheme", SCHEMES, ids=scheme_ids)
 def test_legacy_named_entrypoints_match_scheme_table(scheme):
     """quantize_model_1bit / quantize_model_2bit are the scheme table."""
     if scheme.bits == 1:

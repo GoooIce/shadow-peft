@@ -723,7 +723,7 @@ class ShadowPeftModel(nn.Module):
         self.shadow_update_model.load_state_dict(sub("shadow_update_model"), strict=True)
 
     def swap_adapter(self, state: dict[str, torch.Tensor]) -> None:
-        """Atomically swap in another specialist's adapter and reset shadow state.
+        """Swap in another specialist's adapter and reset shadow runtime state.
 
         The single public entry point for adapter hot-swapping (used by the
         harness registry). Shadow is **stateful** — its evolving hidden states
@@ -731,10 +731,29 @@ class ShadowPeftModel(nn.Module):
         weight swap must also clear them or the next adapter silently reads
         the previous adapter's cache. That ordering constraint lives here,
         not in callers.
+
+        Failure semantics (this is NOT an atomic swap):
+
+        - The shadow runtime state (``_shadow_hidden_states`` /
+          ``_shadow_cache``) is cleared **before** any weights load, so a
+          failed swap can never pair freshly-loaded weights with the previous
+          adapter's shadow state.
+        - The weight load itself is sequential (shadow model -> projection ->
+          injection -> update) with strict per-module ``load_state_dict``
+          checks. If a load fails mid-way the exception propagates and some
+          modules already hold the new weights while the rest keep the old
+          ones; the caller should re-run ``swap_adapter`` (or the harness
+          registry's ``ensure``, which restores the previous specialist) to
+          get back to a known adapter.
+        - Legacy checkpoints without ``shadow_hidden_projection`` keys keep
+          the currently-loaded projection (the documented backward-compatible
+          behavior of :meth:`load_adapter_state_dict`).
         """
-        self.load_adapter_state_dict(state)
+        # Reset shadow state FIRST: a swap must never leave new weights
+        # paired with the previous adapter's shadow hidden states / KV-cache.
         self._shadow_hidden_states = None
         self._shadow_cache = None
+        self.load_adapter_state_dict(state)
 
     @torch.no_grad()
     def export_shadow(self) -> PreTrainedModel:

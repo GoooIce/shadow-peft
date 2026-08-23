@@ -197,7 +197,7 @@ def load_quantized_checkpoint(
     model: nn.Module,
     dir_path: str | Path,
     *,
-    skip_patterns: tuple[str, ...] | list[str] = (),
+    skip_patterns: tuple[str, ...] | list[str] | None = None,
     strict: bool = True,
 ) -> dict[str, Any]:
     """Load a checkpoint written by :func:`save_quantized_checkpoint` into ``model``.
@@ -211,18 +211,34 @@ def load_quantized_checkpoint(
 
     Notes:
       - ``refine_iters`` is not re-run (shapes do not depend on it).
-      - If the original quantization used custom ``skip_patterns``, pass the
-        same patterns here; skipped fp modules keep the checkpoint's weights.
+      - By default (``skip_patterns=None``) the skip patterns are derived from
+        the manifest: every module recorded under ``"skipped"`` (whatever the
+        reason — custom skip pattern, bad dims) is passed by its full name,
+        which the walker matches as a substring. Tied modules re-derive
+        naturally from traversal order, so the saved checkpoint is
+        self-describing — no need to re-supply the original patterns.
+      - Pass an explicit tuple/list to override the derived patterns (e.g. to
+        intentionally quantize modules the original run skipped). Skipped fp
+        modules keep the checkpoint's weights.
     """
     save_dir = Path(dir_path)
     manifest = json.loads((save_dir / "quantization.json").read_text(encoding="utf-8"))
     q = manifest["quantization"]
     scheme = get_scheme(int(q["bits"]))
+    resolved_skips: tuple[str, ...] | list[str]
+    if skip_patterns is None:
+        # Full module names work as substring patterns for the walker, and
+        # every module that was NOT quantized appears in "skipped" or "tied";
+        # "tied" re-derives naturally from traversal order, so skipping
+        # exactly the recorded "skipped" names reproduces the packed layout.
+        resolved_skips = tuple(manifest.get("skipped", {}).keys())
+    else:
+        resolved_skips = skip_patterns
     quantize_model(
         model,
         scheme,
         group_size=int(q["group_size"]),
-        skip_patterns=skip_patterns,
+        skip_patterns=resolved_skips,
         refine_iters=0,
         trim_vocab_to=q.get("trim_vocab_to"),
         thr_ratio=float(q.get("thr_ratio", 0.5)),

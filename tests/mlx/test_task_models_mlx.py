@@ -143,6 +143,26 @@ def test_seqcls_shadow_only_mode(llama_factory, shadow_cfg):
     assert out.loss is not None
 
 
+def test_seqcls_positional_labels_regression(llama_factory, shadow_cfg):
+    """`cls(ids, labels)` positionally must keep working (labels is arg #2).
+
+    Regression: inserting `attention_mask` before `labels` made positional
+    callers pass the labels tensor as the attention mask.
+    """
+    cls = ShadowForSequenceClassification(
+        get_shadow_model(llama_factory(seed=14), shadow_cfg), num_labels=4
+    )
+    cls.eval()
+    ids = mx.array([[1, 5, 7, 9, 3]])
+    labels = mx.array([2])
+
+    out = cls(ids, labels)
+    assert out.loss is not None and mx.isfinite(out.loss).item()
+    out_kw = cls(ids, labels=labels)
+    assert mx.allclose(out.loss, out_kw.loss, atol=1e-6)
+    assert mx.allclose(out.logits, out_kw.logits, atol=1e-6)
+
+
 def test_seqcls_attention_aware_pooling(llama_factory, shadow_cfg):
     """Right-padded batches must classify like unpadded ones (torch parity).
 

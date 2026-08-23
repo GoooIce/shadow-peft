@@ -344,7 +344,7 @@ def test_engine_metadata_overrides_stickiness(tmp_path):
 
 
 def test_swap_adapter_clears_shadow_runtime_state():
-    """The swap seam: weights load AND the shadow runtime state resets, atomically."""
+    """The swap seam: shadow runtime state resets BEFORE the weights load."""
     task = _build_task()
     peft = task.peft_model
     # Plant stale runtime state as an interrupted generation would leave behind.
@@ -354,3 +354,14 @@ def test_swap_adapter_clears_shadow_runtime_state():
     peft.swap_adapter(state)
     assert peft._runtime.shadow_cache is None
     assert peft._runtime.shadow_hidden_states is None
+
+
+def test_swap_adapter_rejects_unknown_keys():
+    """Unknown keys must raise instead of silently keeping the previous params."""
+    task = _build_task()
+    peft = task.peft_model
+    peft._runtime.shadow_cache = ["stale"]  # must stay untouched on rejection
+    with pytest.raises(ValueError, match="nonexistent.module.weight"):
+        peft.swap_adapter({"nonexistent.module.weight": mx.array([0.0])})
+    # Validation happens before the runtime reset / weight load.
+    assert peft._runtime.shadow_cache == ["stale"]

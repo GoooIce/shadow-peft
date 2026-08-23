@@ -333,16 +333,44 @@ class ShadowPeftModel(nn.Module):
         print_trainable_parameters(self)
 
     def swap_adapter(self, state: dict) -> None:
-        """Atomically swap in another specialist's adapter and reset shadow state.
+        """Swap in another specialist's adapter and reset shadow runtime state.
 
-        Mirrors the torch implementation: loads the adapter parameters in
-        place and resets the shadow runtime state (hidden states + shadow
-        KV-cache) so the next adapter starts clean — shadow is **stateful**,
-        and a stale cache would silently mix adapters. The ordering
-        constraint lives here, not in callers.
+        Mirrors the torch implementation: the harness registry calls this to
+        hot-swap adapters. Shadow is **stateful** — its evolving hidden states
+        and shadow KV-cache belong to the adapter that produced them — so a
+        weight swap must also clear them or the next adapter silently reads
+        the previous adapter's cache. That ordering constraint lives here,
+        not in callers.
+
+        Failure semantics (this is NOT an atomic swap):
+
+        - Input keys are validated against the model's parameter names
+          **before** anything is touched: an unknown key raises ``ValueError``
+          (``load_weights(..., strict=False)`` would otherwise silently ignore
+          it and keep the previous adapter's parameter).
+        - The shadow runtime state (``_runtime``) is reset **before** weights
+          load, so a failed swap can never pair freshly-loaded weights with
+          the previous adapter's shadow state.
+        - The weight load itself is best-effort (``strict=False``); if it
+          raises mid-load, some parameters already hold the new values and
+          the caller should re-run ``swap_adapter`` (or the registry's
+          ``ensure``, which restores the previous specialist) to get back to
+          a known adapter.
         """
-        self.load_weights(list(state.items()), strict=False)
+        param_names = {name for name, _ in tree_flatten(self.parameters())}
+        unknown = [key for key in state if key not in param_names]
+        if unknown:
+            preview = ", ".join(sorted(unknown)[:5])
+            raise ValueError(
+                "swap_adapter: state contains key(s) not present in the model's "
+                f"parameters (showing up to 5 of {len(unknown)}: {preview}). "
+                "Refusing to load -- strict=False would silently keep the "
+                "previous adapter's values for those parameters."
+            )
+        # Reset shadow state FIRST: a swap must never leave new weights paired
+        # with the previous adapter's shadow hidden states / KV-cache.
         self._runtime = _RuntimeState()
+        self.load_weights(list(state.items()), strict=False)
 
     # ---- save / load -------------------------------------------------------------
 

@@ -194,6 +194,14 @@ def test_pack_1bit_refined_constant_group():
     assert mx.abs(deq - 0.5).max().item() < 1e-3
 
 
+def test_pack_1bit_refined_rejects_bad_group_size():
+    # group_size must be a positive multiple of 32 (32 codes per uint32 word),
+    # mirroring the torch 1-bit _check_dims; reject up front with a clear error.
+    w = mx.random.normal((4, 128))
+    with pytest.raises(ValueError, match="positive multiple of 32"):
+        pack_1bit_refined(w, group_size=33)
+
+
 def test_quantize_model_1bit_refine_integration(llama_128):
     original = llama_128.model.layers[0].self_attn.q_proj.weight * 1
     mx.eval(original)

@@ -385,7 +385,7 @@ def test_engine_metadata_overrides_stickiness(tmp_path):
 
 
 def test_swap_adapter_clears_shadow_runtime_state(tmp_path):
-    """The swap seam: weights load AND the shadow runtime state resets, atomically."""
+    """The swap seam: shadow runtime state resets BEFORE the weights load."""
     engine, model = _engine_with_two_specialists(tmp_path)
     peft = model.peft_model
     engine.registry.ensure("alpha")
@@ -398,6 +398,37 @@ def test_swap_adapter_clears_shadow_runtime_state(tmp_path):
     assert peft._shadow_hidden_states is None
     key = "shadow_model.layers.0.self_attn.q_proj.weight"
     assert torch.equal(peft.adapter_state_dict()[key], beta_sd[key])
+
+
+def test_registry_restores_previous_adapter_on_failed_swap(tmp_path):
+    """A swap failing mid-load must roll back to the previous specialist.
+
+    Dropping a required ``shadow_update_model`` key makes the strict load fail
+    on the LAST of the four modules, i.e. after ``shadow_model`` /
+    injection already hold the new specialist's weights -- the mixed-state
+    hazard. The registry must restore alpha and re-raise the original error.
+    """
+    engine, model = _engine_with_two_specialists(tmp_path)
+    peft = model.peft_model
+    engine.registry.ensure("alpha")
+
+    key = "shadow_model.layers.0.self_attn.q_proj.weight"
+    alpha_weight = engine.registry._adapter_states["alpha"][key].detach().clone()
+
+    beta_state = dict(engine.registry._adapter_states["beta"])
+    dropped = sorted(k for k in beta_state if k.startswith("shadow_update_model."))[0]
+    del beta_state[dropped]
+    engine.registry._adapter_states["beta"] = beta_state
+
+    with pytest.raises(RuntimeError):
+        engine.registry.ensure("beta")
+
+    # Rolled back: still serving alpha, with alpha's actual weights intact.
+    assert engine.registry.current == "alpha"
+    assert torch.equal(peft.adapter_state_dict()[key], alpha_weight)
+    # Shadow state was cleared before the (failed) load and stays cleared.
+    assert peft._shadow_cache is None
+    assert peft._shadow_hidden_states is None
 
 
 def test_harness_core_is_single_source():

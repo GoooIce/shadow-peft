@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import math
 import sys
 from pathlib import Path
 
@@ -23,7 +25,7 @@ from lab.eval import (  # noqa: E402
     extract_gsm8k_answer_from_text,
     extract_gsm8k_boxed_answer,
 )
-from lab.trainer import TrainConfig  # noqa: E402
+from lab.trainer import TrainConfig, _summary_args_dump  # noqa: E402
 from lab.data import extract_gsm8k_final_answer  # noqa: E402
 
 
@@ -123,6 +125,61 @@ def test_eval_ppl_restores_training_mode():
     model.eval()
     eval_ppl(model, _FixedTokenizer(list(range(20))), "ignored", chunks=2, chunk_len=8, device="cpu")
     assert model.training is False
+
+
+def test_eval_ppl_exact_fit_input_evaluates_single_window():
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    torch.manual_seed(0)
+    cfg = LlamaConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=1024,
+    )
+    model = LlamaForCausalLM(cfg)
+    ids = [i % 32 for i in range(513)]  # exactly chunk_len + 1 tokens
+    tokenizer = _FixedTokenizer(ids)
+
+    ppl = eval_ppl(model, tokenizer, "ignored", chunks=1, chunk_len=512, device="cpu")
+
+    assert math.isfinite(ppl)
+    assert ppl > 0
+
+    # Independent reference over the single 512-token window.
+    x = torch.tensor([ids[:513]])
+    with torch.no_grad():
+        logits = model(input_ids=x).logits.float()
+    shifted = logits[:, :-1]
+    targets = x[:, 1:]
+    logp = shifted - torch.logsumexp(shifted, -1, keepdim=True)
+    nll = -logp.gather(-1, targets.unsqueeze(-1)).sum().item()
+    expected = torch.exp(torch.tensor(nll / targets.numel())).item()
+
+    assert ppl == pytest.approx(expected, rel=1e-5)
+
+
+def test_eval_ppl_too_short_text_raises_clear_error():
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    torch.manual_seed(0)
+    cfg = LlamaConfig(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=64,
+    )
+    model = LlamaForCausalLM(cfg)
+    tokenizer = _FixedTokenizer(list(range(20)))  # shorter than chunk_len + 1 = 33
+
+    with pytest.raises(ValueError, match="too short"):
+        eval_ppl(model, tokenizer, "ignored", chunks=2, chunk_len=32, device="cpu")
 
 
 # ---------------------------------------------------------------------------
@@ -255,3 +312,15 @@ def test_train_config_profile_resolution():
     assert cfg2.profile.tag == "e2"
     assert cfg2.profile.dtype is torch.bfloat16
     assert cfg2.profile.refine_iters == 8
+
+
+def test_summary_args_dump_stringifies_torch_dtype():
+    # TrainConfig accepts torch.dtype; summary.json must still serialize.
+    cfg = TrainConfig(bits=1, loss_mode="ce", dtype=torch.float16)
+    args_dump = _summary_args_dump(cfg)
+    dumped = json.dumps({"args": args_dump})  # must not raise
+    assert args_dump["dtype"] == "torch.float16"
+    assert "torch.float16" in dumped
+    # JSON-safe fields pass through unchanged.
+    assert args_dump["bits"] == 1
+    assert args_dump["loss_mode"] == "ce"

@@ -64,6 +64,12 @@ def test_pack_2bit_rejects_bad_inputs():
         pack_2bit_ternary(w, group_size=GROUP_SIZE, thr_ratio=0.0)
     with pytest.raises(ValueError):
         pack_2bit_ternary(mx.random.normal((4, 100)), group_size=GROUP_SIZE)
+    # group_size must be a positive multiple of 16 (16 codes per uint32 word):
+    # reject up front instead of failing later with a confusing reshape error.
+    with pytest.raises(ValueError, match="positive multiple of 16"):
+        pack_2bit_ternary(w, group_size=40)
+    with pytest.raises(ValueError, match="positive multiple of 16"):
+        pack_2bit_ternary(w, group_size=0)
 
 
 def test_refine_reduces_mse():
@@ -92,6 +98,28 @@ def test_quantize_model_2bit_manifest_and_forward(llama_128):
     out = llama_128(ids)
     assert out.shape == (1, 4, llama_128.args.vocab_size)
     assert bool(mx.isfinite(out).all().item())
+
+
+def test_quantize_model_2bit_default_refine_is_ternary(llama_128):
+    # refine_iters=0 (the default) must still repack to the ternary grid:
+    # the native nn.quantize 4-level affine output is never left in place.
+    manifest = quantize_model_2bit(llama_128, group_size=GROUP_SIZE)
+    assert manifest["quantization"]["refine_iters"] == 0
+    assert manifest["quantization"]["ternary"] is True
+
+    module = llama_128.model.layers[0].self_attn.q_proj
+    w_hat = mx.dequantize(
+        module.weight, module.scales, module.biases,
+        group_size=GROUP_SIZE, bits=2,
+    )
+    k = w_hat.shape[-1]
+    for g in range(k // GROUP_SIZE):
+        sg = module.scales[0, g].astype(mx.float32).item()
+        vals = w_hat[0, g * GROUP_SIZE : (g + 1) * GROUP_SIZE]
+        uniq = set(vals.astype(mx.float32).flatten().tolist())
+        assert len(uniq) <= 3
+        for v in uniq:
+            assert any(abs(v - t) < 1e-2 for t in (-sg, 0.0, sg))
 
 
 def test_quantize_model_2bit_skip_patterns(llama_128):

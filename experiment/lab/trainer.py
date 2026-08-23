@@ -108,6 +108,18 @@ class TrainReport:
     save_dir: str
 
 
+def _json_safe(obj):
+    """Stringify config values json.dumps cannot serialize (torch.dtype)."""
+    if isinstance(obj, torch.dtype):
+        return str(obj)
+    return obj
+
+
+def _summary_args_dump(cfg: TrainConfig) -> dict:
+    """asdict(cfg) made JSON-serializable, for the summary.json "args" entry."""
+    return {k: _json_safe(v) for k, v in asdict(cfg).items()}
+
+
 def _quantize_base(base, cfg: TrainConfig, student_vocab: int) -> dict:
     """The bit-width seam: everything else about E1/E2 is identical."""
     if cfg.bits == 1:
@@ -266,7 +278,7 @@ def train_shadow(cfg: TrainConfig) -> TrainReport:
         wall_time_s=time.time() - t0,
         save_dir=str(save_dir),
     )
-    summary = {**asdict(report), "refine_iters": refine_iters, "args": asdict(cfg)}
+    summary = {**asdict(report), "refine_iters": refine_iters, "args": _summary_args_dump(cfg)}
     (save_dir / "summary.json").write_text(json.dumps(summary, indent=2))
     print(json.dumps({k: v for k, v in summary.items() if k != "args"}, indent=2), flush=True)
     log_f.close()

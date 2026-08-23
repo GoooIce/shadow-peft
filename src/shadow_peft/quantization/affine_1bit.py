@@ -11,7 +11,7 @@ from .modules import pin_scheme_classes
 from .scheme import QuantScheme, register_scheme, unpack_codes
 from .walker import load_quantized_checkpoint as _load_quantized_checkpoint
 from .walker import quantize_model as _quantize_model
-from .walker import save_quantized_checkpoint as _save_quantized_checkpoint  # noqa: F401
+from .walker import save_quantized_checkpoint  # noqa: F401  # re-exported for import compatibility
 
 _EPS = 1e-8
 

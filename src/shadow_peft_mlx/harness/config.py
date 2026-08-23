@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
-from shadow_core.harness.config import RoutingRule, ShadowHarnessConfig, SpecialistConfig  # noqa: F401
+from shadow_core.harness.config import (  # noqa: F401
+    InferenceMode,
+    RoutingRule,
+    ShadowHarnessConfig,
+    SpecialistConfig,
+)
 
-__all__ = ['RoutingRule', 'ShadowHarnessConfig', 'SpecialistConfig']
+__all__ = ['InferenceMode', 'RoutingRule', 'ShadowHarnessConfig', 'SpecialistConfig']

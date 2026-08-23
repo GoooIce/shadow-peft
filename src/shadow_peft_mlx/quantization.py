@@ -60,6 +60,8 @@ def pack_1bit_refined(
     """
     if iters < 0:
         raise ValueError(f"iters must be >= 0, got {iters}")
+    if group_size < 32 or group_size % 32 != 0:
+        raise ValueError(f"group_size must be a positive multiple of 32, got {group_size}")
     if weight.ndim != 2 or weight.shape[-1] % group_size != 0:
         raise ValueError(
             f"weight must be [out, K] with K % {group_size} == 0, "
@@ -180,6 +182,8 @@ def pack_2bit_ternary(
         raise ValueError(f"iters must be >= 0, got {iters}")
     if not 0.0 < thr_ratio <= 1.0:
         raise ValueError(f"thr_ratio must be in (0, 1], got {thr_ratio}")
+    if group_size < 16 or group_size % 16 != 0:
+        raise ValueError(f"group_size must be a positive multiple of 16, got {group_size}")
     if weight.ndim != 2 or weight.shape[-1] % group_size != 0:
         raise ValueError(
             f"weight must be [out, K] with K % {group_size} == 0, "
@@ -231,6 +235,13 @@ def quantize_model_2bit(
     Quantize every eligible ``nn.Linear`` / ``nn.Embedding`` of ``model`` to
     ternary 2-bit affine ({-1, 0, +1}), in place — the MLX twin of the torch
     ``quantize_model_2bit``.
+
+    Ternary packing via :func:`pack_2bit_ternary` ALWAYS applies: the native
+    MLX ``nn.quantize`` pass only establishes the quantized module structure
+    (its 4-level affine grid is discarded), then every quantized weight is
+    repacked onto the ternary grid. ``refine_iters`` therefore controls
+    Lloyd-style refinement of the group scales only — ``refine_iters=0`` (the
+    default) still yields ternary weights via the absmean initialization.
 
     ``bits=2`` is natively supported by MLX, so no special build is required.
     Args mirror :func:`quantize_model_1bit`; additionally ``thr_ratio`` is the
@@ -320,7 +331,13 @@ def _quantize_model_affine(
         if args is not None and getattr(args, "vocab_size", 0) > trim_vocab_to:
             args.vocab_size = trim_vocab_to
 
-    if refine_iters > 0:
+    # Ternary schemes (thr_ratio is not None) ALWAYS repack: the native
+    # nn.quantize pass above only sets up the quantized module structure with
+    # a 4-level affine grid, which violates the ternary {-1, 0, +1} contract.
+    # With iters=0 the repack is the absmean ternary init (no Lloyd
+    # iterations); refine_iters > 0 additionally refits the group scales.
+    # The 1-bit path keeps repacking only when refinement was requested.
+    if refine_iters > 0 or thr_ratio is not None:
         for path, module in model.named_modules():
             if path not in originals:
                 continue

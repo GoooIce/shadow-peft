@@ -84,7 +84,13 @@ def eval_ppl(
     was_training = model.training
     model.eval()
     total_nll, total_tok = 0.0, 0
+    # The limit formula intentionally yields `chunks - 1` full windows for
+    # long texts (parity with the original E1/E2 scripts — window starts
+    # and count must stay comparable); the guard below only rescues the
+    # exact-fit case and never fires in that regime.
     limit = min(len(ids), chunks * chunk_len) - chunk_len - 1
+    if limit <= 0 and len(ids) >= chunk_len + 1:
+        limit = 1  # exact-fit input: force the single full window
     for start in range(0, limit, chunk_len):
         x = torch.tensor(ids[start : start + chunk_len + 1], device=device)[None]
         logits = model(input_ids=x).logits.float()
@@ -94,6 +100,10 @@ def eval_ppl(
         total_tok += tgt.numel()
     if was_training:
         model.train()
+    if total_tok == 0:
+        raise ValueError(
+            f"eval_ppl: text is too short to evaluate — need at least chunk_len + 1 = {chunk_len + 1} tokens, got {len(ids)}"
+        )
     return math.exp(total_nll / total_tok)
 
 

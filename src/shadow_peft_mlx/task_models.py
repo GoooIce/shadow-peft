@@ -278,9 +278,12 @@ class ShadowForSequenceClassification(nn.Module):
     def __call__(
         self,
         input_ids: mx.array,
-        attention_mask: mx.array | None = None,
         labels: mx.array | None = None,
+        *,
+        attention_mask: mx.array | None = None,
     ) -> ShadowSequenceClassifierOutput:
+        # `attention_mask` is keyword-only for backward positional compatibility:
+        # callers invoking `model(ids, labels)` positionally must keep working.
         def _pool(hidden: mx.array) -> mx.array:
             # Attention-aware pooling (mirrors torch): take the last unmasked
             # token so left-padded batches classify correctly.

@@ -1,7 +1,8 @@
 """Mixture-of-Shadow harness: request-level routing across multiple shadow adapters.
 
 One base model serves many specialists. Adapters are swapped in place via
-``ShadowPeftModel.swap_adapter`` (weights + shadow-state reset, atomically). See :class:`~shadow_peft.harness.ShadowEngine`.
+``ShadowPeftModel.swap_adapter`` (shadow-state reset first, then weight load;
+the registry restores the previous specialist if a swap fails). See :class:`~shadow_peft.harness.ShadowEngine`.
 
 Public API
 ----------

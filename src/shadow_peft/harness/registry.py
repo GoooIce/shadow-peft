@@ -3,7 +3,7 @@
 Torch-specific. One live ``ShadowForCausalLM`` serves all specialists; swapping
 goes through ``ShadowPeftModel.swap_adapter``, which overwrites the four
 adapter modules in place and resets the shadow runtime state (hidden states +
-shadow KV-cache) atomically.
+shadow KV-cache) before any weights load.
 
 Base model weights are never touched by a swap -- they stay resident on device.
 Adapter state dicts live on CPU and are only moved onto the live model on swap.
@@ -96,6 +96,9 @@ class AdapterRegistry:
         If ``specialist`` is already active this is a no-op. Otherwise it
         overwrites the four adapter modules in place and resets the shadow
         KV-cache (shadow is stateful -- a stale cache would mix adapters).
+        If the swap fails mid-load, the previous specialist's adapter is
+        restored (best effort) before the original exception is re-raised,
+        so the live model keeps serving a known adapter.
         """
         if specialist == self._current:
             return
@@ -103,9 +106,28 @@ class AdapterRegistry:
             raise KeyError(f"Unknown specialist: {specialist!r}")
 
         peft: ShadowPeftModel = self.model.peft_model
-        # swap_adapter loads the four adapter modules in place AND resets the
-        # shadow runtime state (hidden states + KV-cache) in one atomic step.
-        peft.swap_adapter(self._adapter_states[specialist])
+        # swap_adapter resets the shadow runtime state (hidden states +
+        # KV-cache) and then loads the four adapter modules sequentially. A
+        # mid-load failure leaves partially-loaded weights, so restore the
+        # previous specialist rather than serving a mix of two adapters.
+        try:
+            peft.swap_adapter(self._adapter_states[specialist])
+        except Exception as e:
+            previous = self._current
+            if previous is not None:
+                logger.warning(
+                    "Adapter swap to %r failed (%s); restoring previous specialist %r",
+                    specialist,
+                    e,
+                    previous,
+                )
+                try:
+                    peft.swap_adapter(self._adapter_states[previous])
+                except Exception as restore_error:
+                    # Restore failed too: surface the original failure, chained
+                    # to the restore error so both remain visible.
+                    raise e from restore_error
+            raise
 
         self._swap_task_heads(specialist)
         self._current = specialist
