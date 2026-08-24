@@ -23,6 +23,7 @@ from shadow_peft.quantization import quantize_model_1bit, quantize_model_2bit
 
 from . import tiers
 from .atoms import (
+    despace_wikitext,
     QWEN3_ENDOFTEXT_ID,
     eval_ppl,
     load_teacher_data,
@@ -232,6 +233,8 @@ def train_shadow(cfg: TrainConfig) -> TrainReport:
     seqs = load_teacher_data(cfg.data)
     print(f"teacher sequences: {len(seqs)}", flush=True)
     eval_text = load_wikitext2_test_text()
+    eval_text_raw = eval_text
+    eval_text = despace_wikitext(eval_text)
 
     # Joint calibration (iron rule): W8A8 activation scales must be observed
     # on shadow-carrying activations, so the calibration forwards run through

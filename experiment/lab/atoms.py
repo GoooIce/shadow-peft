@@ -136,6 +136,23 @@ def eval_ppl(
     return math.exp(total_nll / total_tok)
 
 
+def despace_wikitext(text: str) -> str:
+    """Undo wikitext-2-raw's space-around-punctuation pretokenization.
+
+    The 2016 corpus format ("film , television", "@-@", " = header = ") is
+    out-of-distribution for 2026-era tokenizers — Gemma4 scores it ~30-50x
+    worse than natural text at every sequence length. All tiers are evaluated
+    on the same despaced text, so comparisons stay exact; the raw-text ppl is
+    reported alongside for transparency.
+    """
+    import re
+
+    t = re.sub(r"\s+([,.!?;:])", r"\1", text)
+    t = re.sub(r"([(\"\[;:$])\s+", r"\1", t)
+    t = t.replace("@-@", "-").replace("= ", "").replace(" =", "")
+    return t
+
+
 def load_wikitext2_test_text(max_chars: int = 200_000) -> str:
     """wikitext-2-raw-v1 test split joined into one string.
 

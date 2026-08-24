@@ -25,7 +25,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dir1.ops import BudgetLedger, StageTimer, power_off_now, wechat_notify  # noqa: E402
 from dir1.smoke_12b import load_causal_model  # noqa: E402
 from lab import grid, spectral  # noqa: E402
-from lab.atoms import bos_ids, load_teacher_data, load_wikitext2_test_text, make_batch  # noqa: E402
+from lab.atoms import (  # noqa: E402
+    bos_ids,
+    despace_wikitext,
+    load_teacher_data,
+    load_wikitext2_test_text,
+    make_batch,
+)
 
 import random  # noqa: E402
 
@@ -127,7 +133,8 @@ def main() -> None:
         make_batch(seqs, rng, 1, 256, str(device), pad_id=pad_id)
         for _ in range(args.kld_batches)
     ]
-    eval_text = load_wikitext2_test_text()
+    eval_text = despace_wikitext(load_wikitext2_test_text())
+    eval_text_raw = load_wikitext2_test_text()
 
     ledger = BudgetLedger(args.budget_file)
 
@@ -146,6 +153,30 @@ def main() -> None:
             ppl_chunks=20,
             ppl_context_len=512,
         )
+
+    # raw-text reference pass (transparency only; verdicts use the despaced axis)
+    with StageTimer(ledger, "eval_grid_raw", note="raw wikitext reference ppls"):
+        result_raw = grid.run_grid(
+            base_factory=fresh_base,
+            shadow_config=shadow_cfg,
+            adapter_state=adapters,
+            tokenizer=tokenizer,
+            eval_text=eval_text_raw,
+            device=device,
+            kld_batches=kld_batches,
+            ppl_chunks=20,
+            ppl_context_len=512,
+        )
+        result["raw_text_reference"] = {
+            "anchor_ppl": result_raw["anchor"]["ppl"],
+            "cells": [
+                {"cell": c["cell"], "ppl": c["ppl"]} for c in result_raw["cells"]
+            ],
+            "bare_bases": [
+                {"backbone_tier": b["backbone_tier"], "kernel_path": b["kernel_path"], "ppl": b["ppl"]}
+                for b in result_raw["bare_bases"]
+            ],
+        }
 
     # --- 挽回率 + 判定 --------------------------------------------------------
     anchor_ppl = result["anchor"]["ppl"]
