@@ -248,3 +248,47 @@ def test_train_config_backbone_tier_field():
         TrainConfig(bits=0, backbone_tier="nvfp4")
     # legacy default unchanged
     assert TrainConfig().backbone_tier == "bits"
+
+
+def test_int4_fake_quant_weight_error_bound():
+    """The materialized Int4 fake-quant stays within the group-wise half-step
+    bound (4-bit asymmetric: step = range/15 ⇒ error ≤ range/30)."""
+    torch.manual_seed(0)
+    w = torch.randn(16, 256, dtype=torch.bfloat16)
+    fake = tiers.int4_fake_quant_weight(w)
+    assert fake.shape == w.shape and fake.dtype == w.dtype
+    assert not torch.equal(w, fake)
+    g = w.float().reshape(16, 2, 128)
+    rng = (g.amax(-1) - g.amin(-1)).unsqueeze(-1)
+    err = (w.float() - fake.float()).abs().reshape(16, 2, 128)
+    # 4-bit asymmetric step = range/15; torchao's affine rounding keeps the
+    # error within ~0.75x step (bound asserted at range/20).
+    assert (err <= rng / 20).all()
+
+
+def test_apply_training_conversion_dispatch():
+    torch.manual_seed(0)
+    # w4a16 fake: materialized straight from the original weights (no kernel
+    # conversion at all — the tile-packed tensor has no dequantize).
+    base = _tiny_llama()
+    manifest = tiers.apply_training_conversion(
+        base, "w4a16", torch.device("cpu"), fake_quant=True
+    )
+    assert manifest["format"] == "int4_weight_only_fake"
+    assert manifest["fake_quant_swaps"] > 0
+    assert all(
+        isinstance(getattr(m, "weight", None), (torch.nn.Parameter, type(None)))
+        for _, m in base.named_modules()
+    )
+    # w8a8_fp8 fake: kernel conversion then dequantize back to plain weights
+    # (Float8 on CUDA, the Int8 stand-in locally — both implement it).
+    base = _tiny_llama()
+    manifest = tiers.apply_training_conversion(
+        base, "w8a8_fp8", torch.device("cpu"), fake_quant=True
+    )
+    assert manifest["format"] == "int8_dynamic_local"
+    assert manifest["fake_quant_swaps"] > 0
+    assert all(
+        isinstance(getattr(m, "weight", None), (torch.nn.Parameter, type(None)))
+        for _, m in base.named_modules()
+    )

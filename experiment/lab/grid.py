@@ -41,6 +41,7 @@ from shadow_peft.peft_model import ShadowPeftModel
 from shadow_peft.quantization import quantize_model_8bit
 
 from . import tiers
+from .tiers import to_fake_quant  # noqa: F401  # re-exported seam
 from .atoms import eval_ppl
 from .eval import extract_answer_from_text, extract_gsm8k_answer_from_text
 
@@ -58,32 +59,6 @@ GRID: list[tuple[str, str]] = [(t, s) for t in tiers.TIERS for s in SHADOW_PRECI
 def ptq_shadow_int8(peft_model: ShadowPeftModel, group_size: int = 128) -> dict[str, Any]:
     """Eval-time PTQ of the trained shadow backbone via the affine-8bit row."""
     return quantize_model_8bit(peft_model.shadow_model, group_size=group_size)
-
-
-def to_fake_quant(module: torch.nn.Module) -> int:
-    """Swap torchao-quantized weight tensors for dequantized plain tensors.
-
-    After this, every matmul runs in ordinary bf16 with the quantization
-    error baked into the weights — torchao's "fake quant" reference numerics.
-    Returns the number of swapped weights. Modules already replaced by our
-    own packed quantization (e.g. the INT8 shadow) dequantize in their
-    forward and are left untouched.
-    """
-    swapped = 0
-    for _, mod in module.named_modules():
-        w = getattr(mod, "weight", None)
-        if (
-            w is not None
-            and type(w).__module__.split(".")[0] == "torchao"
-            and hasattr(type(w), "dequantize")
-        ):
-            # torchao tensor-impl (Int8Tensor/Int4Tensor/Float8Tensor...);
-            # plain tensors also expose a no-op `dequantize` that only raises,
-            # so the module check is what selects the real implementations.
-            deq = w.dequantize()  # back to the original high-precision dtype
-            mod.weight = torch.nn.Parameter(deq, requires_grad=False)
-            swapped += 1
-    return swapped
 
 
 @torch.no_grad()
@@ -243,7 +218,15 @@ def evaluate_cell(
     if kernel_path not in KERNEL_PATHS and backbone_tier != "bf16":
         raise ValueError(f"unknown kernel path {kernel_path!r}")
 
-    tier_manifest = tiers.apply_tier_conversion(base, backbone_tier, device)
+    if kernel_path == "fake_quant" and backbone_tier != "bf16":
+        # Train-consistent numerics: the fake-quant cell reproduces exactly
+        # what the tier was trained against (spec: deployment path must
+        # match training/calibration path).
+        tier_manifest = tiers.apply_training_conversion(
+            base, backbone_tier, device, fake_quant=True
+        )
+    else:
+        tier_manifest = tiers.apply_tier_conversion(base, backbone_tier, device)
     base.eval()
 
     peft_model = get_shadow_model(base, shadow_config)
@@ -309,7 +292,7 @@ def evaluate_cell(
             "kernel_path": backbone_tier == "bf16" and "n/a" or kernel_path,
         },
         "backbone_format": tier_manifest.get("format"),
-        "fake_quant_swaps": fake_swaps,
+        "fake_quant_swaps": tier_manifest.get("fake_quant_swaps", 0),
         "shadow_ptq_modules": len(shadow_ptq["quantized"]) if shadow_ptq else 0,
         "ppl": ppl,
         "mmlu": mmlu,
@@ -350,7 +333,7 @@ def evaluate_bare_base(
         "backbone_tier": backbone_tier,
         "kernel_path": backbone_tier == "bf16" and "n/a" or kernel_path,
         "backbone_format": tier_manifest.get("format"),
-        "fake_quant_swaps": fake_swaps,
+        "fake_quant_swaps": tier_manifest.get("fake_quant_swaps", 0),
         "ppl": ppl,
     }
 

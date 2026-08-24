@@ -34,6 +34,8 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=1e-5)
     ap.add_argument("--shadow-layers", type=int, default=2)
     ap.add_argument("--calib-steps", type=int, default=8)
+    ap.add_argument("--no-fake-quant", action="store_true",
+                    help="train against the real kernel path (autograd unsupported; eval-only)")
     ap.add_argument("--budget-file", default="experiment/runs/dir1/budget.jsonl")
     ap.add_argument("--no-shutdown", action="store_true")
     args = ap.parse_args()
@@ -55,6 +57,7 @@ def main() -> None:
         lr=args.lr,
         shadow_layers=args.shadow_layers,
         calib_steps=args.calib_steps,
+        tier_fake_quant=not args.no_fake_quant,
         pad_id=pad_id,
         save_dir=str(Path(args.out_root) / args.tier),
     )

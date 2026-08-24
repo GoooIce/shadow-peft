@@ -16,6 +16,7 @@ the real 12B weights. Exit code 0 = smoke OK (runbooks grep for SMOKE-OK).
 from __future__ import annotations
 
 import argparse
+import gc
 import sys
 from pathlib import Path
 
@@ -136,23 +137,6 @@ def run_smoke(
         f"vocab untrimmed: embedding rows {embed_rows} == tokenizer len {vocab}",
     )
 
-    # --- 2) tier conversion + hook order + joint calibration ----------------
-    for tier in ("w8a8_fp8", "w4a16"):
-        fresh = fresh_base()
-        batches = calib_batches(tokenizer, vocab, 2, fresh.device)
-        peft_t, manifest = tiers.prepare_tiered_student(
-            fresh, shadow_cfg, tier, device=fresh.device, calib_batches=batches
-        )
-        seq_ok = manifest["sequence"] == ["convert", "mount", "calibrate:2"]
-        all_ok &= check(
-            seq_ok,
-            f"{tier}: order convert→mount→calibrate (format={manifest.get('format')}, seq={manifest['sequence']})",
-        )
-        with torch.no_grad():
-            out_t = peft_t(input_ids=batches[0]["input_ids"], attention_mask=batches[0]["attention_mask"])
-        all_ok &= check(torch.isfinite(out_t.logits).all().item(), f"{tier}: forward finite")
-        del fresh, peft_t
-
     # --- 3) swap_adapter roundtrip ------------------------------------------
     state = peft.adapter_state_dict()
     with torch.no_grad():
@@ -192,6 +176,36 @@ def run_smoke(
     with torch.no_grad():
         gen = task.generate(input_ids=gen_ids, attention_mask=torch.ones_like(gen_ids), max_new_tokens=16, do_sample=False)
     all_ok &= check(gen.shape[1] == 24, "generation smoke: 8+16 tokens produced")
+
+    # Free the section-1 stack before the tier loop: two 12B bases cannot
+    # coexist on a 32GB card.
+    del task, peft, base, gen, gen_ids, cache, full, inc, out, before, after, state, ids, attn
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # --- 4) tier conversion + hook order + joint calibration ----------------
+    # Runs last and frees each base before loading the next: two 12B models
+    # do not coexist on a 32GB card.
+    for tier in ("w8a8_fp8", "w4a16"):
+        fresh = fresh_base()
+        batches = calib_batches(tokenizer, vocab, 2, fresh.device)
+        peft_t, manifest = tiers.prepare_tiered_student(
+            fresh, shadow_cfg, tier, device=fresh.device, calib_batches=batches
+        )
+        seq_ok = manifest["sequence"] == ["convert", "mount", "calibrate:2"]
+        all_ok &= check(
+            seq_ok,
+            f"{tier}: order convert→mount→calibrate (format={manifest.get('format')}, seq={manifest['sequence']})",
+        )
+        with torch.no_grad():
+            out_t = peft_t(input_ids=batches[0]["input_ids"], attention_mask=batches[0]["attention_mask"])
+        all_ok &= check(torch.isfinite(out_t.logits).all().item(), f"{tier}: forward finite")
+        del fresh, peft_t, out_t
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
 
     if all_ok:
         print("SMOKE-OK", flush=True)

@@ -58,6 +58,9 @@ class TrainConfig:
     # path driven by `bits`; otherwise a torchao tier {bf16, w8a8_fp8, w4a16}
     # applied to the backbone (requires bits=0, never trims the vocab).
     backbone_tier: str = "bits"
+    # Train against the tier's fake-quant numerics (real kernels have no
+    # autograd); eval still measures both paths.
+    tier_fake_quant: bool = False
     loss_mode: str = "ce_kl"
     model: str = "Qwen/Qwen3-1.7B"
     data: str = "experiment/data/teacher_qwen3_1p7b.jsonl"
@@ -145,7 +148,9 @@ def _quantize_base(base, cfg: TrainConfig, student_vocab: int) -> dict:
     """The backbone seam: torchao tiers (direction ①) or the E1/E2 packed path."""
     if cfg.bits == 0:
         device = next(base.parameters()).device
-        return tiers.apply_tier_conversion(base, cfg.backbone_tier, device)
+        return tiers.apply_training_conversion(
+            base, cfg.backbone_tier, device, fake_quant=cfg.tier_fake_quant
+        )
     if cfg.bits == 1:
         return quantize_model_1bit(
             base,

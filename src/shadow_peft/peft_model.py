@@ -365,9 +365,12 @@ class ShadowPeftModel(nn.Module):
         base_dtype = self._base_float_dtype()
         self.shadow_model.to(device=base_param.device, dtype=base_dtype or base_param.dtype)
         if base_dtype is not None:
-            self.shadow_injection_model.to(base_dtype)
-            self.shadow_update_model.to(base_dtype)
-            self.shadow_hidden_projection.to(base_dtype)
+            # Adapter modules are created on CPU; align device as well as
+            # dtype so direct `peft(...)` calls on CUDA work without the
+            # caller having to `.to(device)` the whole wrapper first.
+            self.shadow_injection_model.to(device=base_param.device, dtype=base_dtype)
+            self.shadow_update_model.to(device=base_param.device, dtype=base_dtype)
+            self.shadow_hidden_projection.to(device=base_param.device, dtype=base_dtype)
 
     def _base_float_dtype(self) -> torch.dtype | None:
         """Return the first floating-point parameter dtype of the base model.
