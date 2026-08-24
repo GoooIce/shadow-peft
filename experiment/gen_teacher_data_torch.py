@@ -31,8 +31,6 @@ DEVICE = (
     else "cpu"
 )
 DTYPE = torch.float16
-VOCAB = 151669  # Qwen3 full tokenizer length (incl. special tokens)
-EOS = 151643  # <|endoftext|>
 
 
 def main() -> None:
@@ -45,6 +43,18 @@ def main() -> None:
     ap.add_argument("--greedy-prefix", type=int, default=4)
     ap.add_argument("--temp", type=float, default=1.0)
     ap.add_argument("--top-k", type=int, default=0, help="0 => full vocab sampling")
+    ap.add_argument(
+        "--vocab",
+        type=int,
+        default=None,
+        help="sampling vocab size; default = len(tokenizer) (model-agnostic)",
+    )
+    ap.add_argument(
+        "--eos",
+        type=int,
+        default=None,
+        help="EOS id to truncate at; default = tokenizer.eos_token_id",
+    )
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -53,6 +63,9 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(args.model, dtype=DTYPE).to(DEVICE)
     model.eval()
+
+    vocab = args.vocab if args.vocab is not None else len(tokenizer)
+    eos = args.eos if args.eos is not None else tokenizer.eos_token_id
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -64,7 +77,7 @@ def main() -> None:
     with open(out_path, "w") as f:
         while written < args.num_seq:
             bs = min(args.batch, args.num_seq - written)
-            starts = torch.randint(0, VOCAB, (bs, 1), device=DEVICE)
+            starts = torch.randint(0, vocab, (bs, 1), device=DEVICE)
             seqs = starts  # [bs, cur_len]
             # Manual KV-free generation: recompute is cheap enough at 1.7B and
             # keeps this port dependency-free (no cache plumbing to wire up).
@@ -94,8 +107,8 @@ def main() -> None:
                 cur = nxt
 
             for row in seqs.tolist():
-                if EOS in row:
-                    row = row[: row.index(EOS)]
+                if eos in row:
+                    row = row[: row.index(eos)]
                 if len(row) >= 8:
                     f.write(json.dumps({"ids": row}) + "\n")
                     n_tokens += len(row)

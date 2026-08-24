@@ -8,7 +8,7 @@ license = { file = "LICENSE" }
 authors = [{ name = "ShadowLLM" }]
 dependencies = [
   "torch>=2.1",
-  "transformers>5.0",
+  "transformers>=5.5.0",
   "safetensors>=0.4.3",
 ]
 
@@ -16,6 +16,15 @@ dependencies = [
 mlx = [
   "mlx>=0.31.2; platform_system == 'Darwin'",
   "mlx-lm>=0.31.3",
+]
+quant = [
+  # Backbone PTQ tiers (w8a8_fp8 / w4a16) for the experiment lab.
+  "torchao>=0.15",
+]
+experiment = [
+  # experiment/lab training & eval stack.
+  "datasets>=2.19",
+  "trl>=0.20",
 ]
 
 [project.urls]

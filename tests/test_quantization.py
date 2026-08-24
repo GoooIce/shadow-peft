@@ -567,3 +567,77 @@ def test_quantized_embedding_1bit_has_dequantize_weight_parity():
     assert w.shape == (64, 32)
     expected = dequantize_1bit_affine(qemb.weight, qemb.scales, qemb.biases, group_size=32)
     assert torch.equal(w, expected)
+
+
+# --- 8-bit affine (shadow-side PTQ) -------------------------------------------
+
+
+def test_affine_8bit_scheme_row():
+    """get_scheme(8) returns the INT8 row with correct table fields and dim checks."""
+    from shadow_peft.quantization import AFFINE_8BIT, get_scheme
+
+    s = get_scheme(8)
+    assert s is AFFINE_8BIT
+    assert (s.bits, s.label, s.levels, s.words_per_int, s.ternary) == (
+        8, "affine_8bit", 256, 4, False,
+    )
+    s.check_dims(128, 32)
+    s.check_dims(128, 128)
+    with pytest.raises(ValueError):
+        s.check_dims(128, 33)
+    with pytest.raises(ValueError):
+        s.check_dims(130, 128)
+
+
+def test_affine_8bit_roundtrip_within_half_step():
+    """Packing (4 codes per int32 word) and roundtrip error stay within the
+    8-bit affine half-step (plus fp16 scale/bias storage slack)."""
+    from shadow_peft.quantization import dequantize_8bit_affine, quantize_8bit_affine
+
+    torch.manual_seed(0)
+    w = torch.randn(16, 256) * 0.01
+    packed, scales, biases = quantize_8bit_affine(w, group_size=128)
+    assert packed.dtype == torch.int32
+    assert packed.shape == (16, 64)  # 256 values / 4 per int32 word
+    assert scales.shape == biases.shape == (16, 2)
+
+    w_hat = dequantize_8bit_affine(packed, scales, biases, group_size=128)
+    half_step = scales.float() / 2.0  # scale = (max-min)/255 per group
+    err = (w - w_hat).abs().reshape(16, 2, 128)
+    assert (err <= half_step.unsqueeze(-1) + 5e-4).all()
+
+
+def test_quantize_model_8bit_walker():
+    """The walker drives the 8-bit row like the 1/2-bit ones: in-place module
+    replacement, packing density, forward stays close to fp."""
+    from shadow_peft.quantization import QuantizedLinear8Bit, quantize_model_8bit
+
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(256, 128), nn.Linear(128, 64)).half()
+    x = torch.randn(4, 256).half()
+    ref = model(x)
+
+    manifest = quantize_model_8bit(model, group_size=128)
+    assert manifest["quantization"]["bits"] == 8
+    assert manifest["quantization"]["group_size"] == 128
+    assert len(manifest["quantized"]) == 2
+
+    q0 = model[0]
+    assert isinstance(q0, QuantizedLinear8Bit)
+    assert q0.weight.shape == (128, 64)  # 4 codes per int32 word
+
+    out = model(x)
+    assert torch.allclose(out, ref, atol=0.05)
+
+
+def test_unpack_codes_bits8_registry_path():
+    """bits=8 resolves through the registered scheme table (not the raw
+    whitelist) and keeps the LSB-first 4-codes-per-word layout."""
+    from shadow_peft.quantization import unpack_codes
+
+    word = 1 | (2 << 8) | (3 << 16) | (250 << 24)
+    word_signed = word - (1 << 32) if word >= (1 << 31) else word  # two's complement
+    packed = torch.tensor([[word_signed]], dtype=torch.int32)
+    codes = unpack_codes(packed, 8)
+    assert codes.shape == (1, 1, 4)
+    assert codes.flatten().tolist() == [1, 2, 3, 250]

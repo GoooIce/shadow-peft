@@ -71,3 +71,15 @@ def unpack_codes(packed: torch.Tensor, bits: int) -> torch.Tensor:
     words = 32 // bits
     shifts = torch.arange(words, dtype=torch.int32, device=packed.device) * bits
     return (packed.unsqueeze(-1) >> shifts) & (2**bits - 1)
+
+
+def wrap_int32(values: torch.Tensor) -> torch.Tensor:
+    """Reinterpret unsigned bit patterns in ``[0, 2**32)`` as int32 words.
+
+    ``Tensor.to(torch.int32)`` raises on values >= 2^31, but a fully-packed
+    word (e.g. an 8-bit code 250 sitting in the top byte) routinely exceeds
+    it — the packing idiom needs the two's-complement bit pattern, not the
+    value.
+    """
+    values = values & 0xFFFFFFFF
+    return torch.where(values >= 0x80000000, values - 0x1_0000_0000, values).to(torch.int32)

@@ -8,17 +8,37 @@ import torch.nn as nn
 from transformers import PreTrainedModel
 
 
+def _unwrap_language_model(backbone: nn.Module) -> nn.Module:
+    """
+    Descend through multimodal wrappers (Gemma3 4B+ / Gemma4 all sizes) that nest
+    the decoder stack under `.language_model` next to their vision tower.
+
+    ``Gemma3ForConditionalGeneration.model`` is a multimodal container with no
+    ``.layers`` of its own; the text decoder lives at
+    ``model.model.language_model.layers``. The loop handles nested wrappers and
+    is a no-op for text-only backbones without a ``language_model`` child.
+    """
+    seen: set[int] = set()
+    while id(backbone) not in seen:
+        seen.add(id(backbone))
+        inner = getattr(backbone, "language_model", None)
+        if inner is None:
+            break
+        backbone = inner
+    return backbone
+
+
 def _get_backbone(model: PreTrainedModel) -> nn.Module:
     """
     Return the module that contains the transformer decoder stack.
 
     This mirrors common HF naming conventions (LLaMA/Mistral/Qwen2/Qwen3: `.model`,
-    GPT2/Falcon: `.transformer`).
+    GPT2/Falcon: `.transformer`, multimodal Gemma3/Gemma4: `.model.language_model`).
     """
-    for attr in ("model", "transformer", "base_model", "decoder"):
+    for attr in ("model", "transformer", "base_model", "decoder", "language_model"):
         backbone = getattr(model, attr, None)
         if backbone is not None:
-            return backbone
+            return _unwrap_language_model(backbone)
     # Some HF classes are already the "backbone" (e.g. LlamaModel, Qwen3Model).
     if hasattr(model, "layers") and isinstance(model.layers, nn.ModuleList):
         return model
@@ -27,7 +47,7 @@ def _get_backbone(model: PreTrainedModel) -> nn.Module:
     if hasattr(model, "decoder") and hasattr(model.decoder, "layers") and isinstance(
         model.decoder.layers, nn.ModuleList
     ):
-        return model.decoder
+        return _unwrap_language_model(model.decoder)
     raise AttributeError("Unable to locate transformer backbone inside the supplied model.")
 
 
@@ -57,9 +77,15 @@ def _get_decoder_layers(model: PreTrainedModel) -> tuple[nn.Module, nn.ModuleLis
 
 def _get_hidden_size(model: PreTrainedModel) -> int:
     cfg = model.config
-    for attr in ("hidden_size", "n_embd", "d_model"):
-        if hasattr(cfg, attr):
-            return int(getattr(cfg, attr))
+    # Multimodal configs (Gemma3/Gemma4 ConditionalGeneration) keep the text
+    # decoder's dimensions under `text_config`, not at the top level.
+    text_cfg = getattr(cfg, "text_config", None)
+    for c in (cfg, text_cfg):
+        if c is None:
+            continue
+        for attr in ("hidden_size", "n_embd", "d_model"):
+            if hasattr(c, attr):
+                return int(getattr(c, attr))
     raise AttributeError("Unable to infer hidden size from model.config.")
 
 
@@ -115,6 +141,28 @@ def _get_num_hidden_layers(cfg: Any) -> int:
     raise AttributeError("Unable to get number of layers from this config.")
 
 
+def _shrink_per_layer_config(cfg: Any, num_layers: int) -> None:
+    """
+    Keep per-layer config fields consistent after shrinking ``num_hidden_layers``.
+
+    Gemma3/Gemma4 configs carry per-layer lists/dicts (``layer_types``,
+    ``per_layer_config``, ``max_window_layers``) sized to the original layer
+    count; leaving them stale makes the smaller shadow config fail validation
+    on instantiation.
+    """
+    lt = getattr(cfg, "layer_types", None)
+    if isinstance(lt, (list, tuple)) and len(lt) > num_layers:
+        cfg.layer_types = list(lt[:num_layers])
+    plc = getattr(cfg, "per_layer_config", None)
+    if isinstance(plc, dict):
+        stale = [k for k in plc if str(k).isdigit() and int(k) >= num_layers]
+        for k in stale:
+            del plc[k]
+    mw = getattr(cfg, "max_window_layers", None)
+    if mw is not None and isinstance(mw, int) and mw > num_layers:
+        cfg.max_window_layers = num_layers
+
+
 def build_implicit_shadow_model(
     base_model: PreTrainedModel,
     *,
@@ -142,11 +190,24 @@ def build_implicit_shadow_model(
     if backbone is None:
         # Fall back to using the base model itself (covers cases where base_model is already the backbone).
         backbone = base_model
+    # Multimodal wrappers (Gemma3/Gemma4) nest the text decoder under
+    # `.language_model`; the shadow must be built from the text model class.
+    backbone = _unwrap_language_model(backbone)
 
     cfg = deepcopy(backbone.config)
+    # Gemma4 PLE (per-layer embedding): the shadow backbone is driven via base
+    # `inputs_embeds` (embedding sharing), so it never sees `input_ids` and the
+    # PLE lookup cannot run (it would try to reverse the shared-away
+    # `embed_tokens`). Drop the PLE branch from the shadow config; the real
+    # Gemma4-12B testbed ships with PLE disabled anyway.
+    if getattr(cfg, "hidden_size_per_layer_input", 0):
+        cfg.hidden_size_per_layer_input = 0
+    if getattr(cfg, "vocab_size_per_layer_input", 0):
+        cfg.vocab_size_per_layer_input = 0
     if num_shadow_layers < 1:
         raise ValueError(f"num_shadow_layers must be >= 1, got {num_shadow_layers}")
     _set_num_hidden_layers(cfg, num_shadow_layers)
+    _shrink_per_layer_config(cfg, num_shadow_layers)
 
     # If explicitly provided, override the MLP/GLU intermediate size on the shadow config.
     if shadow_intermediate_size is not None:

@@ -21,6 +21,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from shadow_peft import ShadowConfig, ShadowForCausalLM, get_shadow_model
 from shadow_peft.quantization import quantize_model_1bit, quantize_model_2bit
 
+from . import tiers
 from .atoms import (
     QWEN3_ENDOFTEXT_ID,
     eval_ppl,
@@ -53,6 +54,10 @@ _PROFILES: dict[int, BitProfile] = {
 @dataclass
 class TrainConfig:
     bits: int = 1
+    # Backbone tier seam (direction ①): "bits" = the E1/E2 shadow-side packed
+    # path driven by `bits`; otherwise a torchao tier {bf16, w8a8_fp8, w4a16}
+    # applied to the backbone (requires bits=0, never trims the vocab).
+    backbone_tier: str = "bits"
     loss_mode: str = "ce_kl"
     model: str = "Qwen/Qwen3-1.7B"
     data: str = "experiment/data/teacher_qwen3_1p7b.jsonl"
@@ -74,19 +79,34 @@ class TrainConfig:
     dtype: torch.dtype | None = None  # None -> per-bits profile default
     log_every: int = 25
     eval_every: int = 250
+    # Joint-calibration forwards for w8a8_fp8 (run with the shadow attached).
+    calib_steps: int = 8
     seed: int = 0
     save_dir: str | None = None  # None -> experiment/runs/{tag}_{loss_mode}
     device: str | None = None  # None -> pick_device()
     pad_id: int = QWEN3_ENDOFTEXT_ID
 
     def __post_init__(self):
-        if self.bits not in _PROFILES:
-            raise ValueError(f"unsupported bits={self.bits} (expected 1 or 2)")
+        if self.backbone_tier == "bits":
+            if self.bits not in _PROFILES:
+                raise ValueError(f"unsupported bits={self.bits} (expected 1 or 2)")
+        else:
+            if self.bits != 0:
+                raise ValueError(
+                    "torchao backbone tiers require bits=0 "
+                    "(the shadow-side packed path driven by bits>0 is the E1/E2 protocol)"
+                )
+            if self.backbone_tier not in tiers.TIERS:
+                raise ValueError(
+                    f"unsupported backbone_tier={self.backbone_tier!r} (expected 'bits' or one of {tiers.TIERS})"
+                )
         if self.loss_mode not in LOSS_MODES:
             raise ValueError(f"unsupported loss_mode={self.loss_mode!r} (expected one of {LOSS_MODES})")
 
     @property
     def profile(self) -> BitProfile:
+        if self.bits == 0:
+            return BitProfile(f"d1_{self.backbone_tier}", self.backbone_tier, torch.bfloat16, 0)
         return _PROFILES[self.bits]
 
     def resolved_save_dir(self) -> Path:
@@ -98,6 +118,7 @@ class TrainReport:
     loss_mode: str
     quantization: str
     bits: int
+    backbone_tier: str
     tokens: int
     steps: int
     final_ppl_20chunks: float
@@ -121,7 +142,10 @@ def _summary_args_dump(cfg: TrainConfig) -> dict:
 
 
 def _quantize_base(base, cfg: TrainConfig, student_vocab: int) -> dict:
-    """The bit-width seam: everything else about E1/E2 is identical."""
+    """The backbone seam: torchao tiers (direction ①) or the E1/E2 packed path."""
+    if cfg.bits == 0:
+        device = next(base.parameters()).device
+        return tiers.apply_tier_conversion(base, cfg.backbone_tier, device)
     if cfg.bits == 1:
         return quantize_model_1bit(
             base,
@@ -155,7 +179,10 @@ def train_shadow(cfg: TrainConfig) -> TrainReport:
     # --- student: quantized base + shadow ---
     base = AutoModelForCausalLM.from_pretrained(cfg.model, dtype=dtype).to(device)
     manifest = _quantize_base(base, cfg, student_vocab)
-    print(f"quantized={len(manifest['quantized'])} trimmed={manifest['trimmed']}", flush=True)
+    if cfg.bits == 0:
+        print(f"backbone tier={cfg.backbone_tier} format={manifest.get('format')}", flush=True)
+    else:
+        print(f"quantized={len(manifest['quantized'])} trimmed={manifest['trimmed']}", flush=True)
     base.eval()
 
     shadow_cfg = ShadowConfig(
@@ -192,6 +219,17 @@ def train_shadow(cfg: TrainConfig) -> TrainReport:
     seqs = load_teacher_data(cfg.data)
     print(f"teacher sequences: {len(seqs)}", flush=True)
     eval_text = load_wikitext2_test_text()
+
+    # Joint calibration (iron rule): W8A8 activation scales must be observed
+    # on shadow-carrying activations, so the calibration forwards run through
+    # the mounted student — never the bare quantized base.
+    if cfg.backbone_tier == "w8a8_fp8" and cfg.calib_steps > 0:
+        calib_batches = [
+            make_batch(seqs, rng, cfg.batch_seq, cfg.seq_len, device, pad_id=cfg.pad_id)
+            for _ in range(cfg.calib_steps)
+        ]
+        n_calib = tiers.joint_calibrate(task.peft_model, calib_batches)
+        print(f"joint calibration: {n_calib} forwards with shadow attached", flush=True)
 
     log_f = open(save_dir / "train_log.jsonl", "w")
     ppl = eval_ppl(task, tokenizer, eval_text, device=device)
@@ -269,6 +307,7 @@ def train_shadow(cfg: TrainConfig) -> TrainReport:
         loss_mode=cfg.loss_mode,
         quantization=cfg.profile.label,
         bits=cfg.bits,
+        backbone_tier=cfg.backbone_tier,
         tokens=tokens_seen,
         steps=step,
         final_ppl_20chunks=final_ppl,

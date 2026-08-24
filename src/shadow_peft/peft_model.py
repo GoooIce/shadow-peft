@@ -20,6 +20,7 @@ from .model_utils import (
     _get_backbone,
     _get_decoder_layers,
     _get_hidden_size,
+    _unwrap_language_model,
     build_implicit_shadow_model,
     count_parameters,
 )
@@ -493,12 +494,13 @@ class ShadowPeftModel(nn.Module):
 
         Example:
         - Qwen3ForCausalLM -> Qwen3Model (via `.model`)
+        - Gemma3ForConditionalGeneration -> Gemma3TextModel (via `.model.language_model`)
         - SequenceClassification heads are similarly stripped.
         """
         for attr in ("model", "transformer", "base_model", "decoder"):
             cand = getattr(model, attr, None)
             if isinstance(cand, PreTrainedModel):
-                return cand
+                return _unwrap_language_model(cand)
         return model
 
     def _configure_shadow_embedding_sharing(self) -> bool:

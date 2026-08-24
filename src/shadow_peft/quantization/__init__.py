@@ -14,6 +14,14 @@ from .affine_2bit import (
     quantize_2bit_ternary,
     quantize_model_2bit,
 )
+from .affine_8bit import (
+    AFFINE_8BIT,
+    QuantizedEmbedding8Bit,
+    QuantizedLinear8Bit,
+    dequantize_8bit_affine,
+    quantize_8bit_affine,
+    quantize_model_8bit,
+)
 from .modules import QuantizedEmbedding, QuantizedLinear
 from .scheme import QuantScheme, get_scheme, register_scheme, unpack_codes
 from .walker import load_quantized_checkpoint, quantize_model, save_quantized_checkpoint
@@ -23,6 +31,7 @@ __all__ = [
     "QuantScheme",
     "AFFINE_1BIT",
     "TERNARY_2BIT",
+    "AFFINE_8BIT",
     "get_scheme",
     "register_scheme",
     "unpack_codes",
@@ -41,6 +50,12 @@ __all__ = [
     "quantize_2bit_ternary",
     "dequantize_2bit_ternary",
     "quantize_model_2bit",
+    # 8-bit affine (shadow-side PTQ)
+    "QuantizedLinear8Bit",
+    "QuantizedEmbedding8Bit",
+    "quantize_8bit_affine",
+    "dequantize_8bit_affine",
+    "quantize_model_8bit",
     # scheme-agnostic entry points
     "quantize_model",
     "save_quantized_checkpoint",

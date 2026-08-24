@@ -35,7 +35,7 @@ import torch.nn as nn
 from .modules import QuantizedEmbedding as _QuantizedEmbedding
 from .modules import QuantizedLinear as _QuantizedLinear
 from .modules import pin_scheme_classes
-from .scheme import QuantScheme, register_scheme, unpack_codes
+from .scheme import QuantScheme, register_scheme, unpack_codes, wrap_int32
 from .walker import quantize_model as _quantize_model
 
 _EPS = 1e-8
@@ -115,7 +115,7 @@ def quantize_2bit_ternary(
     code = code.reshape(out_features, n_words, 16)
     shifts = 2 ** (2 * torch.arange(16, dtype=torch.int64, device=weight.device))
     packed = (code * shifts).sum(dim=-1)  # values in [0, 2^32)
-    packed = (packed & 0xFFFFFFFF).to(torch.int32)  # wrap to int32 bit pattern
+    packed = wrap_int32(packed)  # wrap to int32 bit pattern
 
     # Affine params: scale=s_g, bias=-s_g  =>  dequant = s_g * (code-1) = s_g * ternary
     biases = (-scales).to(dtype)

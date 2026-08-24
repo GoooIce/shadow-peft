@@ -8,7 +8,7 @@ import torch.nn as nn
 from .modules import QuantizedEmbedding as _QuantizedEmbedding
 from .modules import QuantizedLinear as _QuantizedLinear
 from .modules import pin_scheme_classes
-from .scheme import QuantScheme, register_scheme, unpack_codes
+from .scheme import QuantScheme, register_scheme, unpack_codes, wrap_int32
 from .walker import load_quantized_checkpoint as _load_quantized_checkpoint
 from .walker import quantize_model as _quantize_model
 from .walker import save_quantized_checkpoint  # noqa: F401  # re-exported for import compatibility
@@ -86,7 +86,7 @@ def quantize_1bit_affine(
     q = q.reshape(out_features, in_features // 32, 32)
     powers = 2 ** torch.arange(32, dtype=torch.int64, device=weight.device)
     packed = (q * powers).sum(dim=-1)  # values in [0, 2^32)
-    packed = (packed & 0xFFFFFFFF).to(torch.int32)  # wrap to int32 bit pattern
+    packed = wrap_int32(packed)  # wrap to int32 bit pattern
     return packed, scales.to(dtype), biases.to(dtype)
 
 
