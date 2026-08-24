@@ -218,6 +218,7 @@ def evaluate_cell(
     gsm8k_examples: list[dict[str, Any]] | None = None,
     decode: Callable[[list[int]], str] | None = None,
     ppl_chunks: int = 4,
+    ppl_context_len: int = 0,
     max_new_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Evaluate one grid cell; returns its metrics dict (JSON-serializable)."""
@@ -265,7 +266,8 @@ def evaluate_cell(
         torch.cuda.reset_peak_memory_stats(device)
 
     ppl = eval_ppl(
-        wrapped, tokenizer, eval_text, chunks=ppl_chunks, device=str(device)
+        wrapped, tokenizer, eval_text, chunks=ppl_chunks, device=str(device),
+        context_len=ppl_context_len,
     )
     mmlu = (
         generation_score(
@@ -362,6 +364,7 @@ def run_grid(
     decode: Callable[[list[int]], str] | None = None,
     kernel_paths: tuple[str, ...] = KERNEL_PATHS,
     ppl_chunks: int = 4,
+    ppl_context_len: int = 0,
     max_new_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Run the 3×2 grid × kernel paths + anchor + bare baselines.
@@ -392,6 +395,7 @@ def run_grid(
         gsm8k_examples=gsm8k_examples,
         decode=decode,
         ppl_chunks=ppl_chunks,
+        ppl_context_len=ppl_context_len,
         max_new_tokens=max_new_tokens,
     )
     # KLD reference = the anchor model itself (bf16 backbone + bf16 shadow).
@@ -441,6 +445,7 @@ def run_grid(
                 gsm8k_examples=gsm8k_examples,
                 decode=decode,
                 ppl_chunks=ppl_chunks,
+                ppl_context_len=ppl_context_len,
                 max_new_tokens=max_new_tokens,
             )
             for bench in ("mmlu", "gsm8k"):

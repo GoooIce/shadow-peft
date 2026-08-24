@@ -83,11 +83,17 @@ def eval_ppl(
     chunks: int = 8,
     chunk_len: int = 512,
     device: str,
+    context_len: int = 0,
 ) -> float:
     """Chunked perplexity over the first `chunks` windows of `text`.
 
     Works for any causal LM returning `.logits` (HF base model or
     ShadowForCausalLM). Restores the model's prior train/eval mode.
+
+    ``context_len > 0`` carries preceding tokens as context and scores only
+    the window itself (strided-LM convention). Instruction-tuned models
+    resist cold mid-stream windows — their token likelihoods inflate ~30x
+    without leading context — so Gemma-it evaluation uses context_len=512.
 
     BOS: Gemma4's tokenizer ships ``add_bos_token=False`` (Gemma 1-3 default
     to True) and a BOS-less sequence un-anchors the model — plain-text ppl
@@ -107,10 +113,14 @@ def eval_ppl(
     if limit <= 0 and len(ids) >= chunk_len + 1:
         limit = 1  # exact-fit input: force the single full window
     for start in range(0, limit, chunk_len):
-        x = torch.tensor(ids[start : start + chunk_len + 1], device=device)[None]
+        ctx = max(0, start - context_len)
+        x = torch.tensor(ids[ctx : start + chunk_len + 1], device=device)[None]
         logits = model(input_ids=x).logits.float()
         logp = logits[:, :-1] - torch.logsumexp(logits[:, :-1], -1, keepdim=True)
         tgt = x[:, 1:]
+        if context_len > 0 and start > 0:
+            keep_from = start - ctx  # score only the window tail, not the context
+            tgt = tgt[:, keep_from - 1 :]
         total_nll += -logp.gather(-1, tgt.unsqueeze(-1)).sum().item()
         total_tok += tgt.numel()
     if was_training:

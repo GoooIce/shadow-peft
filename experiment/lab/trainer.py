@@ -82,6 +82,8 @@ class TrainConfig:
     dtype: torch.dtype | None = None  # None -> per-bits profile default
     log_every: int = 25
     eval_every: int = 250
+    # Context-carrying ppl windows: Gemma-it resists cold mid-stream windows.
+    ppl_context_len: int = 0
     # Joint-calibration forwards for w8a8_fp8 (run with the shadow attached).
     calib_steps: int = 8
     # Activation-memory relief for 12B-class distillation (frozen base with
@@ -243,8 +245,8 @@ def train_shadow(cfg: TrainConfig) -> TrainReport:
         print(f"joint calibration: {n_calib} forwards with shadow attached", flush=True)
 
     log_f = open(save_dir / "train_log.jsonl", "w")
-    ppl = eval_ppl(task, tokenizer, eval_text, device=device)
-    teacher_ppl = eval_ppl(teacher, tokenizer, eval_text, device=device)
+    ppl = eval_ppl(task, tokenizer, eval_text, device=device, context_len=cfg.ppl_context_len)
+    teacher_ppl = eval_ppl(teacher, tokenizer, eval_text, device=device, context_len=cfg.ppl_context_len)
     print(f"initial student PPL {ppl:.1f} | teacher PPL {teacher_ppl:.2f}", flush=True)
 
     tokens_seen = 0
@@ -306,14 +308,18 @@ def train_shadow(cfg: TrainConfig) -> TrainReport:
 
         if step % cfg.eval_every == 0:
             last_good_state = {k: v.detach().clone() for k, v in task.state_dict().items() if v.requires_grad}
-            ppl = eval_ppl(task, tokenizer, eval_text, device=device)
+            ppl = eval_ppl(
+                task, tokenizer, eval_text, device=device, context_len=cfg.ppl_context_len
+            )
             print(f"step {step}: eval PPL {ppl:.1f} (best {best_ppl:.1f})", flush=True)
             if ppl < best_ppl:
                 best_ppl = ppl
                 task.peft_model.save_pretrained(save_dir / "best")
 
     task.peft_model.save_pretrained(save_dir / "final")
-    final_ppl = eval_ppl(task, tokenizer, eval_text, chunks=20, device=device)
+    final_ppl = eval_ppl(
+        task, tokenizer, eval_text, chunks=20, device=device, context_len=cfg.ppl_context_len
+    )
     report = TrainReport(
         loss_mode=cfg.loss_mode,
         quantization=cfg.profile.label,

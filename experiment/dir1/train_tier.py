@@ -59,6 +59,7 @@ def main() -> None:
         calib_steps=args.calib_steps,
         tier_fake_quant=not args.no_fake_quant,
         gradient_checkpointing=not args.no_grad_ckpt,
+        ppl_context_len=512,
         pad_id=pad_id,
         save_dir=str(Path(args.out_root) / args.tier),
     )

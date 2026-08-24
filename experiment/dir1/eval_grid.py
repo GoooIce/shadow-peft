@@ -144,6 +144,7 @@ def main() -> None:
             gsm8k_examples=load_gsm8k_probe(tokenizer, args.gsm8k_n),
             decode=tokenizer.decode,
             ppl_chunks=20,
+            ppl_context_len=512,
         )
 
     # --- 挽回率 + 判定 --------------------------------------------------------
