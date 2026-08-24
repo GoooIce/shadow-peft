@@ -92,3 +92,34 @@ curl -X POST https://api.autodl.com/api/v1/dev/instance/pro/power_off \
 - **查货源**：`POST /api/v1/dev/machine/region/gpu_stock` body `{"region_sign":"beijingDC2"}` 返回各 GPU 闲置数（弹性部署 API，同样适用买前探货）。
 - **释放实例不可逆**：`power_off` 数据保留；`release` 端点会清空一切，慎用。
 - 官方文档：[Pro 实例 API](https://www.autodl.com/docs/instance_pro_api/)、[通用 API](https://www.autodl.com/docs/common_api/)、[弹性部署 API（含地区码）](https://www.autodl.com/docs/esd_api_doc/)、[网盘](https://www.autodl.com/docs/netdisk/)、[省钱](https://www.autodl.com/docs/save_money/)。
+
+## 2026-08-24/25 dir1 实战补充（方向① 12B 实验一线经验）
+
+### 网络与权重下载（最重要的新知识）
+
+- **分区网络差异巨大**：北京B2（beijingDC2）turbo 下载 HF 23GB 仅 8 分钟；**西北（westDC3）直连全封、turbo 单流仅 ~1.7MB/s 且大文件频繁僵死**，跨实例 SSH 互传也只有 2-4MB/s/流。在 westDC3 拿大模型走下面的 ModelScope 并行方案。
+- **ModelScope 并行分段下载（实测聚合 ~11-12MB/s，23GB/35min，sha256 全程校验）**：ModelScope 镜像 `google/gemma-4-12B-it` 与 HF 官方**逐位一致**（LFS 对象 sha 即文件 sha256，可用 HF `x-linked-etag` 头比对），支持 Range(206)。配方：`truncate -s $SIZE` 预分配 → 14 路 `curl -r $start-$end | dd of=F bs=4M oflag=seek_bytes seek=$start conv=notrunc` 并行直写（不占双倍磁盘）→ 每段成功 touch 标记、`--speed-time 60 --speed-limit 50000` 失速自杀重试 → 全段完成后 `sha256sum` 终验。脚本骨架见本次会话 `/root/ms_parallel_dl.sh` 模式。
+- **hf-mirror 注意**：新版 huggingface_hub 走 Xet 协议会被镜像 401，需 `HF_HUB_DISABLE_XET=1`；且仓库名大小写敏感（`gemma-4-12B-it` 非 `12b`）。
+- **镜像保存路线（备选，未实测完）**：把带模型的实例存镜像再从镜像开新卡，可整体绕开代理瓶颈。前提：模型必须在**系统盘**（镜像只含系统盘，`/root/autodl-tmp` 若是独立数据盘则不含）；跨区可用性未验证；镜像保存本身需几十分钟。下次大文件迁移优先评估此路。
+- **实例互传**：跨区实例间 `connect.*.seetacloud.com:端口` TCP/SSH 直通（不需要 turbo），配 ssh key 后 rsync 可用，但单流限速 ~2-4MB/s。
+
+### 计费纪律（本次教训）
+
+- **无卡模式（¥0.10/h）只能控制台开**：dev API `power_on` 传 `"payload":"non_gpu"` 报「不支持的启动模式」。装环境/传数据/下载若预计 >20 分钟，要么请人在控制台点无卡开机，要么接受 GPU 时费空烧——本次 H800 在下载与排查期空烧 ~2.5h ≈ ¥22，是最大的无谓开销。
+- **关机止血优先**：诊断类工作（不依赖 GPU）先把实例 power_off，本地想清楚再开机，一开机就把 GPU 活排满。
+- **`/usr/bin/shutdown` 可被 stub**：实例内把自动关机换成记日志空壳 + 由 API 侧控制真实关机，可避免流水线中途自断（本次多阶段链条的关键手法）。
+
+### 磁盘与保存
+
+- **30GB 系统盘装不下「22GB 模型 + 环境 + 多档 checkpoint」**：adapter checkpoint 每份 922MB、best/final 双份 × 3 档 ≈ 5.5GB，pip/conda 缓存再占 2GB——首跑在保存时 ENOSPC 崩溃。创建时 `expand_system_disk_by_gb` 给足（¥0.012/日/GB 很便宜），或及时删 best 只留 final + `pip cache purge`。
+- **产物即阶段落盘到本地**：实例可能非自主释放（见下），每阶段完成立刻 rsync 拉回本地，不要攒。
+
+### 实例释放事故（记录在案）
+
+- 2026-08-24 夜：冒烟用 5090（pro-7875c8824fdf）与长期旧实例（pro-78752d60153f，存有 E1/E2 正式 checkpoint）**在无任何 release API 调用的情况下显示「已释放」**（我方全程只调用过 power_on/power_off；dev API 无释放审计可查）。旧实例上的 E1/E2 正式 checkpoint 随之丢失（本地仅存训练日志与 analysis_* 遗留 adapter）。结论：**关机实例 ≠ 保险箱**，重要产物当天拉回本地。
+
+### 平台吞吐实测（H800 PCIe 80GB / 5090 32GB）
+
+- 12B bf16 教师自采样（batch 64，KV 全开）：~900 tok/s（batch 32 仅 504——大 batch 线性赚）。
+- 12B 蒸馏训练（batch_seq=1×512 + 非重入梯度检查点 + 活教师同卡）：显存 ~61-63GB/80GB，5M tokens ≈ 1.7h（¥4.9@¥8.88/h）。batch_seq=2 无检查点会在 262K 词表 CE 处 OOM（80GB 也炸）。
+- sm120（5090）量化内核选型：FP8 用 `PerRow()+KernelPreference.TORCH`（默认 AUTO 粒度会撞「input must be 1x128 scaled」断言；mslk cutlass 在 sm120 初始化失败）；Int4 用 `TILE_PACKED_TO_4D`（tinygemm，torch 原生）。环境锁定 torch 2.12.1+cu130 + transformers 5.15.1 + torchao 0.18.0（mslk 1.2.0+cu130 可载入但 cutlass 路径不可用，非必需）。
