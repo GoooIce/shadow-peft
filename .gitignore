@@ -221,3 +221,4 @@ experiment/runs/
 experiment/runs_5M/
 .DS_Store
 experiment/analysis_qwen36_bonsai_migration/
+.quark_netdisk_auth.txt

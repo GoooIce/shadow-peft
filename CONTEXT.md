@@ -22,12 +22,18 @@
 - **Lloyd 精炼（Lloyd Refinement）** — 打包后在码本上迭代 Lloyd–Max，降低量化 MSE。
 - **量化清单（Quantization Manifest）** — `quantize_model_*` 返回的字典：`quantized` / `skipped` / `tied` / `trimmed` / `quantization`。
 - **词表裁剪（Vocab Trimming）** — 把 `lm_head` 与嵌入裁剪到分词器实际长度（`trim_vocab_to`），需整词表处理绑定权重。
+- **非对称量化（Asymmetric Quantization）** — backbone 与影子适配器按不同精度部署的形态：backbone 低精度（PTQ），shadow 保持高精度承载任务专属修正。
+- **挽回率（Recovery Rate）** — shadow 对量化损失的挽回比例：(ppl_quant − ppl_quant+shadow) / (ppl_quant − ppl_bf16)。
+- **联合校准（Joint Calibration）** — 激活量化 scale 的校准前向挂上 shadow 联跑；若在无注入分布上校准，注入修正会落在校准范围外被截断。
 
 ## 推理挽具（harness）
 
 - **专家（Specialist）** — 一份已训练的影子适配器 + 其元数据；在同一基座上热切换。
 - **路由（Routing）** — 四级优先级决定选用哪个专家：元数据护栏 → 会话粘滞 → 关键字（优先级破平）→ 默认回退。
 - **会话粘滞（Sticky Session）** — 一旦某会话命中某专家，后续轮次继续用它；会话同时持有各自的聊天历史。
+- **草稿-验证（Draft-Verify）** — 投机解码的两段循环：小草稿模型先行起草若 token，目标模型批量验证并按拒绝采样保留前缀（lossless 要求两者同词表、同温度）。
+- **平均接受长度（τ）** — 每个 draft-verify 周期平均产出的 token 数；硬件无关的可比指标，不含草稿自身开销。
+- **再循环（Recirculation）** — 推理时把深层激活按输入步回注浅层的零训练增强（凸混合/纯加性 + L2 范数匹配）；收益强依赖 Gemma 系 Peri-LN 归一化；代价在 prefill 逐 token 串行。
 - **注册表（Registry）** — 预载所有专家的适配器状态，`ensure()` 经 `swap_adapter` 热切换：原地换权重并原子重置影子运行态（隐藏态 + 影子 KV 缓存）。时序约束活在模块内部，不在调用方。
 
 ## 检查点格式
