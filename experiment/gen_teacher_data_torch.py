@@ -66,6 +66,9 @@ def main() -> None:
 
     vocab = args.vocab if args.vocab is not None else len(tokenizer)
     eos = args.eos if args.eos is not None else tokenizer.eos_token_id
+    # Gemma4 ships add_bos_token=False; ground every sampled sequence at <bos>
+    # or the model un-anchors (off-distribution teacher data).
+    bos = tokenizer.bos_token_id
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -78,12 +81,15 @@ def main() -> None:
         while written < args.num_seq:
             bs = min(args.batch, args.num_seq - written)
             starts = torch.randint(0, vocab, (bs, 1), device=DEVICE)
+            if bos is not None:
+                bos_col = torch.full((bs, 1), bos, dtype=starts.dtype, device=DEVICE)
+                starts = torch.cat([bos_col, starts], dim=1)
             seqs = starts  # [bs, cur_len]
             # Manual KV-free generation: recompute is cheap enough at 1.7B and
             # keeps this port dependency-free (no cache plumbing to wire up).
             past = None
             cur = starts
-            for pos in range(args.seq_len - 1):
+            for pos in range(args.seq_len - 2):
                 with torch.no_grad():
                     if past is None:
                         out = model(input_ids=cur, use_cache=True)

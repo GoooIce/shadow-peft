@@ -56,6 +56,14 @@ def load_adapter(path: str | Path) -> dict:
     return dict(safetensors_load_file(str(p)))
 
 
+def _bos_ids(tokenizer, prompt: str) -> list[int]:
+    ids = tokenizer.encode(prompt)
+    bos = getattr(tokenizer, "bos_token_id", None)
+    if bos is not None and (not ids or ids[0] != bos):
+        ids = [bos] + ids
+    return ids
+
+
 def load_mmlu_probe(tokenizer, n: int):
     from datasets import load_dataset
 
@@ -68,7 +76,7 @@ def load_mmlu_probe(tokenizer, n: int):
             + "".join(f"{letter[i]}. {c}\n" for i, c in enumerate(row["choices"]))
             + "Answer:"
         )
-        out.append({"prompt_ids": tokenizer.encode(prompt), "answer": letter[row["answer"]]})
+        out.append({"prompt_ids": _bos_ids(tokenizer, prompt), "answer": letter[row["answer"]]})
     return out
 
 
@@ -79,7 +87,7 @@ def load_gsm8k_probe(tokenizer, n: int):
     out = []
     for row in list(ds)[:n]:
         gold = row["answer"].split("####")[-1].strip().replace(",", "")
-        out.append({"prompt_ids": tokenizer.encode(row["question"] + "\nAnswer:"), "answer": gold})
+        out.append({"prompt_ids": _bos_ids(tokenizer, row["question"] + "\nAnswer:"), "answer": gold})
     return out
 
 

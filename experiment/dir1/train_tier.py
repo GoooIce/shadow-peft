@@ -30,12 +30,13 @@ def main() -> None:
     ap.add_argument("--out-root", default="experiment/runs/dir1")
     ap.add_argument("--max-tokens", type=float, default=5e6)
     ap.add_argument("--seq-len", type=int, default=512)
-    ap.add_argument("--batch-seq", type=int, default=2)
+    ap.add_argument("--batch-seq", type=int, default=1, help="12B distill fits 80GB at batch 1")
     ap.add_argument("--lr", type=float, default=1e-5)
     ap.add_argument("--shadow-layers", type=int, default=2)
     ap.add_argument("--calib-steps", type=int, default=8)
     ap.add_argument("--no-fake-quant", action="store_true",
                     help="train against the real kernel path (autograd unsupported; eval-only)")
+    ap.add_argument("--no-grad-ckpt", action="store_true")
     ap.add_argument("--budget-file", default="experiment/runs/dir1/budget.jsonl")
     ap.add_argument("--no-shutdown", action="store_true")
     args = ap.parse_args()
@@ -58,6 +59,7 @@ def main() -> None:
         shadow_layers=args.shadow_layers,
         calib_steps=args.calib_steps,
         tier_fake_quant=not args.no_fake_quant,
+        gradient_checkpointing=not args.no_grad_ckpt,
         pad_id=pad_id,
         save_dir=str(Path(args.out_root) / args.tier),
     )

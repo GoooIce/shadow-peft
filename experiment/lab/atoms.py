@@ -79,8 +79,17 @@ def eval_ppl(
 
     Works for any causal LM returning `.logits` (HF base model or
     ShadowForCausalLM). Restores the model's prior train/eval mode.
+
+    BOS: Gemma4's tokenizer ships ``add_bos_token=False`` (Gemma 1-3 default
+    to True) and a BOS-less sequence un-anchors the model — plain-text ppl
+    inflates ~700x and generation degenerates. Prepend BOS when the tokenizer
+    has one and did not add it; no-op for tokenizers that add it themselves
+    (Gemma 1-3, Llama) or have none (Qwen).
     """
     ids = tokenizer.encode(text)
+    bos = getattr(tokenizer, "bos_token_id", None)
+    if bos is not None and (not ids or ids[0] != bos):
+        ids = [bos] + ids
     was_training = model.training
     model.eval()
     total_nll, total_tok = 0.0, 0

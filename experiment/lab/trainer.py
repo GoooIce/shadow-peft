@@ -84,6 +84,9 @@ class TrainConfig:
     eval_every: int = 250
     # Joint-calibration forwards for w8a8_fp8 (run with the shadow attached).
     calib_steps: int = 8
+    # Activation-memory relief for 12B-class distillation (frozen base with
+    # shadow grads flowing through); non-reentrant so no-grad inputs are fine.
+    gradient_checkpointing: bool = False
     seed: int = 0
     save_dir: str | None = None  # None -> experiment/runs/{tag}_{loss_mode}
     device: str | None = None  # None -> pick_device()
@@ -208,6 +211,9 @@ def train_shadow(cfg: TrainConfig) -> TrainReport:
     )
     task.to(device)
     task.train()
+    if cfg.gradient_checkpointing:
+        task.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        print("gradient checkpointing enabled (use_reentrant=False)", flush=True)
 
     # --- teacher: full precision, frozen ---
     teacher = AutoModelForCausalLM.from_pretrained(cfg.model, dtype=dtype).to(device)
