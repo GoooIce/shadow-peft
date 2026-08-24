@@ -119,8 +119,12 @@ def eval_ppl(
         logp = logits[:, :-1] - torch.logsumexp(logits[:, :-1], -1, keepdim=True)
         tgt = x[:, 1:]
         if context_len > 0 and start > 0:
-            keep_from = start - ctx  # score only the window tail, not the context
-            tgt = tgt[:, keep_from - 1 :]
+            # Score only the window tail, not the carried context. logp entry
+            # j predicts global position ctx+1+j — crop BOTH tensors to the
+            # same span or the gather pairs predictions with unrelated tokens.
+            keep_from = start - ctx - 1
+            logp = logp[:, keep_from:]
+            tgt = tgt[:, keep_from:]
         total_nll += -logp.gather(-1, tgt.unsqueeze(-1)).sum().item()
         total_tok += tgt.numel()
     if was_training:
