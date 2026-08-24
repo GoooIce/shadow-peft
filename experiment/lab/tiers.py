@@ -229,26 +229,6 @@ def apply_training_conversion(
     return manifest
 
 
-def fake_quant_base(base: torch.nn.Module, tier: str) -> int:
-    """Move a tier-converted base to training (fake-quant) numerics.
-
-    w8a8_fp8: dequantize the converted tensors (Float8 implements it; the
-    local Int8 dynamic stand-in does not, and raises with a pointer to CUDA).
-    w4a16: the tile-packed tensor has no dequantize, so the weights are
-    re-materialized from the original values with the identical primitives.
-    """
-    if tier == "w4a16":
-        return fake_quant_int4_(base)
-    try:
-        return to_fake_quant(base)
-    except NotImplementedError as exc:
-        raise RuntimeError(
-            "w8a8_fp8 fake-quant needs a backend whose quantized tensors "
-            "implement dequantize (CUDA Float8 does; the local Int8 dynamic "
-            "stand-in does not)"
-        ) from exc
-
-
 def joint_calibrate(peft_model: ShadowPeftModel, batches: list[dict[str, torch.Tensor]]) -> int:
     """Run calibration forwards **with the shadow attached** (iron rule 2).
 

@@ -65,6 +65,15 @@ def make_batch(
     }
 
 
+def bos_ids(tokenizer, text: str) -> list[int]:
+    """Encode with a guaranteed leading BOS (Gemma4 ships add_bos_token=False)."""
+    ids = tokenizer.encode(text)
+    bos = getattr(tokenizer, "bos_token_id", None)
+    if bos is not None and (not ids or ids[0] != bos):
+        ids = [bos] + ids
+    return ids
+
+
 @torch.no_grad()
 def eval_ppl(
     model,
@@ -86,10 +95,7 @@ def eval_ppl(
     has one and did not add it; no-op for tokenizers that add it themselves
     (Gemma 1-3, Llama) or have none (Qwen).
     """
-    ids = tokenizer.encode(text)
-    bos = getattr(tokenizer, "bos_token_id", None)
-    if bos is not None and (not ids or ids[0] != bos):
-        ids = [bos] + ids
+    ids = bos_ids(tokenizer, text)
     was_training = model.training
     model.eval()
     total_nll, total_tok = 0.0, 0

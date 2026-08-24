@@ -17,9 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dir1.ops import BudgetLedger, StageTimer, power_off_now, wechat_notify  # noqa: E402
+from lab.tiers import TIERS  # noqa: E402
 from lab.trainer import TrainConfig, train_shadow  # noqa: E402
-
-TIERS = ("bf16", "w8a8_fp8", "w4a16")
 
 
 def main() -> None:

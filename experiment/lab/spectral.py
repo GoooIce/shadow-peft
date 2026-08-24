@@ -161,8 +161,10 @@ def lar(states: torch.Tensor | list[torch.Tensor]) -> float:
 def layer_metrics(states: torch.Tensor | list[torch.Tensor], top_k: int = TOP_K_DEFAULT) -> dict[str, Any]:
     s = singular_spectrum(states)
     e = s**2
+    p = e / e.sum()
+    p_nz = p[p > 0]
     return {
-        "erank": effective_rank(states),
+        "erank": float(torch.exp(-(p_nz * p_nz.log()).sum())),
         "lar": float(e[0] / e.sum()),
         "energy": float(e.sum()),
         "top_singular_values": [float(v) for v in s[:top_k]],

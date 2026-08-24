@@ -19,7 +19,7 @@ mlx = [
 ]
 quant = [
   # Backbone PTQ tiers (w8a8_fp8 / w4a16) for the experiment lab.
-  "torchao>=0.15",
+  "torchao>=0.18,<0.19",
 ]
 experiment = [
   # experiment/lab training & eval stack.

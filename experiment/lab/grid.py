@@ -31,6 +31,8 @@ device note). The vocabulary is never trimmed (Gemma keeps 262,144).
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Callable
 
 import torch
@@ -149,17 +151,25 @@ def generation_score(
     decode: Callable[[list[int]], str],
     *,
     task: str,
-    max_new_tokens: int = 12,
+    max_new_tokens: int | None = None,
     device: torch.device | None = None,
 ) -> dict[str, Any]:
     """Greedy-generation score for a tiny benchmark probe.
 
     ``examples`` carry ``prompt_ids`` and ``answer``; ``task`` selects the
     canonical extraction seam from :mod:`lab.eval` (``mmlu`` → letter,
-    ``gsm8k`` → numeric final answer). Returns ``{"score", "n"}``.
+    ``gsm8k`` → numeric final answer). Generation length defaults follow the
+    lab's per-task norms (MMLU 12, GSM8K 256 — a 12-token GSM8K continuation
+    cannot reach a final answer). Returns ``{"score", "n"}``.
     """
     if not examples:
         return {"score": None, "n": 0}
+    from .eval import DEFAULT_GSM8K_GENERATION_TOKENS, DEFAULT_MMLU_GENERATION_TOKENS
+
+    if max_new_tokens is None:
+        max_new_tokens = (
+            DEFAULT_GSM8K_GENERATION_TOKENS if task == "gsm8k" else DEFAULT_MMLU_GENERATION_TOKENS
+        )
     model.eval()
     hits = 0
     for ex in examples:
@@ -208,7 +218,7 @@ def evaluate_cell(
     gsm8k_examples: list[dict[str, Any]] | None = None,
     decode: Callable[[list[int]], str] | None = None,
     ppl_chunks: int = 4,
-    max_new_tokens: int = 12,
+    max_new_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Evaluate one grid cell; returns its metrics dict (JSON-serializable)."""
     if backbone_tier not in tiers.TIERS:
@@ -289,7 +299,7 @@ def evaluate_cell(
         "cell": {
             "backbone_tier": backbone_tier,
             "shadow_precision": shadow_precision,
-            "kernel_path": backbone_tier == "bf16" and "n/a" or kernel_path,
+            "kernel_path": "n/a" if backbone_tier == "bf16" else kernel_path,
         },
         "backbone_format": tier_manifest.get("format"),
         "fake_quant_swaps": tier_manifest.get("fake_quant_swaps", 0),
@@ -331,7 +341,7 @@ def evaluate_bare_base(
     ppl = eval_ppl(base, tokenizer, eval_text, chunks=ppl_chunks, device=str(device))
     return {
         "backbone_tier": backbone_tier,
-        "kernel_path": backbone_tier == "bf16" and "n/a" or kernel_path,
+        "kernel_path": "n/a" if backbone_tier == "bf16" else kernel_path,
         "backbone_format": tier_manifest.get("format"),
         "fake_quant_swaps": tier_manifest.get("fake_quant_swaps", 0),
         "ppl": ppl,
@@ -352,7 +362,7 @@ def run_grid(
     decode: Callable[[list[int]], str] | None = None,
     kernel_paths: tuple[str, ...] = KERNEL_PATHS,
     ppl_chunks: int = 4,
-    max_new_tokens: int = 12,
+    max_new_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Run the 3×2 grid × kernel paths + anchor + bare baselines.
 
@@ -472,13 +482,9 @@ def run_grid(
 
 def write_metrics(result: dict[str, Any], path: str | Path) -> None:
     """Persist a run_grid result as the cell metrics JSON (runbook entry)."""
-    import json as _json
-
-    from pathlib import Path as _Path
-
-    out = _Path(path)
+    out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(_json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def pareto_table(cells: list[dict[str, Any]]) -> str:

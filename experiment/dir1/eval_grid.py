@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dir1.ops import BudgetLedger, StageTimer, power_off_now, wechat_notify  # noqa: E402
 from dir1.smoke_12b import load_causal_model  # noqa: E402
 from lab import grid, spectral  # noqa: E402
-from lab.atoms import load_teacher_data, load_wikitext2_test_text, make_batch  # noqa: E402
+from lab.atoms import bos_ids, load_teacher_data, load_wikitext2_test_text, make_batch  # noqa: E402
 
 import random  # noqa: E402
 
@@ -56,14 +56,6 @@ def load_adapter(path: str | Path) -> dict:
     return dict(safetensors_load_file(str(p)))
 
 
-def _bos_ids(tokenizer, prompt: str) -> list[int]:
-    ids = tokenizer.encode(prompt)
-    bos = getattr(tokenizer, "bos_token_id", None)
-    if bos is not None and (not ids or ids[0] != bos):
-        ids = [bos] + ids
-    return ids
-
-
 def load_mmlu_probe(tokenizer, n: int):
     from datasets import load_dataset
 
@@ -76,7 +68,7 @@ def load_mmlu_probe(tokenizer, n: int):
             + "".join(f"{letter[i]}. {c}\n" for i, c in enumerate(row["choices"]))
             + "Answer:"
         )
-        out.append({"prompt_ids": _bos_ids(tokenizer, prompt), "answer": letter[row["answer"]]})
+        out.append({"prompt_ids": bos_ids(tokenizer, prompt), "answer": letter[row["answer"]]})
     return out
 
 
@@ -87,7 +79,7 @@ def load_gsm8k_probe(tokenizer, n: int):
     out = []
     for row in list(ds)[:n]:
         gold = row["answer"].split("####")[-1].strip().replace(",", "")
-        out.append({"prompt_ids": _bos_ids(tokenizer, row["question"] + "\nAnswer:"), "answer": gold})
+        out.append({"prompt_ids": bos_ids(tokenizer, row["question"] + "\nAnswer:"), "answer": gold})
     return out
 
 
@@ -156,16 +148,22 @@ def main() -> None:
 
     # --- 挽回率 + 判定 --------------------------------------------------------
     anchor_ppl = result["anchor"]["ppl"]
-    bare = {b["backbone_tier"]: b["ppl"] for b in result["bare_bases"] if b["kernel_path"] != "fake_quant"}
+    # 挽回率 must not mix kernel paths: each cell compares against the bare
+    # backbone of ITS OWN path (spec: 训练/部署路径一致; the fake-quant cell is
+    # the train-consistent deployment point).
+    bare = {
+        (b["backbone_tier"], b["kernel_path"]): b["ppl"] for b in result["bare_bases"]
+    }
     verdicts = {}
     for cell in result["cells"]:
         tier = cell["cell"]["backbone_tier"]
-        rec = ppl_recovery(bare[tier], cell["ppl"], anchor_ppl)
+        path = cell["cell"]["kernel_path"]
+        bare_ppl = bare.get((tier, path), bare.get((tier, "n/a")))
+        rec = ppl_recovery(bare_ppl, cell["ppl"], anchor_ppl)
         cell["ppl_recovery"] = rec
-        if tier == "w4a16" and cell["cell"]["shadow_precision"] == "bf16":
-            verdicts[cell["cell"]["kernel_path"]] = {
-                "recovery": rec, "verdict": verdict_of(rec)
-            }
+        if tier == "w4a16":
+            key = f"{path}/shadow-{cell['cell']['shadow_precision']}"
+            verdicts[key] = {"recovery": rec, "verdict": verdict_of(rec)}
 
     # --- 谱诊断独立报告段(真实 checkpoint) ----------------------------------
     # Per tier: same trained adapter on a bf16 backbone (pre) vs its tiered

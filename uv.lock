@@ -2193,7 +2193,7 @@ requires-dist = [
     { name = "mlx-lm", marker = "extra == 'mlx'", specifier = ">=0.31.3" },
     { name = "safetensors", specifier = ">=0.4.3" },
     { name = "torch", specifier = ">=2.1" },
-    { name = "torchao", marker = "extra == 'quant'", specifier = ">=0.15" },
+    { name = "torchao", marker = "extra == 'quant'", specifier = ">=0.18,<0.19" },
     { name = "transformers", specifier = ">=5.5.0" },
     { name = "trl", marker = "extra == 'experiment'", specifier = ">=0.20" },
 ]
