@@ -33,13 +33,6 @@ RECIPE_MIN_GAIN = 0.015  # -1.5% ppl vs B0
 NATIVE_MAX_DEGRADATION = 0.02  # <=2% vs same-recipe bf16 shadow
 
 
-def _load_arm(runs_root: Path, arm: str) -> dict:
-    path = runs_root / f"grace_{arm}" / "verdict.json"
-    if not path.exists():
-        raise SystemExit(f"missing arm verdict: {path} (run exp1_grace_arm.py --arm {arm} first)")
-    return json.loads(path.read_text())
-
-
 def _load_ptq_swap(spec: str) -> float:
     """A bare number, or a path to eval_shadow_precision.py output (a list of
     {ckpt, mode, ppl} rows — the nvfp4 row on the B0 checkpoint is the anchor)."""
@@ -56,14 +49,24 @@ def _load_ptq_swap(spec: str) -> float:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs-root", default="runs/exp1")
+    ap.add_argument("--tag", default="",
+                    help="campaign tag matching exp1_grace_arm.py ('' = base -> grace_{arm})")
     ap.add_argument("--ptq-swap", default=None,
                     help="same-structure PTQ-swap nvfp4 ppl: number or eval_shadow_precision.json path")
     ap.add_argument("--rerun", default=None, help="30M rerun verdict of the winning combo")
-    ap.add_argument("--out", default=None, help="default <runs-root>/grace_adjudication/verdict.json")
+    ap.add_argument("--out", default=None, help="default <runs-root>/{grace[-tag]}_adjudication/verdict.json")
     args = ap.parse_args()
 
+    prefix = "grace" if not args.tag else f"grace-{args.tag}"
     runs_root = Path(args.runs_root)
-    arms = {arm: _load_arm(runs_root, arm) for arm in ("B0", *LADDER, "Q0", "Q1")}
+
+    def _load_arm(arm: str) -> dict:
+        path = runs_root / f"{prefix}_{arm}" / "verdict.json"
+        if not path.exists():
+            raise SystemExit(f"missing arm verdict: {path} (run exp1_grace_arm.py --arm {arm} first)")
+        return json.loads(path.read_text())
+
+    arms = {arm: _load_arm(arm) for arm in ("B0", *LADDER, "Q0", "Q1")}
     b0 = arms["B0"]
 
     ladder_rows = []
@@ -89,11 +92,13 @@ def main() -> None:
     winner = min(qualified, key=lambda r: r["ppl_shadow"]) if qualified else None
 
     verdict = {
+        "campaign": args.tag or "base",
         "b0": {"ppl_shadow": b0["ppl_shadow"], "kld_shadow": b0["kld_shadow"],
                "loss_mode": b0["loss_mode"]},
         "ladder": ladder_rows,
         "recipe_valid": winner is not None,
         "winner": winner["arm"] if winner else None,
+        "winner_loss_mode": winner["loss_mode"] if winner else None,
         "negative_result": winner is None,
         "criteria": {
             "ppl_line": ">=1.5% ppl improvement vs B0",
@@ -136,7 +141,7 @@ def main() -> None:
             "note": None if still_better else "ordering flipped at 30M — downgrade to insufficient signal",
         }
 
-    out = Path(args.out or runs_root / "grace_adjudication" / "verdict.json")
+    out = Path(args.out or runs_root / f"{prefix}_adjudication" / "verdict.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(verdict, indent=2) + "\n")
     print(json.dumps(verdict, indent=2), flush=True)

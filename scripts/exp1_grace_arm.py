@@ -58,7 +58,11 @@ def main() -> None:
                     help="override the arm's loss mode (required for Q1)")
     ap.add_argument("--model", default=str(Path.home() / "models" / "LFM2.5-2.6B-Base"))
     ap.add_argument("--data", required=True, help="teacher JSONL pool (exp1 generator output)")
-    ap.add_argument("--out-dir", default=None, help="default runs/exp1/grace_{arm}")
+    ap.add_argument("--tag", default="",
+                    help="campaign tag ('' = base -> grace_{arm}; e.g. 'rl' -> grace-rl_{arm}). "
+                         "Each model variant gets its own run namespace; the B0 of a pass is "
+                         "that pass's own anchor (no cross-variant ppl comparability).")
+    ap.add_argument("--out-dir", default=None, help="default runs/exp1/{grace[-tag]}_{arm}")
     ap.add_argument("--max-tokens", type=float, default=1e7)
     ap.add_argument("--lr", type=float, default=1e-5)
     ap.add_argument("--batch-seq", type=int, default=8)
@@ -76,7 +80,8 @@ def main() -> None:
     if loss_mode is None:
         ap.error("--loss-mode is required for arm Q1 (winner recipe from the B0-B3 adjudication)")
     shadow_quant = args.shadow_quant or arm.get("shadow_quant")
-    out_dir = Path(args.out_dir or f"runs/exp1/grace_{args.arm}")
+    prefix = "grace" if not args.tag else f"grace-{args.tag}"
+    out_dir = Path(args.out_dir or f"runs/exp1/{prefix}_{args.arm}")
     out_dir.mkdir(parents=True, exist_ok=True)
     tok = AutoTokenizer.from_pretrained(args.model)
     pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
@@ -149,8 +154,10 @@ def main() -> None:
     recovery = (ppl_quant - ppl_shadow) / (ppl_quant - ppl_bf16)
     verdict = {
         "arm": args.arm,
+        "campaign": args.tag or "base",
         "tier": "w4a16",
         "loss_mode": loss_mode,
+        "model": args.model,
         "shadow_layers": args.shadow_layers,
         "shadow_intermediate": args.shadow_intermediate,
         "shadow_heads": None,
