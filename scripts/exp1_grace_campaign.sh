@@ -11,8 +11,8 @@
 # own anchor; compare within a pass, contrast conclusions across passes.
 #
 # Env overrides (defaults in parentheses):
-#   BASE_MODEL   (~/models/LFM2.5-2.6B-Base)   — confirm the zoo name
-#   RL_MODEL     (~/models/LFM2.5-2.6B-Instruct) — confirm the zoo name
+#   BASE_MODEL   (~/models/LFM2.5-2.6B-Base)  — pre-trained base
+#   RL_MODEL     (~/models/LFM2.5-2.6B)       — post-trained (SFT + agentic RL) variant
 #   BASE_DATA    (runs/exp1/teacher_floor2v_2p6b.jsonl) — existing base pool
 #   RL_PROMPTS   (runs/exp2/shared/prompts.jsonl)
 #   MAX_TOKENS   (1e7)   LR (1e-5)   PASSES (base rl)   RUN_30M (0)
@@ -24,7 +24,7 @@ cd "$(dirname "$0")/.."
 PY=.venv/bin/python
 
 BASE_MODEL="${BASE_MODEL:-$HOME/models/LFM2.5-2.6B-Base}"
-RL_MODEL="${RL_MODEL:-$HOME/models/LFM2.5-2.6B-Instruct}"
+RL_MODEL="${RL_MODEL:-$HOME/models/LFM2.5-2.6B}"
 BASE_DATA="${BASE_DATA:-runs/exp1/teacher_floor2v_2p6b.jsonl}"
 RL_DATA="${RL_DATA:-runs/exp1/teacher_2p6b_rl_chat.jsonl}"
 RL_PROMPTS="${RL_PROMPTS:-runs/exp2/shared/prompts.jsonl}"
@@ -109,6 +109,10 @@ for PASS in $PASSES; do
       ;;
     rl)
       if [ ! -s "$RL_DATA" ]; then
+        # LFM2.5-2.6B is a pure-reasoning post-trained model: the chat
+        # template opens a <think> block, so pool continuations carry
+        # reasoning traces — on-distribution for self-distillation, and
+        # EOS (<|im_end|>) truncation applies as usual.
         echo "[queue] === RL teacher pool generation (chat protocol, ~10M tokens) ==="
         $PY -m shadow_lab.teacher_data --model "$RL_MODEL" --chat \
           --prompts-file "$RL_PROMPTS" --out "$RL_DATA" \
