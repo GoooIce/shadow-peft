@@ -209,16 +209,18 @@ __marimo__/
 # ZCode session files
 .zcode/
 
+# Local agent planning notes (tickets, specs, research)
+.scratch/
+
+# Experiment outputs (GB10 primary, local mirror)
+runs/
+runs-local/
+
 # Third-party source checkouts (e.g. MLX PR builds for bits=1 support)
 third_party/
 
 # External demo/reference repositories
 Bonsai-demo/
 
-# Generated training data and experiment outputs
-experiment/data/
-experiment/runs/
-experiment/runs_5M/
 .DS_Store
-experiment/analysis_qwen36_bonsai_migration/
 .quark_netdisk_auth.txt

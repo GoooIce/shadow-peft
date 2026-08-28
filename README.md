@@ -623,7 +623,6 @@ both sides):
 ```python
 from shadow_peft_mlx import convert_checkpoint
 convert_checkpoint("./torch-ckpt", "./mlx-ckpt", direction="torch_to_mlx")
-# or the CLI: python experiment/convert_adapter.py SRC DST --direction mlx_to_torch
 ```
 
 ---

@@ -12,8 +12,8 @@ tests and analysis scripts consume it instead of re-implementing it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import torch
 

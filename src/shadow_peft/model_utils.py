@@ -161,6 +161,12 @@ def _shrink_per_layer_config(cfg: Any, num_layers: int) -> None:
     mw = getattr(cfg, "max_window_layers", None)
     if mw is not None and isinstance(mw, int) and mw > num_layers:
         cfg.max_window_layers = num_layers
+    # LFM2-style hybrids derive `full_attn_idxs` from the original layer list;
+    # leave it stale and cache construction classifies the shrunken stack wrong.
+    lt2 = getattr(cfg, "layer_types", None)
+    fa = getattr(cfg, "full_attn_idxs", None)
+    if isinstance(fa, (list, tuple)) and isinstance(lt2, (list, tuple)):
+        cfg.full_attn_idxs = [i for i, t in enumerate(lt2) if str(t) == "full_attention"]
 
 
 def build_implicit_shadow_model(
@@ -171,6 +177,7 @@ def build_implicit_shadow_model(
     shadow_num_attention_heads: int | None = None,
     shadow_num_key_value_heads: int | None = None,
     shadow_head_dim: int | None = None,
+    shadow_layer_types: list[str] | None = None,
 ) -> PreTrainedModel:
     """
     Create an implicit shadow model by instantiating the same class as `base_model`
@@ -208,6 +215,33 @@ def build_implicit_shadow_model(
         raise ValueError(f"num_shadow_layers must be >= 1, got {num_shadow_layers}")
     _set_num_hidden_layers(cfg, num_shadow_layers)
     _shrink_per_layer_config(cfg, num_shadow_layers)
+    if shadow_layer_types is not None:
+        # Explicit composition (exp4 knob): the caller owns heterogeneity —
+        # validate length and skip the all-conv auto-remap below.
+        if len(shadow_layer_types) != num_shadow_layers:
+            raise ValueError(
+                f"shadow_layer_types has {len(shadow_layer_types)} entries, "
+                f"expected num_shadow_layers={num_shadow_layers}"
+            )
+        cfg.layer_types = list(shadow_layer_types)
+        fa = getattr(cfg, "full_attn_idxs", None)
+        if isinstance(fa, (list, tuple)):
+            cfg.full_attn_idxs = [i for i, t in enumerate(cfg.layer_types) if str(t) == "full_attention"]
+    else:
+        # Hybrid backbones (e.g. LFM2) can slice to an all-conv prefix. A shadow
+        # with zero attention layers cannot use HF caches at all (get_seq_length()
+        # requires an attention entry) and a 3-token conv memory is too weak to
+        # track sequence state — remap the tiny shadow to the family's attention
+        # layer type when shrinking dropped every attention entry.
+        lt = getattr(cfg, "layer_types", None)
+        if isinstance(lt, (list, tuple)) and not any("attention" in str(t) for t in lt):
+            original = getattr(backbone.config, "layer_types", None) or []
+            attn_types = [t for t in original if "attention" in str(t)]
+            if attn_types:
+                cfg.layer_types = [attn_types[0]] * len(lt)
+                fa = getattr(cfg, "full_attn_idxs", None)
+                if isinstance(fa, (list, tuple)):
+                    cfg.full_attn_idxs = list(range(len(cfg.layer_types)))
 
     # If explicitly provided, override the MLP/GLU intermediate size on the shadow config.
     if shadow_intermediate_size is not None:

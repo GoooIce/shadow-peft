@@ -486,7 +486,12 @@ class ShadowForCausalLM(nn.Module, GenerationMixin):
 
         # When caching, slice input_ids to only the new tokens (prefill: full, decode: last token).
         if use_cache and past_key_values is not None:
-            past_len = past_key_values.get_seq_length()
+            try:
+                past_len = past_key_values.get_seq_length()
+            except ValueError:
+                # Hybrid caches (e.g. LFM2 conv layers) raise while still
+                # empty/unmaterialized — that means prefill, nothing to slice.
+                past_len = 0
             input_ids = input_ids[:, past_len:]
 
         position_ids = kwargs.get("position_ids")

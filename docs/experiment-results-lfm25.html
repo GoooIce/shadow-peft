@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ShadowPEFT × LFM2.5 实验结果报告</title>
+<style>
+  :root {
+    --bf16: #16a34a; --quant: #dc2626; --shadow: #2563eb;
+    --ink: #1e293b; --muted: #64748b; --bg: #f8fafc; --card: #ffffff; --line: #e2e8f0;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: var(--bg); color: var(--ink); line-height: 1.65; padding: 24px; }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  header { border-bottom: 3px solid var(--ink); padding-bottom: 14px; margin-bottom: 20px; }
+  h1 { font-size: 26px; letter-spacing: .5px; }
+  .meta { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .meta b { color: var(--ink); font-weight: 600; }
+  .concl { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin: 18px 0 26px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .card h3 { font-size: 15px; margin-bottom: 6px; }
+  .card p { font-size: 13.5px; color: #334155; }
+  .big { font-size: 24px; font-weight: 700; }
+  .g { color: var(--bf16); } .r { color: var(--quant); } .b { color: var(--shadow); }
+  h2 { font-size: 19px; margin: 30px 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 14px; }
+  .takeaway { background: #eff6ff; border-left: 4px solid var(--shadow); border-radius: 0 8px 8px 0;
+              padding: 10px 14px; font-size: 14px; margin: 12px 0 6px; }
+  .chart { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; background: var(--card); }
+  th, td { border: 1px solid var(--line); padding: 7px 10px; text-align: right; }
+  th { background: #f1f5f9; font-weight: 600; }
+  th:first-child, td:first-child { text-align: left; }
+  td.hl { font-weight: 700; }
+  .legend { display: flex; gap: 18px; font-size: 13px; color: var(--muted); margin: 4px 2px 10px; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+  .pill { display: inline-block; padding: 1px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .pill.pass { background: #dcfce7; color: #166534; }
+  .pill.note { background: #fef9c3; color: #854d0e; }
+  footer { margin-top: 34px; padding-top: 12px; border-top: 1px solid var(--line);
+           color: var(--muted); font-size: 12px; }
+  footer code { background: #f1f5f9; padding: 1px 6px; border-radius: 4px; font-size: 11.5px; }
+  .tl { font-size: 13.5px; }
+  .tl li { margin: 5px 0; }
+  text { font-family: system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>ShadowPEFT × LFM2.5 实验结果报告</h1>
+  <div class="meta">
+    2026-08-25 · 执行机 <b>GB10</b>(NVIDIA sm_121,121GB 统一内存)·
+    测试床 <b>LFM2.5-350M-Base</b>(16 层 conv+attention 混合,词表 65,536)·
+    度量轴 <b>despaced wikitext ppl,上下文携带窗口 512</b> ·
+    全部数字源自 GB10 <code>runs/</code> 下的 verdict.json
+  </div>
+</header>
+
+<div class="concl">
+  <div class="card"><h3>核心假设首次实测:<span class="pill pass">通过</span></h3>
+    <p>2-bit 量化把模型打到灾难(ppl 爆炸 2.2 万倍),蒸馏的 shadow 把 <span class="big b">99.86%</span> 的差距拉了回来。</p></div>
+  <div class="card"><h3>规模越大,追得越近</h3>
+    <p>shadow 与全精度的距离:<span class="big">46x → 31x → 25x</span>(230M → 350M → 1.2B,单调改善)。</p></div>
+  <div class="card"><h3>shadow 是通用追踪器:<span class="pill pass">H1 成立</span></h3>
+    <p>跨家族 Llama shadow 只落后 22%;与宿主同构的 conv shadow 反而差 107%——"镜像宿主"论被否决。</p></div>
+</div>
+
+<h2>① 量化损伤与 shadow 恢复(2-bit 三值 + Lloyd,10M tokens 蒸馏)</h2>
+<div class="sub">纵轴为对数刻度 —— 三个数字分别是:全精度基线(绿)、量化后(红)、量化+shadow 蒸馏后(蓝)</div>
+<div class="legend">
+  <span><span class="dot" style="background:var(--bf16)"></span>全精度 bf16(目标)</span>
+  <span><span class="dot" style="background:var(--quant)"></span>2-bit 量化(受损)</span>
+  <span><span class="dot" style="background:var(--shadow)"></span>量化 + shadow(恢复后)</span>
+</div>
+<div class="chart"><svg id="scaleChart" width="940" height="360"></svg></div>
+<div class="takeaway">白话:2-bit 量化后模型基本"失语"(ppl 上百万 = 下一词预测接近乱猜);shadow 蒸馏把它拉回到一千多的量级——拉回了 90–99.9% 的差距,但离全精度(30–50)还差 25–46 倍。<b>规模越大,拉回后离全精度越近</b>,这支持"边缘部署更大量化模型 + 廉价 shadow"的叙事。</div>
+
+<table style="margin-top:10px">
+  <tr><th>模型</th><th>ppl 全精度</th><th>ppl 量化后</th><th>受损倍数</th><th>ppl +shadow</th><th>线性恢复率</th><th>shadow ÷ 全精度</th></tr>
+  <tr><td>230M-Base</td><td>39.8</td><td>73,236</td><td>1,838x</td><td class="hl">1,848</td><td>97.5%</td><td>46.4x</td></tr>
+  <tr><td>350M-Base</td><td>53.5</td><td>1,181,428</td><td>22,088x</td><td class="hl">1,652</td><td>99.86%</td><td>30.9x</td></tr>
+  <tr><td>1.2B-Base</td><td>29.2</td><td>7,611</td><td>261x</td><td class="hl">743</td><td>90.6%</td><td class="hl">25.5x</td></tr>
+</table>
+<div class="sub" style="margin-top:8px">注:线性恢复率 = (量化ppl − shadow ppl) ÷ (量化ppl − 全精度ppl)。量化基线越灾难,这个数字越虚高(1.2B 受损最轻所以数值最低);<b>最后一列(shadow 与全精度的真实距离)才是可比量</b>。350M 在 5M tokens 时为 1,846,翻倍到 10M 改善至 1,652。</div>
+
+<h2>② 8-bit 档:零损伤验证(通过)</h2>
+<div class="chart" style="padding:16px 18px">
+  <p style="font-size:14px">近无损的 8-bit 量化基座上,挂上蒸馏的 shadow 后模型<b>没有变差,还略赚 1.8%</b>——shadow 不伤干净基座,这是它作为"外挂补偿器"的资格证明。</p>
+  <svg id="rungAChart" width="880" height="150" style="margin-top:8px"></svg>
+</div>
+
+<h2>③ 异构 shadow 消融:shadow 到底需要"长得像"宿主吗?</h2>
+<div class="sub">同一 2-bit 受损基座、同一教师数据、有效参数对齐(≈35M),只换 shadow 的架构 · 各 5M tokens</div>
+<div class="chart"><svg id="armsChart" width="940" height="300"></svg></div>
+<div class="takeaway">白话:注意力占比越高恢复越好(conv 纯 <span class="r">3825</span> → 混合 <b>2518</b> → 纯 attention <span class="b">1846</span>);<b>跨家族的 Llama shadow(2256)只落后基准 22%</b>——shadow 学到的是"通用状态修正",不依赖和宿主同架构。<span class="pill note">意外</span> 纯 conv shadow(3-token 记忆)没有像预期那样崩溃,但仍差 107% 且无法做缓存解码,重映射默认值保留。</div>
+
+<h2>④ 收敛轨迹(350M,蒸馏过程中的 ppl)</h2>
+<div class="chart"><svg id="convChart" width="940" height="220"></svg></div>
+<div class="sub" style="margin-top:6px">10M tokens 时仍在缓慢下降但收益递减(每 250 步约 −2%);1,652 是 20 窗口径终评,图中轨迹为 8 窗口径。</div>
+
+<h2>⑤ 过程备忘(怎样拿到这些数字的)</h2>
+<div class="card tl">
+  <ul style="list-style:none">
+    <li>📏 <b>度量轴先行</b>(阶段 0):LFM 分词器对 wikitext 几乎不 OOD(1.25x,vs Gemma 的 30–50x);BOS 零风险;上下文窗口必须(冷窗口 ppl 虚高 3.06x);重跑方差 0。轴值 Base = 36.77,同轴 it 档 = 345(故量化轴用 Base,it 档留给下游与实验②)。</li>
+    <li>🧪 <b>P0 挂载冒烟 6/6</b>:conv+attention 混合层挂 shadow、缓存解码、swap 位级一致、tied embedding 训练、三方案 PTQ 往返。</li>
+    <li>🔧 <b>修掉三个库级 bug</b>:① 空混合缓存不能喂给 backbone(LFM2 抛 get_seq_length 错)→ prefill 传 None 并收养返回缓存;② 隐式 shadow 切出纯 conv 前缀 → 重映射为 attention 层;③ LFM tokenizer(64,400)< 词表(65,536),裁词越界 → trainer 禁用裁词。</li>
+    <li>⚡ <b>速度</b>:教师数据自采样 11k tok/s;350M 蒸馏 6.5k tok/s(5M tokens ≈ 13 分钟);全部实验总 GPU 时间 ≈ 3 小时(一台桌面级 GB10)。</li>
+    <li>📚 <b>口径</b>:LLM-QAT 式自采样教师(教师=全精度自模型,分布与评测一致);恢复率/绝对距离双口径并报;数据文件在 GB10 <code>runs/exp1/</code> 与 <code>runs/exp4/verdict.json</code>,spec 与决策记录在 <code>.scratch/experiment-redesign/</code>。</li>
+  </ul>
+</div>
+
+<footer>
+  ShadowPEFT 实验程序 v3(LFM2.5 × GB10)· 实验①量化恢复(230M/350M/1.2B 全过)· 实验④异构消融(H1 成立)·
+  待跑:实验②投机解码(v1 蒸馏)、实验③ recirculation 边界 · 生成于 2026-08-25
+</footer>
+
+</div>
+
+<script>
+const fmt = n => n.toLocaleString("en-US");
+const LOG = Math.log10;
+
+// ---- ① scale chart: grouped log bars ----
+(function () {
+  const svg = document.getElementById("scaleChart");
+  const data = [
+    { name: "230M-Base",  bf16: 39.82,  quant: 73236,    shadow: 1848 },
+    { name: "350M-Base",  bf16: 53.49,  quant: 1181428,  shadow: 1652 },
+    { name: "1.2B-Base",  bf16: 29.17,  quant: 7611,     shadow: 743 },
+  ];
+  const W = 940, H = 360, padL = 60, padB = 46, padT = 20;
+  const maxLog = 6.1, minLog = 1.0;
+  const y = v => padT + (H - padT - padB) * (1 - (LOG(v) - minLog) / (maxLog - minLog));
+  const groupW = (W - padL - 20) / data.length, barW = 52, gap = 10;
+  let s = "";
+  // gridlines at decades
+  for (let d = 1; d <= 6; d++) {
+    const yy = y(Math.pow(10, d));
+    s += `<line x1="${padL}" y1="${yy}" x2="${W - 10}" y2="${yy}" stroke="#eef2f7"/>`;
+    s += `<text x="${padL - 8}" y="${yy + 4}" font-size="11" fill="#94a3b8" text-anchor="end">${fmt(Math.pow(10, d))}</text>`;
+  }
+  data.forEach((g, i) => {
+    const cx = padL + groupW * i + groupW / 2;
+    const x0 = cx - (barW * 3 + gap * 2) / 2;
+    [["bf16", g.bf16, "var(--bf16)"], ["quant", g.quant, "var(--quant)"], ["shadow", g.shadow, "var(--shadow)"]]
+      .forEach(([k, v, c], j) => {
+        const x = x0 + j * (barW + gap), yy = y(v), h = H - padB - yy;
+        s += `<rect x="${x}" y="${yy}" width="${barW}" height="${Math.max(h, 2)}" fill="${c}" rx="4" opacity="0.92"/>`;
+        s += `<text x="${x + barW / 2}" y="${yy - 6}" font-size="11.5" font-weight="600" fill="${c === 'var(--quant)' ? '#dc2626' : (c === 'var(--bf16)' ? '#16a34a' : '#2563eb')}" text-anchor="middle">${fmt(Math.round(v))}</text>`;
+      });
+    s += `<text x="${cx}" y="${H - 24}" font-size="13" font-weight="600" fill="#1e293b" text-anchor="middle">${g.name}</text>`;
+    const ratio = { "230M-Base": "46.4x", "350M-Base": "30.9x", "1.2B-Base": "25.5x" }[g.name];
+    s += `<text x="${cx}" y="${H - 7}" font-size="11.5" fill="#2563eb" text-anchor="middle">shadow ÷ 全精度 = ${ratio}</text>`;
+  });
+  s += `<text x="16" y="${H / 2}" font-size="12" fill="#64748b" transform="rotate(-90 16 ${H / 2})" text-anchor="middle">ppl(对数刻度,越低越好)</text>`;
+  svg.innerHTML = s;
+})();
+
+// ---- ② rung A small bars (linear, zoomed) ----
+(function () {
+  const svg = document.getElementById("rungAChart");
+  const data = [["全精度 bf16", 53.49, "var(--bf16)"], ["8-bit 量化", 53.47, "var(--quant)"], ["8-bit + shadow", 52.52, "var(--shadow)"]];
+  const W = 880, H = 150, padB = 34, padT = 26;
+  const y = v => padT + (H - padT - padB) * (1 - (v - 52.2) / (53.8 - 52.2));
+  const bw = 150, gap = (W - 40 - bw * 3) / 2;
+  let s = "";
+  data.forEach(([n, v, c], i) => {
+    const x = 40 + i * (bw + gap), yy = y(v);
+    s += `<rect x="${x}" y="${yy}" width="${bw}" height="${H - padB - yy}" fill="${c}" rx="6" opacity="0.92"/>`;
+    s += `<text x="${x + bw / 2}" y="${yy - 8}" font-size="14" font-weight="700" text-anchor="middle" fill="#334155">${v.toFixed(2)}</text>`;
+    s += `<text x="${x + bw / 2}" y="${H - 12}" font-size="12.5" fill="#475569" text-anchor="middle">${n}</text>`;
+  });
+  s += `<text x="34" y="${H / 2}" font-size="11" fill="#94a3b8" transform="rotate(-90 34 ${H / 2})" text-anchor="middle">ppl(刻度放大:52.2–53.8)</text>`;
+  svg.innerHTML = s;
+})();
+
+// ---- ③ arms horizontal bars ----
+(function () {
+  const svg = document.getElementById("armsChart");
+  const arms = [
+    { n: "A1 · 纯 conv shadow(3-token 记忆,同宿主层型)", v: 3825, d: "+107%", c: "#dc2626" },
+    { n: "A3 · 混合(conv + attention)", v: 2518, d: "+36%", c: "#f59e0b" },
+    { n: "B · 跨家族 Llama(纯 attention)", v: 2256, d: "+22%", c: "#8b5cf6" },
+    { n: "A2 · 纯 attention(默认,基准)", v: 1846, d: "基准", c: "#2563eb" },
+  ];
+  const W = 940, rowH = 56, padL = 380, H = arms.length * rowH + 30;
+  svg.setAttribute("height", H);
+  const max = 4000, x = v => padL + (W - padL - 110) * (v / max);
+  let s = "";
+  arms.forEach((a, i) => {
+    const yy = 18 + i * rowH;
+    s += `<text x="${padL - 12}" y="${yy + 22}" font-size="13" fill="#334155" text-anchor="end">${a.n}</text>`;
+    s += `<rect x="${padL}" y="${yy}" width="${x(a.v) - padL}" height="34" rx="6" fill="${a.c}" opacity="0.9"/>`;
+    s += `<text x="${x(a.v) + 10}" y="${yy + 22}" font-size="13.5" font-weight="700" fill="#334155">ppl ${fmt(a.v)} <tspan fill="${a.c}" font-weight="700">${a.d}</tspan></text>`;
+  });
+  svg.innerHTML = s;
+})();
+
+// ---- ④ convergence line ----
+(function () {
+  const svg = document.getElementById("convChart");
+  const pts = [[250, 3234], [500, 2202], [750, 1847], [1000, 1696], [1250, 1582], [1500, 1549], [1750, 1478], [2000, 1450], [2250, 1422]];
+  const W = 940, H = 220, padL = 64, padR = 30, padT = 18, padB = 36;
+  const maxY = 3400, minY = 1300;
+  const x = step => padL + (W - padL - padR) * (step - 250) / (2250 - 250);
+  const y = v => padT + (H - padT - padB) * (1 - (v - minY) / (maxY - minY));
+  let s = "";
+  for (const v of [1500, 2000, 2500, 3000]) {
+    s += `<line x1="${padL}" y1="${y(v)}" x2="${W - padR}" y2="${y(v)}" stroke="#eef2f7"/>`;
+    s += `<text x="${padL - 8}" y="${y(v) + 4}" font-size="11" fill="#94a3b8" text-anchor="end">${fmt(v)}</text>`;
+  }
+  s += `<polyline points="${pts.map(p => x(p[0]) + "," + y(p[1])).join(" ")}" fill="none" stroke="#2563eb" stroke-width="2.5"/>`;
+  pts.forEach(p => {
+    s += `<circle cx="${x(p[0])}" cy="${y(p[1])}" r="4" fill="#2563eb"/>`;
+  });
+  const last = pts[pts.length - 1];
+  s += `<text x="${x(last[0]) - 6}" y="${y(last[1]) - 12}" font-size="12.5" font-weight="600" fill="#2563eb" text-anchor="end">1,422(仍在缓慢下降)</text>`;
+  const first = pts[0];
+  s += `<text x="${x(first[0]) + 4}" y="${y(first[1]) - 10}" font-size="12.5" fill="#64748b">3,234</text>`;
+  s += `<text x="${W / 2}" y="${H - 8}" font-size="12" fill="#64748b" text-anchor="middle">蒸馏步数(每步 ≈ 4,096 tokens,共 10M tokens)</text>`;
+  s += `<text x="18" y="${H / 2}" font-size="11" fill="#94a3b8" transform="rotate(-90 18 ${H / 2})" text-anchor="middle">评测 ppl(8 窗口径)</text>`;
+  svg.innerHTML = s;
+})();
+</script>
+</body>
+</html>

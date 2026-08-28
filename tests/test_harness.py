@@ -439,9 +439,9 @@ def test_harness_core_is_single_source():
 
     assert shadow_peft.ShadowConfig is shadow_core.ShadowConfig
     assert shadow_peft_mlx.ShadowConfig is shadow_core.ShadowConfig
+    from shadow_core.harness import Router as RouterCore
     from shadow_peft.harness import Router as RouterTorch
     from shadow_peft_mlx.harness import Router as RouterMlx
-    from shadow_core.harness import Router as RouterCore
 
     assert RouterTorch is RouterCore
     assert RouterMlx is RouterCore

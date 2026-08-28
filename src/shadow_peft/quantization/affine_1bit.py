@@ -9,7 +9,6 @@ from .modules import QuantizedEmbedding as _QuantizedEmbedding
 from .modules import QuantizedLinear as _QuantizedLinear
 from .modules import pin_scheme_classes
 from .scheme import QuantScheme, register_scheme, unpack_codes, wrap_int32
-from .walker import load_quantized_checkpoint as _load_quantized_checkpoint
 from .walker import quantize_model as _quantize_model
 from .walker import save_quantized_checkpoint  # noqa: F401  # re-exported for import compatibility
 

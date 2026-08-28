@@ -1,0 +1,132 @@
+"""Exp1 rung runner (spec: exp1-quant-recovery).
+
+Measures three ppl points on the frozen stage-0 axis (despaced wikitext,
+ctx=512, chunks=20) and computes the recovery rate:
+
+    1. ppl_bf16     — full-precision base
+    2. ppl_quant    — base quantized with the trainer's exact rung profile
+    3. ppl_shadow   — train_shadow(cfg) final eval (quantized base + distilled shadow)
+
+    recovery = (ppl_quant - ppl_shadow) / (ppl_quant - ppl_bf16)
+
+Rung A (bits=8) verdict: zero-damage (ppl_shadow within +0.5% of ppl_quant).
+Rung B (bits=2) verdict: recovery vs the 30% success line.
+
+Run on the GB10:
+
+    ssh goooinext 'cd ~/Code/shadow-peft && .venv/bin/python scripts/exp1_rung.py --bits 8'
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from shadow_lab.atoms import despace_wikitext, eval_ppl, load_wikitext2_test_text
+from shadow_lab.trainer import TrainConfig, _quantize_base, train_shadow
+
+AXIS_CTX = 512
+AXIS_CHUNKS = 20
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--bits", type=int, required=True, choices=[8, 2])
+    ap.add_argument("--shadow-layers", type=int, default=2,
+                    help="shadow capacity dial for the ppl-floor campaign")
+    ap.add_argument("--shadow-intermediate", type=int, default=None,
+                    help="shadow FFN width (None = base-derived; exp1-floor-2 width sweep)")
+    ap.add_argument("--shadow-heads", type=int, default=None,
+                    help="shadow attention heads (None = base-derived)")
+    ap.add_argument("--shadow-kv-heads", type=int, default=None,
+                    help="shadow KV heads (None = base-derived)")
+    ap.add_argument("--model", default=str(Path.home() / "models" / "LFM2.5-350M-Base"))
+    ap.add_argument("--data", default="runs/exp1/teacher_lfm25_350m_base.jsonl")
+    ap.add_argument("--out-dir", default=None)
+    ap.add_argument("--max-tokens", type=float, default=5e6)
+    ap.add_argument("--batch-seq", type=int, default=8)
+    ap.add_argument("--lr", type=float, default=1e-5)
+    ap.add_argument("--device", default="cuda")
+    args = ap.parse_args()
+
+    out_dir = Path(args.out_dir or f"runs/exp1/rung{'A' if args.bits == 8 else 'B'}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tok = AutoTokenizer.from_pretrained(args.model)
+    pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+    axis_text = despace_wikitext(load_wikitext2_test_text())
+
+    def ppl(model) -> float:
+        return eval_ppl(model, tok, axis_text, chunks=AXIS_CHUNKS, device=args.device,
+                        context_len=AXIS_CTX)
+
+    cfg = TrainConfig(
+        bits=args.bits,
+        loss_mode="ce_kl",
+        model=args.model,
+        data=args.data,
+        max_tokens=args.max_tokens,
+        seq_len=512,
+        batch_seq=args.batch_seq,
+        lr=args.lr,
+        shadow_layers=args.shadow_layers,
+        shadow_intermediate_size=args.shadow_intermediate,
+        shadow_num_attention_heads=args.shadow_heads,
+        shadow_num_key_value_heads=args.shadow_kv_heads,
+        thr_ratio=0.5,
+        ppl_context_len=AXIS_CTX,
+        pad_id=pad_id,
+        save_dir=str(out_dir / "train"),
+    )
+
+    print("=== 1/3 bf16 baseline ===", flush=True)
+    base = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16).to(args.device).eval()
+    ppl_bf16 = ppl(base)
+    print(f"ppl_bf16 = {ppl_bf16:.4f}", flush=True)
+    del base
+    torch.cuda.empty_cache()
+
+    print("=== 2/3 quantized-only base ===", flush=True)
+    quant_copy = AutoModelForCausalLM.from_pretrained(args.model, dtype=cfg.profile.dtype).to(args.device).eval()
+    _quantize_base(quant_copy, cfg, len(tok))
+    ppl_quant = ppl(quant_copy)
+    print(f"ppl_quant(bits={args.bits}) = {ppl_quant:.4f}", flush=True)
+    del quant_copy
+    torch.cuda.empty_cache()
+
+    print("=== 3/3 shadow distillation ===", flush=True)
+    report = train_shadow(cfg)
+    ppl_shadow = report.final_ppl_20chunks
+
+    recovery = (ppl_quant - ppl_shadow) / (ppl_quant - ppl_bf16)
+    verdict = {
+        "bits": args.bits,
+        "shadow_layers": args.shadow_layers,
+        "shadow_intermediate": args.shadow_intermediate,
+        "shadow_heads": args.shadow_heads,
+        "shadow_kv_heads": args.shadow_kv_heads,
+        "ppl_bf16": round(ppl_bf16, 4),
+        "ppl_quant": round(ppl_quant, 4),
+        "ppl_shadow": round(ppl_shadow, 4),
+        "recovery": round(recovery, 4),
+        "axis": "despaced wikitext, ctx=512, chunks=20",
+        "tokens": report.tokens,
+        "train_seconds": round(report.wall_time_s, 1),
+        "trainable_params": report.trainable_params,
+    }
+    if args.bits == 8:
+        verdict["zero_damage_gate"] = ppl_shadow <= ppl_quant * 1.005
+        verdict["verdict"] = "PASS" if verdict["zero_damage_gate"] else "FAIL(shadow hurts near-clean base)"
+    else:
+        verdict["gate_30pct"] = recovery >= 0.30
+        verdict["verdict"] = ("PASS(narrative holds, trigger scale arms)" if recovery >= 0.30
+                              else "BELOW(narrative degraded, ②③ take priority)")
+    (out_dir / "verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
+    print(json.dumps(verdict, indent=2), flush=True)
+
+
+if __name__ == "__main__":
+    main()

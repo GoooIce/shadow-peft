@@ -25,6 +25,13 @@
 - **非对称量化（Asymmetric Quantization）** — backbone 与影子适配器按不同精度部署的形态：backbone 低精度（PTQ），shadow 保持高精度承载任务专属修正。
 - **挽回率（Recovery Rate）** — shadow 对量化损失的挽回比例：(ppl_quant − ppl_quant+shadow) / (ppl_quant − ppl_bf16)。
 - **联合校准（Joint Calibration）** — 激活量化 scale 的校准前向挂上 shadow 联跑；若在无注入分布上校准，注入修正会落在校准范围外被截断。
+- **原生影子量化（Native Shadow Quantization）** — 影子权重在训练期间即处于部署精度格式（nvfp8 / nvfp4 两级缩放格点）的形态：权重全程在格点上，存训一致（部署即所见），无主权重与 STE。
+- **置信度软门（Confidence Soft Gate）** — 蒸馏中按教师预测熵对 token 软降权的门：自信（低熵）token 权重高，不可靠 token 只降权不丢弃（源自 GRACE）。
+- **门控退化判据（Gate Degradation Criterion）** — 软门在自蒸馏设定下的退化监控：批内变异系数 <0.05 或门均值 >0.95 持续 500 步 → verdict 标 `gate_degraded=true`；只标注不回退（负结果时区分「配方无效」与「门控失效」）。
+- **解耦知识蒸馏（DKD）** — 把 KL 蒸馏分解为目标类与非目标类两项、分别加权的蒸馏形式。
+- **span-CKA** — 关系 CKA 的文本化：仅在续写 span 的 token 子集上逐样本计算 centered CKA 的特征结构传递损失，维度无关无需投影。
+- **IB 控制器（Information Bottleneck Controller）** — 以拉格朗日对偶上升动态调节蒸馏损失权重的机制，权衡贴教师（fidelity）与量化预算（capacity）。
+- **KLD 轴（KLD Axis）** — 评测轴之一：KLD(基座 bf16 ‖ 量化+影子) 的每 token 平均 KL（nats），与 ppl 轴同窗口同行走（`eval_kld`）；恢复臂改善该轴 ⇔ 相对 quant-only 基线向 0 收敛。
 
 ## 推理挽具（harness）
 
@@ -48,7 +55,7 @@
 
 ## 本次架构评审敲定的术语（2026-08-24，已全部落地）
 
-- **实验工作台（experiment lab）** — `experiment/lab/` 下的研究代码深模块群：`trainer.train_shadow(cfg) -> TrainReport`（位宽是配置字段）、`eval.py`（评测资产轻量家）、`trainers.py`（唯一的 MMLU/GSM8K/SQuAD 评测循环，GSM8K 训练器带 `answer_extractor` 接缝）、`atoms.py`（设备、分块困惑度、wikitext parquet 加载）、`data.py`（数据集构建）。CLI 脚本只是薄壳。
+- **实验工作台（experiment lab，包名 `shadow_lab`）** — `src/shadow_lab/` 下的研究代码深模块群：`trainer.train_shadow(cfg) -> TrainReport`（位宽是配置字段）、`eval.py`（评测资产轻量家）、`trainers.py`（唯一的 MMLU/GSM8K/SQuAD 评测循环，GSM8K 训练器带 `answer_extractor` 接缝）、`atoms.py`（设备、分块困惑度、wikitext parquet 加载）、`data.py`（数据集构建）、`tiers.py`（backbone PTQ 档位，蒸馏训练依赖）。实验 campaign 与 CLI 已清理，新实验直接复用这套机器。
 - **量化方案（Quantization Scheme）与方案表（scheme table）** — `quantization/scheme.py` 的一等概念：bits/levels/words_per_int/group_multiple/ternary/编解码对。1-bit 与 2-bit 是两个表项；模块类按方案参数化，旧类名为钉死方案的子类（`isinstance` 不变）；加 3-bit = 一行表项。
 - **编解码器（codec）** — `unpack_codes(packed, bits)`：移位掩码解包习语的全仓唯一实现家（torch 侧）；模块、测试、分析脚本一律消费它。
 - **适配器热切换（adapter swap）** — `ShadowPeftModel.swap_adapter(state_dict)` 公开单方法（torch/MLX 同名同语义），原子完成换权重 + 重置影子运行态；注册表只经它切换专家。

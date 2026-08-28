@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ShadowPEFT × LFM2.5 实验程序总结</title>
+<style>
+  :root {
+    --bf16: #16a34a; --quant: #dc2626; --shadow: #2563eb; --gold: #d97706;
+    --ink: #1e293b; --muted: #64748b; --bg: #f8fafc; --card: #fff; --line: #e2e8f0;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: var(--bg); color: var(--ink); line-height: 1.65; padding: 24px; }
+  .wrap { max-width: 1000px; margin: 0 auto; }
+  header { border-bottom: 3px solid var(--ink); padding-bottom: 14px; margin-bottom: 18px; }
+  h1 { font-size: 26px; }
+  .meta { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .meta b { color: var(--ink); }
+  .concl { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin: 16px 0 8px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .card h3 { font-size: 14px; margin-bottom: 5px; }
+  .card p { font-size: 13px; color: #334155; }
+  .big { font-size: 22px; font-weight: 700; }
+  .g{color:var(--bf16)} .r{color:var(--quant)} .b{color:var(--shadow)} .o{color:var(--gold)}
+  h2 { font-size: 19px; margin: 28px 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+  .takeaway { background: #eff6ff; border-left: 4px solid var(--shadow); border-radius: 0 8px 8px 0;
+              padding: 10px 14px; font-size: 14px; margin: 12px 0 4px; }
+  .takeaway.neg { background: #fef2f2; border-left-color: var(--quant); }
+  .takeaway.warn { background: #fffbeb; border-left-color: var(--gold); }
+  .chart { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; background: var(--card); }
+  th, td { border: 1px solid var(--line); padding: 7px 10px; text-align: right; }
+  th { background: #f1f5f9; font-weight: 600; }
+  th:first-child, td:first-child { text-align: left; }
+  td.hl { font-weight: 700; }
+  .legend { display: flex; gap: 18px; font-size: 13px; color: var(--muted); margin: 2px 2px 8px; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+  .pill { display: inline-block; padding: 1px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .pill.pass { background: #dcfce7; color: #166534; }
+  .pill.neg { background: #fee2e2; color: #991b1b; }
+  .pill.open { background: #fef9c3; color: #854d0e; }
+  .twocol { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 800px) { .twocol { grid-template-columns: 1fr; } }
+  footer { margin-top: 32px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+  code { background: #f1f5f9; padding: 1px 6px; border-radius: 4px; font-size: 11.5px; }
+  .tl li { margin: 5px 0; font-size: 13.5px; }
+  text { font-family: system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>ShadowPEFT × LFM2.5 实验程序总结</h1>
+  <div class="meta">
+    2026-08-25 · 程序 v3(<b>LFM2.5 家族 × GB10</b>,自驱动队列)· 四条实验线:①量化恢复 · ②投机解码 · ④异构消融 · ⑤条件化谱系 ·
+    测试床 LFM2.5-{230M,350M,1.2B}-Base/it · 度量轴 despaced wikitext ppl(ctx=512)· 全部数字源自 GB10 <code>runs/</code> 的 verdict.json
+  </div>
+</header>
+
+<div class="concl">
+  <div class="card"><h3>① 量化恢复 <span class="pill pass">通过</span> <span class="pill note" style="background:#dbeafe;color:#1e40af">地板被击穿</span></h3>
+    <p>2-bit 受损下 shadow 挽回 99.9%;<span class="big b">shadow÷全精度 46x→31x→25x</span> 随规模单调改善。08-26/27 三连战役:单遍结构地板 1524(28.5x)被<b>结构×计算×lr 三轴</b>击穿,再经峰值校准(lr 峰 1.7e-4、r 定格 4、调度负结果)收于 <b>176.4(3.3x,较初锚降 89%)</b>;4-bit 档 59.2(1.11x)近无损,compute 精化在 4-bit 为负结果(配方按比特档分化)。<a href="experiment-floor-report.html">三战役终报</a>。</p></div>
+  <div class="card"><h3>② 投机解码 <span class="pill open">τ 过 / wall-clock 判负</span></h3>
+    <p>τ 可调 <span class="big">2.4–4.7</span>;wall-clock 三级证据闭环(链式 1.02x、块式 0.77x、上限 ~1.3x)——统一内存 per-forward 地板结构性封顶,<a href="experiment-wallclock-report.html">终报</a>。</p></div>
+  <div class="card"><h3>③ Recirculation 边界 <span class="pill open">未定(须补 A0)</span></h3>
+    <p>B1 48 配置网格:conv 源灾难(+27%)、attention 源微弱(−0.4%)均不过 −2% 线;B2 shadow 流可组合零增益——<b>待 A0 论文复现锚定论</b>。</p></div>
+  <div class="card"><h3>④ 异构消融 <span class="pill pass">H1 成立</span></h3>
+    <p>跨家族 Llama shadow 仅 <span class="big">+22%</span> 慢;conv 主导臂 +107% 最差——shadow 是通用 attention 追踪器,不绑定宿主架构。</p></div>
+  <div class="card"><h3>⑤ 条件化谱系 <span class="pill neg">注入不增值</span></h3>
+    <p>四点定线 <span class="big">1.51 / 2.99 / 3.47 / 5</span>;KV 注入反降 14%——<b>detached 边缘叙事强化</b>:部署无需上行目标特征。</p></div>
+</div>
+
+<h2>① 量化恢复:损伤与挽回(2-bit 三值 + Lloyd,10M tokens 蒸馏)</h2>
+<div class="legend">
+  <span><span class="dot" style="background:var(--bf16)"></span>全精度</span>
+  <span><span class="dot" style="background:var(--quant)"></span>2-bit 量化</span>
+  <span><span class="dot" style="background:var(--shadow)"></span>量化 + shadow</span>
+</div>
+<div class="chart"><svg id="c1" width="940" height="340"></svg></div>
+<div class="takeaway">白话:2-bit 量化把模型打到"失语"(ppl 上百万),shadow 蒸馏拉回 90–99.9% 差距;离全精度还差 25–46 倍,但<b>规模越大追得越近</b>——支持"边缘部署更大量化模型 + 廉价 shadow"。8-bit 档零损伤验证通过(shadow 不伤干净基座还略赚 1.8%)。</div>
+<table style="margin-top:8px">
+  <tr><th>模型</th><th>ppl 全精度</th><th>ppl 量化</th><th>受损</th><th>ppl +shadow</th><th>线性恢复</th><th>shadow÷全精度</th></tr>
+  <tr><td>230M-Base</td><td>39.8</td><td>73,236</td><td>1,838x</td><td class="hl">1,848</td><td>97.5%</td><td>46.4x</td></tr>
+  <tr><td>350M-Base</td><td>53.5</td><td>1,181,428</td><td>22,088x</td><td class="hl">1,652</td><td>99.9%</td><td>30.9x</td></tr>
+  <tr><td>1.2B-Base</td><td>29.2</td><td>7,611</td><td>261x</td><td class="hl">743</td><td>90.6%</td><td class="hl">25.5x</td></tr>
+</table>
+<div class="sub" style="margin-top:6px">线性恢复率在灾难基线下虚高(分母效应);末列(真实距离)才是可比量。方案表缺口:8-bit(−0.05%)与 2-bit 之间无中等损伤档。</div>
+
+<h2>④ 异构消融:shadow 需要长得像宿主吗?(同 2-bit 基座,参数对齐 ≈35M)</h2>
+<div class="chart"><svg id="c4" width="940" height="270"></svg></div>
+<div class="takeaway">白话:attention 占比越高恢复越好(剂量效应);跨家族 Llama shadow 只落后 22%——<b>镜像论(H2)否决,通用追踪器(H1)成立</b>,shadow 可为任意廉价 attention 架构。意外:纯 conv shadow(3-token 记忆)没崩溃(3825)但仍差 107% 且无法缓存解码,重映射默认值保留。</div>
+
+<h2>② 投机解码:detached draft(350M-it → 1.2B-Instruct,k=4)</h2>
+<div class="twocol">
+  <div class="chart" style="padding:14px 16px">
+    <p style="font-size:13.5px"><b>引擎</b>:链式起草 + 批量验证 + 快照/回滚/重放;<b>无损保证</b>在纯注意力对上严格逐 token 相等(本地),实弹 fp32 3/3 相等;conv 混合的缓存/全量算法差异致稀有近平局翻转(数值现象,非逻辑)。</p>
+    <p style="font-size:13.5px;margin-top:8px"><b>校准冻结</b>:oracle τ=5 → 成功线 3.0 / 放弃线 2.0。<b>未蒸馏基线 τ=3.22 已过线</b>(同家族天然一致)——v1 蒸馏到 <b class="b">3.47</b> 后饱和(轨迹 3.5–3.6 平台);v2 触发条件未命中。</p>
+  </div>
+  <div class="chart"><svg id="c2" width="460" height="270"></svg></div>
+</div>
+<div class="takeaway warn">wall-clock 战役三级证据终审(<code>runs/exp2/{wallclock,v2block_*}</code>):链式 k 全谱扫描(2→8)峰值 <b>1.021x @ k=3</b>——τ 随 k 涨到 4.66 但串行 draft 链占 42%;v2-block 双结构(用户裁决的「一次前向吐 k token」)5M tokens 同源蒸馏后:DSpark 并行头 τ=1.52、DFlash2 精化 τ=2.63,但 68% partial 率使重放占 39%,最优仅 <b>0.765x</b>;上限外推:零成本 draft 2.46x、地板 draft ~1.3x、过线需 τ≥4.5(家族天花板 3.5)。<b>1.4x 在此类硬件上结构性不可达</b>。净收获:bonus 折叠 −19%、RTT 内含口径(vs 无状态云端 2.1x@50ms)、τ×结构光谱(1.52/2.63/4.66/9)与⑤的注入谱系互证。终报见 <code>docs/experiment-wallclock-report.html</code>。</div>
+
+<h2>⑤ DFlash2 条件化谱系:特征条件化值多少 τ?(k=4,同一引擎/教师)</h2>
+<div class="chart"><svg id="c5" width="940" height="290"></svg></div>
+<div class="takeaway neg">判决:<b>KV 注入反降 14%(2.99 vs 3.47)</b>,判据落入"注入不值"档——<b>detached 边缘叙事强化</b>(部署无需上行目标特征;与数据中心 DFlash/DSpark 的条件化收益形成边界对照)。机理已锁定:训练时全位置有真实教师特征,推理起草时新 token 零注入——drafter 被训成依赖注入(KD 低至 0.39 却输在 greedy 接受率,"分布匹配 ≠ 自条件一致"的实证);间隙感知训练记为已识别的改进自由度。</div>
+
+<h2>工程沉淀与未竟</h2>
+<div class="twocol">
+  <div class="card tl">
+    <b>修掉的库级 bug(全部带回归测试,243 绿)</b>
+    <ul style="list-style:none;margin-top:6px">
+      <li>🔌 空混合缓存不可喂 backbone;纯 conv shadow 无法用缓存 → attention 重映射</li>
+      <li>✂️ LFM tokenizer(64,400)&lt;词表(65,536):裁词越界断言 → trainer 禁裁</li>
+      <li>📸 缓存快照漏拍 dict 容器 conv_states → 回滚脏上下文(基线 τ 被压 2.15→修复 3.22)</li>
+      <li>🎯 块精化 off-by-one(头 j 误用于自身位置)→ 头-0 自回归重打分</li>
+      <li>🧹 rsync 摊平事故(根级包遮蔽)——哈希核对零污染,教训入运维规范</li>
+    </ul>
+  </div>
+  <div class="card tl">
+    <b>建成的机器</b>
+    <ul style="list-style:none;margin-top:6px">
+      <li>⚙️ <code>shadow_lab/specdec.py</code> 无损投机引擎 v1.1(链式+块式;crop 快照 O(1)、bonus 折叠 −19%)</li>
+      <li>💉 <code>shadow_lab/dflash.py</code> KV 注入接缝(外科式 k/v 包装)</li>
+      <li>💬 teacher_data chat 模式(conv 混合唯一正确的等长分桶批处理)</li>
+      <li>📐 run-conventions:目录/日志分开存储,verdict.json 唯一判定源</li>
+    </ul>
+    <b style="display:block;margin-top:10px">未竟</b>
+    <ul style="list-style:none;margin-top:4px">
+      <li>🌀 ③ A0:Gemma3-1B 论文复现锚({11,4} α=0.15 ramp,wiki2 −9.68% 文档锚)——B1/B2 负结果按 spec 须 A0 定论「实现错 vs 架构不适用」</li>
+      <li>⏱️ ② 已三级证据结题(链式 1.02x / 块式 0.77x / 上限 ~1.3x,<a href="experiment-wallclock-report.html">终报</a>);CUDA-graph draft 记录为不达线自由度</li>
+    </ul>
+  </div>
+</div>
+
+<footer>
+  程序 v3 · 五线状态:①④⑤ 结题(①含 08-26 地板战役:双机 200G DDP 首战,地板 ≈1524/28.5x)· ② 结题(三级证据,<a href="experiment-wallclock-report.html">wall-clock 终报</a>)· ③ B1/B2 完成待 A0 ·
+  深挖版①④图表见 <code>docs/experiment-results-lfm25.html</code> · 生成于 2026-08-25(双 GB10 首日:dc4a 训练+评测,gooo B1 网格)
+</footer>
+</div>
+
+<script>
+const fmt = n => n.toLocaleString("en-US");
+const L = Math.log10;
+const svg = id => document.getElementById(id);
+
+// ---- ① scale bars (log) ----
+(function () {
+  const data = [
+    { n: "230M-Base", bf: 39.82, q: 73236, s: 1848, r: "46.4x" },
+    { n: "350M-Base", bf: 53.49, q: 1181428, s: 1652, r: "30.9x" },
+    { n: "1.2B-Base", bf: 29.17, q: 7611, s: 743, r: "25.5x" },
+  ];
+  const W = 940, H = 340, padL = 60, padB = 46, maxLog = 6.1, minLog = 1.0;
+  const y = v => 20 + (H - 66) * (1 - (L(v) - minLog) / (maxLog - minLog));
+  const gW = (W - padL - 20) / 3, bw = 52, gap = 10;
+  let s = "";
+  for (let d = 1; d <= 6; d++) {
+    const yy = y(Math.pow(10, d));
+    s += `<line x1="${padL}" y1="${yy}" x2="${W - 10}" y2="${yy}" stroke="#eef2f7"/>`
+       + `<text x="${padL - 8}" y="${yy + 4}" font-size="11" fill="#94a3b8" text-anchor="end">${fmt(Math.pow(10, d))}</text>`;
+  }
+  data.forEach((g, i) => {
+    const cx = padL + gW * i + gW / 2, x0 = cx - (bw * 3 + gap * 2) / 2;
+    [["bf", g.bf, "var(--bf16)", "#16a34a"], ["q", g.q, "var(--quant)", "#dc2626"], ["s", g.s, "var(--shadow)", "#2563eb"]]
+      .forEach(([k, v, c, t], j) => {
+        const x = x0 + j * (bw + gap), yy = y(v);
+        s += `<rect x="${x}" y="${yy}" width="${bw}" height="${Math.max(H - 26 - yy, 2)}" fill="${c}" rx="4" opacity="0.92"/>`
+           + `<text x="${x + bw / 2}" y="${yy - 6}" font-size="11.5" font-weight="600" fill="${t}" text-anchor="middle">${fmt(Math.round(v))}</text>`;
+      });
+    s += `<text x="${cx}" y="${H - 22}" font-size="13" font-weight="600" text-anchor="middle">${g.n}</text>`
+       + `<text x="${cx}" y="${H - 5}" font-size="11.5" fill="#2563eb" text-anchor="middle">shadow ÷ 全精度 = ${g.r}</text>`;
+  });
+  s += `<text x="14" y="${H / 2}" font-size="12" fill="#64748b" transform="rotate(-90 14 ${H / 2})" text-anchor="middle">ppl(对数刻度,越低越好)</text>`;
+  svg("c1").innerHTML = s;
+})();
+
+// ---- ④ arms ----
+(function () {
+  const arms = [
+    { n: "A1 · 纯 conv shadow(3-token 记忆)", v: 3825, d: "+107%", c: "#dc2626" },
+    { n: "A3 · 混合(conv + attention)", v: 2518, d: "+36%", c: "#f59e0b" },
+    { n: "B · 跨家族 Llama(纯 attention)", v: 2256, d: "+22%", c: "#8b5cf6" },
+    { n: "A2 · 纯 attention(基准)", v: 1846, d: "基准", c: "#2563eb" },
+  ];
+  const W = 940, rowH = 54, padL = 380;
+  const x = v => padL + (W - padL - 110) * (v / 4000);
+  let s = "";
+  arms.forEach((a, i) => {
+    const yy = 14 + i * rowH;
+    s += `<text x="${padL - 12}" y="${yy + 21}" font-size="13" fill="#334155" text-anchor="end">${a.n}</text>`
+       + `<rect x="${padL}" y="${yy}" width="${x(a.v) - padL}" height="32" rx="6" fill="${a.c}" opacity="0.9"/>`
+       + `<text x="${x(a.v) + 10}" y="${yy + 21}" font-size="13.5" font-weight="700" fill="#334155">ppl ${fmt(a.v)} <tspan fill="${a.c}">${a.d}</tspan></text>`;
+  });
+  svg("c4").innerHTML = s;
+})();
+
+// ---- ② tau gauge ----
+(function () {
+  const W = 460, H = 270, padL = 54, padB = 34;
+  const rows = [
+    { n: "未蒸馏基线", v: 3.22, c: "#94a3b8" },
+    { n: "v1 蒸馏(5M tok)", v: 3.47, c: "#2563eb" },
+    { n: "oracle 上界", v: 5.0, c: "#16a34a" },
+  ];
+  const x = v => padL + (W - padL - 20) * (v / 5.6);
+  let s = `<line x1="${x(3.0)}" y1="10" x2="${x(3.0)}" y2="${H - padB}" stroke="#d97706" stroke-dasharray="5 4"/>`
+        + `<text x="${x(3.0)}" y="${H - 14}" font-size="11" fill="#d97706" text-anchor="middle">成功线 3.0</text>`
+        + `<line x1="${x(2.0)}" y1="10" x2="${x(2.0)}" y2="${H - padB}" stroke="#dc2626" stroke-dasharray="5 4"/>`
+        + `<text x="${x(2.0)}" y="${H - 14}" font-size="11" fill="#dc2626" text-anchor="middle">放弃线 2.0</text>`;
+  rows.forEach((r, i) => {
+    const yy = 30 + i * 62;
+    s += `<text x="${padL - 10}" y="${yy + 21}" font-size="12.5" fill="#334155" text-anchor="end">${r.n}</text>`
+       + `<rect x="${padL}" y="${yy}" width="${x(r.v) - padL}" height="32" rx="6" fill="${r.c}" opacity="0.9"/>`
+       + `<text x="${x(r.v) + 8}" y="${yy + 21}" font-size="14" font-weight="700" fill="${r.c}">${r.v}</text>`;
+  });
+  s += `<text x="${padL - 10}" y="16" font-size="12" fill="#94a3b8" text-anchor="end">τ (k=4)</text>`;
+  svg("c2").innerHTML = s;
+})();
+
+// ---- ⑤ spectrum ----
+(function () {
+  const pts = [
+    { n: "from-scratch 43.5M\n(块起草 + KV 注入)", v: 1.51, c: "#dc2626" },
+    { n: "预训练 350M + KV 注入", v: 2.99, c: "#f59e0b" },
+    { n: "预训练 350M detached(v1)", v: 3.47, c: "#2563eb" },
+    { n: "oracle", v: 5.0, c: "#16a34a" },
+  ];
+  const W = 940, H = 290, padL = 60, padB = 52;
+  const x = v => padL + (W - padL - 30) * (v / 5.4);
+  let s = "";
+  for (const g of [1, 2, 3, 4, 5]) {
+    s += `<line x1="${x(g)}" y1="16" x2="${x(g)}" y2="${H - padB}" stroke="#eef2f7"/>`
+       + `<text x="${x(g)}" y="${H - 32}" font-size="11" fill="#94a3b8" text-anchor="middle">${g}</text>`;
+  }
+  pts.forEach((p, i) => {
+    const yy = 28 + i * 56;
+    const lines = p.n.split("\n");
+    const label = lines.map((t, j) => `<tspan x="${padL - 12}" dy="${j === 0 ? -(lines.length - 1) * 8 + 4 : 16}">${t}</tspan>`).join("");
+    s += `<text x="${padL - 12}" y="${yy + 20}" font-size="12.5" fill="#334155" text-anchor="end">${label}</text>`
+       + `<rect x="${padL}" y="${yy}" width="${x(p.v) - padL}" height="34" rx="6" fill="${p.c}" opacity="0.9"/>`
+       + `<text x="${x(p.v) + 10}" y="${yy + 22}" font-size="15" font-weight="700" fill="${p.c}">τ = ${p.v}</text>`;
+  });
+  s += `<text x="${W / 2}" y="${H - 10}" font-size="12" fill="#64748b" text-anchor="middle">平均接受长度 τ(k=4,同一引擎/教师/口径)</text>`;
+  svg("c5").innerHTML = s;
+})();
+</script>
+</body>
+</html>

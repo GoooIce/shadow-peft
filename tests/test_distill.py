@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -131,46 +128,6 @@ def test_vocab_mismatch_raises():
     bad_teacher = torch.randn(batch, seq, 128 + 7)
     with pytest.raises(ValueError, match="vocab"):
         m(input_ids=input_ids, labels=labels, teacher_logits=bad_teacher)
-
-
-def test_run_shadow_peft_args_defaults(monkeypatch):
-    """The new CLI flags must not break parse_args() defaults (skipped if script deps missing)."""
-    experiment_dir = Path(__file__).resolve().parents[1] / "experiment"
-    sys.path.insert(0, str(experiment_dir))
-    try:
-        try:
-            import run_shadow_peft
-        except ImportError as exc:
-            pytest.skip(f"run_shadow_peft.py dependencies not available: {exc}")
-        monkeypatch.setattr(sys, "argv", ["run_shadow_peft.py"])
-        args = run_shadow_peft.parse_args()
-        assert args.quantize_base_group_size is None
-        assert args.distill_from is None
-        assert args.distill_weight == 1.0
-        assert args.distill_temperature == 1.0
-
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            [
-                "run_shadow_peft.py",
-                "--quantize_base_group_size",
-                "128",
-                "--distill_from",
-                "Qwen/Qwen3-0.6B",
-                "--distill_weight",
-                "0.5",
-                "--distill_temperature",
-                "2.0",
-            ],
-        )
-        args = run_shadow_peft.parse_args()
-        assert args.quantize_base_group_size == 128
-        assert args.distill_from == "Qwen/Qwen3-0.6B"
-        assert args.distill_weight == 0.5
-        assert args.distill_temperature == 2.0
-    finally:
-        sys.path.remove(str(experiment_dir))
 
 
 def test_hidden_distill_off_by_default():

@@ -399,10 +399,7 @@ def test_save_load_roundtrip_with_skip_patterns_derived_from_manifest(scheme, tm
 @pytest.mark.parametrize("scheme", SCHEMES, ids=scheme_ids)
 def test_legacy_named_entrypoints_match_scheme_table(scheme):
     """quantize_model_1bit / quantize_model_2bit are the scheme table."""
-    if scheme.bits == 1:
-        fn = quantize_model_1bit
-    else:
-        fn = quantize_model_2bit
+    fn = quantize_model_1bit if scheme.bits == 1 else quantize_model_2bit
     torch.manual_seed(0)
     model_a = _tiny_llama().half()
     model_b = _tiny_llama().half()

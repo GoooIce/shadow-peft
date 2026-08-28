@@ -20,7 +20,6 @@ import shadow_core.harness.config
 import shadow_core.harness.router
 import shadow_core.harness.session
 
-
 # --------------------------------------------------------------------------
 # shadow_peft.config
 # --------------------------------------------------------------------------
@@ -85,7 +84,6 @@ def test_affine_1bit_names_via_old_path():
         quantize_model_1bit,
         save_quantized_checkpoint,
     )
-
     from shadow_peft.quantization.walker import save_quantized_checkpoint as canonical
 
     assert callable(quantize_1bit_affine)
@@ -119,18 +117,9 @@ def test_quantization_package_old_all_names():
     # Every name that was in quantization/__init__'s public surface pre-split.
     from shadow_peft.quantization import (
         QuantizedEmbedding1Bit,
-        QuantizedEmbedding2Bit,
         QuantizedLinear1Bit,
-        QuantizedLinear2Bit,
-        dequantize_1bit_affine,
-        dequantize_2bit_ternary,
-        quantize_1bit_affine,
-        quantize_2bit_ternary,
-        quantize_model_1bit,
-        quantize_model_2bit,
-        save_quantized_checkpoint,
+        affine_1bit,
     )
-    from shadow_peft.quantization import affine_1bit
 
     assert QuantizedLinear1Bit is affine_1bit.QuantizedLinear1Bit
     assert QuantizedEmbedding1Bit is affine_1bit.QuantizedEmbedding1Bit

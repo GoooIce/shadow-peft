@@ -32,6 +32,11 @@ class ShadowConfig:
     shadow_num_attention_heads: int | None = None
     shadow_num_key_value_heads: int | None = None
     shadow_head_dim: int | None = None
+    # Optional explicit layer composition for the implicit shadow model
+    # (hybrid backbones only, e.g. LFM2 "conv"/"full_attention"). Overrides
+    # the sliced prefix AND disables the all-conv auto-remap — the caller
+    # owns the heterogeneity decision (exp4 ablation knob).
+    shadow_layer_types: list[str] | None = None
 
     # Optional: task-specific modules to train/save alongside the Shadow adapter.
     # Mirrors PEFT's "modules_to_save" concept. Examples:

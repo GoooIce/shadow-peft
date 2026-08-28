@@ -18,11 +18,11 @@ mlx = [
   "mlx-lm>=0.31.3",
 ]
 quant = [
-  # Backbone PTQ tiers (w8a8_fp8 / w4a16) for the experiment lab.
+  # Backbone PTQ tiers (w8a8_fp8 / w4a16) for shadow_lab.
   "torchao>=0.18,<0.19",
 ]
 experiment = [
-  # experiment/lab training & eval stack.
+  # shadow_lab training & eval stack.
   "datasets>=2.19",
   "trl>=0.20",
 ]
@@ -41,14 +41,13 @@ requires = ["hatchling>=1.24.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/shadow_core", "src/shadow_peft", "src/shadow_peft_mlx"]
+packages = ["src/shadow_core", "src/shadow_lab", "src/shadow_peft", "src/shadow_peft_mlx"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-exclude = ["experiment"]
 lint.select = ["E", "F", "I", "UP", "B", "SIM"]
 lint.ignore = ["E501","B028"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["shadow_peft", "shadow_peft_mlx"]
+known-first-party = ["shadow_core", "shadow_lab", "shadow_peft", "shadow_peft_mlx"]

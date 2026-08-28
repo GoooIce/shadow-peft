@@ -245,6 +245,7 @@ class ShadowPeftModel(nn.Module):
                 shadow_num_attention_heads=shadow_config.shadow_num_attention_heads,
                 shadow_num_key_value_heads=shadow_config.shadow_num_key_value_heads,
                 shadow_head_dim=shadow_config.shadow_head_dim,
+                shadow_layer_types=shadow_config.shadow_layer_types,
             )
         else:
             if isinstance(shadow_model, AutoModelForCausalLMWithHiddenProjection):
@@ -344,6 +345,10 @@ class ShadowPeftModel(nn.Module):
         # Lifecycle is tied to the base model's past_key_values: when the caller starts a
         # new generation (past_key_values=None), the shadow cache is rebuilt from scratch.
         self._shadow_cache: DynamicCache | None = None
+        # True between cache creation and the first backbone call: the cache is
+        # still empty/unmaterialized, so it must not be handed to a backbone
+        # forward (hybrid caches like LFM2 raise on get_seq_length() while empty).
+        self._shadow_cache_is_fresh = False
 
         # Wrap base layers in-place.
         wrapped = nn.ModuleList([])
@@ -445,7 +450,13 @@ class ShadowPeftModel(nn.Module):
         if shadow_cache is not None:
             # Cached mode: let the shadow backbone use/update its KV-cache.
             kwargs["use_cache"] = True
-            kwargs["past_key_values"] = shadow_cache
+            if getattr(self, "_shadow_cache_is_fresh", False):
+                # Prefill with a still-empty cache: hybrid backbones (e.g. LFM2
+                # conv layers) call get_seq_length() on it and raise. Pass None
+                # and adopt the cache the backbone returns instead.
+                kwargs["past_key_values"] = None
+            else:
+                kwargs["past_key_values"] = shadow_cache
         else:
             # Full-sequence mode (backward-compatible): disable caching.
             kwargs["use_cache"] = False
@@ -468,6 +479,11 @@ class ShadowPeftModel(nn.Module):
                 position_ids=position_ids,
                 **kwargs,
             )
+
+        if getattr(self, "_shadow_cache_is_fresh", False) and getattr(out, "past_key_values", None) is not None:
+            # Adopt the cache the backbone materialized during this prefill.
+            self._shadow_cache = out.past_key_values
+        self._shadow_cache_is_fresh = False
 
         if hasattr(out, "last_hidden_state"):
             shadow_hidden = out.last_hidden_state
@@ -542,6 +558,7 @@ class ShadowPeftModel(nn.Module):
         if not use_cache:
             # No caching requested — reset internal shadow cache for a clean state next time.
             self._shadow_cache = None
+            self._shadow_cache_is_fresh = False
             return None
 
         # Cached mode. If the base has no cache yet, this is a fresh prefill → create shadow cache.
@@ -554,6 +571,7 @@ class ShadowPeftModel(nn.Module):
             except Exception:
                 # Fallback: some non-standard configs may not support config-based cache init.
                 self._shadow_cache = DynamicCache()
+            self._shadow_cache_is_fresh = True
         return self._shadow_cache
 
     def forward(self, *args, **kwargs):
@@ -758,6 +776,7 @@ class ShadowPeftModel(nn.Module):
         # paired with the previous adapter's shadow hidden states / KV-cache.
         self._shadow_hidden_states = None
         self._shadow_cache = None
+        self._shadow_cache_is_fresh = False
         self.load_adapter_state_dict(state)
 
     @torch.no_grad()
