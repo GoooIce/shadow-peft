@@ -13,7 +13,7 @@
 # Env overrides (defaults in parentheses):
 #   BASE_MODEL   (~/models/LFM2.5-2.6B-Base)  — pre-trained base
 #   RL_MODEL     (~/models/LFM2.5-2.6B)       — post-trained (SFT + agentic RL) variant
-#   BASE_DATA    (runs/exp1/teacher_floor2v_2p6b.jsonl) — existing base pool
+#   BASE_DATA    (runs/exp1/teacher_2p6b_base.jsonl) — floor2v anchor pool (a+b halves)
 #   RL_PROMPTS   (runs/exp2/shared/prompts.jsonl)
 #   MAX_TOKENS   (1e7)   LR (1e-5)   PASSES (base rl)   RUN_30M (0)
 #
@@ -25,7 +25,7 @@ PY=.venv/bin/python
 
 BASE_MODEL="${BASE_MODEL:-$HOME/models/LFM2.5-2.6B-Base}"
 RL_MODEL="${RL_MODEL:-$HOME/models/LFM2.5-2.6B}"
-BASE_DATA="${BASE_DATA:-runs/exp1/teacher_floor2v_2p6b.jsonl}"
+BASE_DATA="${BASE_DATA:-runs/exp1/teacher_2p6b_base.jsonl}"
 RL_DATA="${RL_DATA:-runs/exp1/teacher_2p6b_rl_chat.jsonl}"
 RL_PROMPTS="${RL_PROMPTS:-runs/exp2/shared/prompts.jsonl}"
 MAX_TOKENS="${MAX_TOKENS:-1e7}"
