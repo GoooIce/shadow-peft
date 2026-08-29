@@ -31,12 +31,13 @@ run_arm () {  # run_arm <arm> <suffix> <tokens> <model> <data> <baselines-from>
   echo ""
   echo "[n4b] === arm ${ARM}${SUFFIX:+_$SUFFIX} @${TOKENS} tokens ==="
   $PY scripts/exp1_native4b_arm.py --arm "$ARM" ${SUFFIX:+--suffix "$SUFFIX"} \
-    --model "$MODEL" --data "$DATA" --lr "$LR" --shadow-intermediate "$INTER" \
+    --tag "$TAG" --model "$MODEL" --data "$DATA" --lr "$LR" --shadow-intermediate "$INTER" \
     --max-tokens "$TOKENS" --baselines-from "$BASEFROM"
 }
 
 case "$PASS" in
   base)
+    TAG=""
     MODEL="${MODEL:-$HOME/models/LFM2.5-2.6B-Base}"
     DATA="${BASE_DATA:-runs/exp1/teacher_2p6b_base.jsonl}"
     BASEFROM=runs/exp1/grace_B0/verdict.json
@@ -51,6 +52,7 @@ case "$PASS" in
     run_arm N1 "" "$T10" "$MODEL" "$DATA" "$BASEFROM"
     ;;
   rl)
+    TAG="rl"
     MODEL="${MODEL:-$HOME/models/LFM2.5-2.6B}"
     DATA="${RL_DATA:-runs/exp1/teacher_2p6b_rl_chat.jsonl}"
     HELDOUT="${RL_HELDOUT:-runs/exp1/teacher_2p6b_rl_chat_heldout.jsonl}"
