@@ -623,7 +623,7 @@ def train_shadow(cfg: TrainConfig, shadow_model=None) -> TrainReport:
             "gate_final_var": monitor.last_var,
             "gate_final_cv": monitor.last_cv,
             "gate_max_degrade_streak": monitor.max_streak,
-            "beta_init": ib.beta if ib is not None else 1.0,
+            "beta_init": cfg.ib_beta_init if ib is not None else 1.0,
             "beta_final": ib.beta if ib is not None else 1.0,
             "beta_min": ib.seen_min if ib is not None else 1.0,
             "beta_max": ib.seen_max if ib is not None else 1.0,

@@ -66,7 +66,18 @@ def main() -> None:
             raise SystemExit(f"missing arm verdict: {path} (run exp1_grace_arm.py --arm {arm} first)")
         return json.loads(path.read_text())
 
-    arms = {arm: _load_arm(arm) for arm in ("B0", *LADDER, "Q0", "Q1")}
+    def _load_arm_if_present(arm: str) -> dict | None:
+        path = runs_root / f"{prefix}_{arm}" / "verdict.json"
+        if not path.exists():
+            return None
+        return json.loads(path.read_text())
+
+    # The B ladder is always required; the Q arms are optional — the queue
+    # adjudicates the ladder BEFORE running Q0/Q1, and a negative-result
+    # campaign skips Q1 entirely.
+    arms = {arm: _load_arm(arm) for arm in ("B0", *LADDER)}
+    arms["Q0"] = _load_arm_if_present("Q0")
+    arms["Q1"] = _load_arm_if_present("Q1")
     b0 = arms["B0"]
 
     ladder_rows = []
@@ -113,23 +124,34 @@ def main() -> None:
         )
 
     native = None
-    if winner is not None and args.ptq_swap:
-        ptq_ppl = _load_ptq_swap(args.ptq_swap)
-        q1 = arms["Q1"]
-        bf16_ref = arms[winner["arm"]]["ppl_shadow"]
-        degradation = (q1["ppl_shadow"] - bf16_ref) / bf16_ref
-        beats_ptq = q1["ppl_shadow"] <= ptq_ppl
-        native = {
-            "ptq_swap_ppl": ptq_ppl,
-            "q1_ppl": q1["ppl_shadow"],
-            "q1_recipe": q1["loss_mode"],
-            "q1_vs_bf16_same_recipe": round(degradation, 4),
-            "q1_beats_ptq_swap": beats_ptq,
-            "degradation_within_2pct": degradation <= NATIVE_MAX_DEGRADATION,
-            "native_4b_valid": beats_ptq and degradation <= NATIVE_MAX_DEGRADATION,
-            "q0_ppl": arms["Q0"]["ppl_shadow"],  # precision-effect attribution arm
+    if args.ptq_swap:
+        if winner is None or arms["Q1"] is None:
+            verdict["native_4b_skipped"] = (
+                "no qualifying recipe" if winner is None else "Q1 verdict missing"
+            )
+        else:
+            ptq_ppl = _load_ptq_swap(args.ptq_swap)
+            q1 = arms["Q1"]
+            bf16_ref = arms[winner["arm"]]["ppl_shadow"]
+            degradation = (q1["ppl_shadow"] - bf16_ref) / bf16_ref
+            beats_ptq = q1["ppl_shadow"] <= ptq_ppl
+            native = {
+                "ptq_swap_ppl": ptq_ppl,
+                "q1_ppl": q1["ppl_shadow"],
+                "q1_recipe": q1["loss_mode"],
+                "q1_vs_bf16_same_recipe": round(degradation, 4),
+                "q1_beats_ptq_swap": beats_ptq,
+                "degradation_within_2pct": degradation <= NATIVE_MAX_DEGRADATION,
+                "native_4b_valid": beats_ptq and degradation <= NATIVE_MAX_DEGRADATION,
+            }
+            verdict["native_4b"] = native
+    if arms["Q0"] is not None:
+        # Precision-effect attribution arm: same ce_kl recipe at native nvfp4.
+        verdict["q0"] = {
+            "ppl_shadow": arms["Q0"]["ppl_shadow"],
+            "kld_shadow": arms["Q0"].get("kld_shadow"),
+            "ppl_gain_vs_b0": round((b0["ppl_shadow"] - arms["Q0"]["ppl_shadow"]) / b0["ppl_shadow"], 4),
         }
-        verdict["native_4b"] = native
 
     if args.rerun:
         rerun = json.loads(Path(args.rerun).read_text())
