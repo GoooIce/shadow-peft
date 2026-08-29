@@ -32,6 +32,8 @@
 - **span-CKA** — 关系 CKA 的文本化：仅在续写 span 的 token 子集上逐样本计算 centered CKA 的特征结构传递损失，维度无关无需投影。
 - **IB 控制器（Information Bottleneck Controller）** — 以拉格朗日对偶上升动态调节蒸馏损失权重的机制，权衡贴教师（fidelity）与量化预算（capacity）。
 - **KLD 轴（KLD Axis）** — 评测轴之一：KLD(基座 bf16 ‖ 量化+影子) 的每 token 平均 KL（nats），与 ppl 轴同窗口同行走（`eval_kld`）；恢复臂改善该轴 ⇔ 相对 quant-only 基线向 0 收敛。
+- **留出判定轴（axis2）** — 留出自蒸馏池上的评测轴（同 prompt 源、不交叠 seed、全行流）：RL/instruct 类模型的默认判定轴——wikitext 类外部语料对后训练模型深度 OOD，会扭曲恢复率原点、掩蔽真实信号（exp1-grace rl 遍实测）。
+- **残差匹配噪声注入（residual-matched noise injection）** — 机制归因臂的噪声协议：每步对影子权重计算量化格点的舍入残差并在块内随机重排，前向/反向在加噪权重上进行、优化器步作用在干净主权重上——统计上匹配原生量化训练的隐式噪声，但不落格点（`shadow_lab.shadow_quant`）。
 
 ## 推理挽具（harness）
 

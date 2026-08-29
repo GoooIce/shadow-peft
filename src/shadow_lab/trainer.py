@@ -137,6 +137,14 @@ class TrainConfig:
     # keeps every shadow Linear weight ON the format grid for the whole run
     # (projected-gradient training — no bf16 master, no STE).
     shadow_quant: str | None = None
+    # Residual-matched noise (exp1-native4b mechanism attribution): perturb the
+    # shadow Linear weights for forward/backward with the format's rounding
+    # residual, i.i.d.-shuffled within each block and scaled by
+    # shadow_noise_mult; the optimizer step applies to the clean master weights
+    # (eval/checkpoints see the master — the noise is train-time regularization
+    # only). Mutually exclusive with shadow_quant.
+    shadow_noise: str | None = None
+    shadow_noise_mult: float = 1.0
     injection_hidden: int = 16
     gate_hidden: int = 10
     group_size: int = 128
@@ -175,6 +183,18 @@ class TrainConfig:
                 )
         if self.loss_mode not in LOSS_MODES:
             raise ValueError(f"unsupported loss_mode={self.loss_mode!r} (expected one of {LOSS_MODES})")
+        if self.shadow_noise is not None:
+            from .shadow_quant import FORMATS
+
+            if self.shadow_noise not in FORMATS:
+                raise ValueError(
+                    f"unsupported shadow_noise={self.shadow_noise!r} (expected one of {sorted(FORMATS)})"
+                )
+            if self.shadow_quant is not None:
+                raise ValueError(
+                    "shadow_quant and shadow_noise are mutually exclusive: on-grid "
+                    "projected-gradient training vs noise-perturbed clean master"
+                )
 
     @property
     def profile(self) -> BitProfile:
@@ -387,6 +407,16 @@ def train_shadow(cfg: TrainConfig, shadow_model=None) -> TrainReport:
         shadow_linears = shadow_quant.collect_shadow_linears(task.peft_model)
         n_proj = shadow_quant.project_linears(shadow_linears, cfg.shadow_quant)
         log(f"shadow weights native {cfg.shadow_quant}: {n_proj} linears projected on-grid")
+    # Residual-matched noise arm: same Linear surface, master stays clean.
+    noise_linears: list = []
+    if cfg.shadow_noise:
+        from shadow_lab import shadow_quant as _sq
+
+        noise_linears = _sq.collect_shadow_linears(task.peft_model)
+        log(
+            f"shadow noise {cfg.shadow_noise} x{cfg.shadow_noise_mult}: {len(noise_linears)} linears, "
+            "residual shuffle on clean master"
+        )
     if cfg.batch_seq % world != 0:
         raise ValueError(f"batch_seq={cfg.batch_seq} not divisible by world={world}")
     local_batch = cfg.batch_seq // world
@@ -461,6 +491,23 @@ def train_shadow(cfg: TrainConfig, shadow_model=None) -> TrainReport:
         # unanswered and the NCCL watchdog kills the job. The padded count is
         # off by <0.1% from the real token total.
         tokens_seen += local_batch * cfg.seq_len * world
+
+        # Noise arm protocol: snapshot the clean master, perturb the live
+        # weights; backward runs at the noisy point, then the master is
+        # restored so the optimizer step (and any rollback snapshot taken
+        # outside this block) only ever sees clean weights.
+        noise_masters: list = []
+        if noise_linears:
+            from shadow_lab import shadow_quant as _sq
+
+            with torch.no_grad():
+                for mod in noise_linears:
+                    noise_masters.append((mod, mod.weight.detach().clone()))
+                    mod.weight.copy_(
+                        _sq.residual_shuffle_noise(
+                            noise_masters[-1][1], cfg.shadow_noise, cfg.shadow_noise_mult
+                        )
+                    )
 
         fwd = dict(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"], labels=batch["labels"])
         teacher_penult = None
@@ -537,6 +584,12 @@ def train_shadow(cfg: TrainConfig, shadow_model=None) -> TrainReport:
 
         opt.zero_grad()
         loss.backward()
+        if noise_masters:
+            # Gradients live on the Parameter (value-independent); restoring
+            # the master here makes the step apply to the clean weights.
+            with torch.no_grad():
+                for mod, master in noise_masters:
+                    mod.weight.copy_(master)
         if ddp:
             # Manual sync: average grads so all replicas step identically.
             # Must precede clip (rank-local norms would fork the replicas).

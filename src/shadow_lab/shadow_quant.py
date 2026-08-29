@@ -78,3 +78,30 @@ def project_linears(linears: list[torch.nn.Linear], fmt: str) -> int:
         for mod in linears:
             mod.weight.copy_(fn(mod.weight))
     return len(linears)
+
+
+def residual_shuffle_noise(w: torch.Tensor, fmt: str = "nvfp4", mult: float = 1.0,
+                           block: int = 16) -> torch.Tensor:
+    """Residual-matched noise for the mechanism-attribution arms (exp1-native4b).
+
+    Returns w + mult * shuffle_within_block(w - Q_fmt(w)): the format's actual
+    rounding residual with the deterministic element-wise coupling to w broken
+    by an i.i.d. permutation inside each block — per-block scale and the
+    residual marginal are preserved exactly, the value at each position is not
+    a rounding of w's value there. A statistical stand-in for the implicit
+    noise of projected-gradient native training, with no grid constraint.
+    """
+    fn = FORMATS.get(fmt)
+    if fn is None:
+        raise ValueError(f"unknown shadow weight format {fmt!r} (expected one of {sorted(FORMATS)})")
+    out_f, in_f = w.shape
+    wf = w.detach().float()
+    pad = (-in_f) % block
+    if pad:
+        wf = torch.nn.functional.pad(wf, (0, pad))
+    blocks = wf.view(out_f, -1, block)
+    residual = blocks - fn(wf).view(out_f, -1, block)
+    perm = torch.argsort(torch.rand_like(residual), dim=-1)
+    noisy = blocks + mult * torch.gather(residual, -1, perm)
+    out = noisy.view(out_f, -1)
+    return (out[:, :in_f] if pad else out).to(w.dtype)
