@@ -95,6 +95,44 @@ def _axis_windows(n_ids: int, chunks: int, chunk_len: int, context_len: int):
 
 
 @torch.no_grad()
+def eval_ppl_ids(
+    model,
+    ids: list[int],
+    *,
+    chunks: int = 8,
+    chunk_len: int = 512,
+    device,
+    context_len: int = 0,
+) -> float:
+    """Chunked perplexity over a raw token-id stream (no tokenizer round-trip).
+
+    Same window walk and semantics as ``eval_ppl``; used when the eval text is
+    already token ids (e.g. a held-out self-distillation pool, where decoding
+    to text and re-encoding would not reproduce the ids).
+    """
+    was_training = model.training
+    model.eval()
+    total_nll, total_tok = 0.0, 0
+    for _start, ctx, keep_from in _axis_windows(len(ids), chunks, chunk_len, context_len):
+        x = torch.tensor(ids[ctx : _start + chunk_len + 1], device=device)[None]
+        logits = model(input_ids=x).logits.float()
+        logp = logits[:, :-1] - torch.logsumexp(logits[:, :-1], -1, keepdim=True)
+        tgt = x[:, 1:]
+        if keep_from is not None:
+            logp = logp[:, keep_from:]
+            tgt = tgt[:, keep_from:]
+        total_nll += -logp.gather(-1, tgt.unsqueeze(-1)).sum().item()
+        total_tok += tgt.numel()
+    if was_training:
+        model.train()
+    if total_tok == 0:
+        raise ValueError(
+            f"eval_ppl: stream too short to evaluate — need at least chunk_len + 1 = {chunk_len + 1} tokens, got {len(ids)}"
+        )
+    return math.exp(total_nll / total_tok)
+
+
+@torch.no_grad()
 def eval_ppl(
     model,
     tokenizer,
@@ -121,30 +159,50 @@ def eval_ppl(
     has one and did not add it; no-op for tokenizers that add it themselves
     (Gemma 1-3, Llama) or have none (Qwen).
     """
-    ids = bos_ids(tokenizer, text)
-    was_training = model.training
+    return eval_ppl_ids(
+        model, bos_ids(tokenizer, text),
+        chunks=chunks, chunk_len=chunk_len, device=device, context_len=context_len,
+    )
+
+
+@torch.no_grad()
+def eval_kld_ids(
+    ref_model,
+    model,
+    ids: list[int],
+    *,
+    chunks: int = 8,
+    chunk_len: int = 512,
+    device,
+    context_len: int = 0,
+) -> float:
+    """Mean KL(P_ref || P_model) in nats/token over a raw token-id stream
+    (same walk as ``eval_ppl_ids``). See ``eval_kld`` for the axis semantics.
+    """
+    were_training = (ref_model.training, model.training)
+    ref_model.eval()
     model.eval()
-    total_nll, total_tok = 0.0, 0
+    total_kl, total_tok = 0.0, 0
     for _start, ctx, keep_from in _axis_windows(len(ids), chunks, chunk_len, context_len):
         x = torch.tensor(ids[ctx : _start + chunk_len + 1], device=device)[None]
-        logits = model(input_ids=x).logits.float()
-        logp = logits[:, :-1] - torch.logsumexp(logits[:, :-1], -1, keepdim=True)
-        tgt = x[:, 1:]
+        ref_logits = ref_model(input_ids=x).logits[:, :-1].float()
+        logits = model(input_ids=x).logits[:, :-1].float()
         if keep_from is not None:
-            # Score only the window tail, not the carried context. logp entry
-            # j predicts global position ctx+1+j — crop BOTH tensors to the
-            # same span or the gather pairs predictions with unrelated tokens.
-            logp = logp[:, keep_from:]
-            tgt = tgt[:, keep_from:]
-        total_nll += -logp.gather(-1, tgt.unsqueeze(-1)).sum().item()
-        total_tok += tgt.numel()
-    if was_training:
-        model.train()
+            ref_logits = ref_logits[:, keep_from:]
+            logits = logits[:, keep_from:]
+        ref_logp = ref_logits - torch.logsumexp(ref_logits, -1, keepdim=True)
+        logp = logits - torch.logsumexp(logits, -1, keepdim=True)
+        kl = (ref_logp.exp() * (ref_logp - logp)).sum(-1)
+        total_kl += kl.sum().item()
+        total_tok += kl.numel()
+    for m, was in zip((ref_model, model), were_training, strict=True):
+        if was:
+            m.train()
     if total_tok == 0:
         raise ValueError(
-            f"eval_ppl: text is too short to evaluate — need at least chunk_len + 1 = {chunk_len + 1} tokens, got {len(ids)}"
+            f"eval_kld: stream too short to evaluate — need at least chunk_len + 1 = {chunk_len + 1} tokens, got {len(ids)}"
         )
-    return math.exp(total_nll / total_tok)
+    return total_kl / total_tok
 
 
 @torch.no_grad()
@@ -167,31 +225,10 @@ def eval_kld(
     arm improves the axis iff it moves KLD toward 0 relative to the
     quant-only baseline. Restores both models' prior train/eval modes.
     """
-    ids = bos_ids(tokenizer, text)
-    were_training = (ref_model.training, model.training)
-    ref_model.eval()
-    model.eval()
-    total_kl, total_tok = 0.0, 0
-    for _start, ctx, keep_from in _axis_windows(len(ids), chunks, chunk_len, context_len):
-        x = torch.tensor(ids[ctx : _start + chunk_len + 1], device=device)[None]
-        ref_logits = ref_model(input_ids=x).logits[:, :-1].float()
-        logits = model(input_ids=x).logits[:, :-1].float()
-        if keep_from is not None:
-            ref_logits = ref_logits[:, keep_from:]
-            logits = logits[:, keep_from:]
-        ref_logp = ref_logits - torch.logsumexp(ref_logits, -1, keepdim=True)
-        logp = logits - torch.logsumexp(logits, -1, keepdim=True)
-        kl = (ref_logp.exp() * (ref_logp - logp)).sum(-1)
-        total_kl += kl.sum().item()
-        total_tok += kl.numel()
-    for m, was in zip((ref_model, model), were_training, strict=True):
-        if was:
-            m.train()
-    if total_tok == 0:
-        raise ValueError(
-            f"eval_kld: text is too short to evaluate — need at least chunk_len + 1 = {chunk_len + 1} tokens, got {len(ids)}"
-        )
-    return total_kl / total_tok
+    return eval_kld_ids(
+        ref_model, model, bos_ids(tokenizer, text),
+        chunks=chunks, chunk_len=chunk_len, device=device, context_len=context_len,
+    )
 
 
 def despace_wikitext(text: str) -> str:

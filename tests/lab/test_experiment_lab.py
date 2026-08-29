@@ -10,7 +10,13 @@ transformers = pytest.importorskip("transformers")
 
 # The experiment lab is a package inside experiment/.
 
-from shadow_lab.atoms import eval_kld, eval_ppl, make_batch  # noqa: E402
+from shadow_lab.atoms import (  # noqa: E402
+    eval_kld,
+    eval_kld_ids,
+    eval_ppl,
+    eval_ppl_ids,
+    make_batch,
+)
 from shadow_lab.eval import (  # noqa: E402
     GSM8KDataCollator,
     MMLUDataCollator,
@@ -233,6 +239,38 @@ def test_eval_kld_restores_training_mode():
     eval_kld(ref, model, tokenizer, "ignored", chunks=2, chunk_len=8, device="cpu")
     assert ref.training is True
     assert model.training is False
+
+
+# ---------------------------------------------------------------------------
+# lab.atoms.eval_ppl_ids / eval_kld_ids (raw-id streams: parity with the
+# text-level entries — held-out self-distillation pools must not round-trip
+# through decode/re-encode)
+# ---------------------------------------------------------------------------
+
+
+def test_eval_ppl_ids_matches_text_level():
+    model = _tiny_llama_for_eval()
+    ids = list(range(20))
+    tokenizer = _FixedTokenizer(ids)
+    a = eval_ppl(model, tokenizer, "ignored", chunks=2, chunk_len=8, device="cpu")
+    b = eval_ppl_ids(model, ids, chunks=2, chunk_len=8, device="cpu")
+    assert b == pytest.approx(a, rel=1e-10)
+
+
+def test_eval_kld_ids_matches_text_level():
+    ref = _tiny_llama_for_eval(seed=0)
+    model = _tiny_llama_for_eval(seed=1234)
+    ids = list(range(20))
+    tokenizer = _FixedTokenizer(ids)
+    a = eval_kld(ref, model, tokenizer, "ignored", chunks=2, chunk_len=8, device="cpu")
+    b = eval_kld_ids(ref, model, ids, chunks=2, chunk_len=8, device="cpu")
+    assert b == pytest.approx(a, rel=1e-10)
+
+
+def test_eval_ppl_ids_too_short_raises():
+    model = _tiny_llama_for_eval()
+    with pytest.raises(ValueError, match="too short"):
+        eval_ppl_ids(model, list(range(8)), chunks=2, chunk_len=8, device="cpu")
 
 
 # ---------------------------------------------------------------------------
