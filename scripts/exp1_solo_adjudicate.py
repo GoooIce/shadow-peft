@@ -75,7 +75,7 @@ def main() -> None:
             "recovery_axis": rec_axis,
             "recovery_degradation": round(deg, 4),
             "solo_ppl": v["solo_ppl"],
-            "solo_kld": v["solo_kld"],
+            "solo_kld": v.get("solo_kld"),
             "solo_gain_vs_005": round(gain, 4),
             "solo_sample": v.get("solo_sample", "")[:120],
         })
@@ -88,7 +88,7 @@ def main() -> None:
         p = root / f"{prefix}_ref_{name}" / "verdict.json"
         if p.exists():
             r = _load(p)
-            ctx.append({"ckpt": name, "solo_ppl": r["solo_ppl"], "solo_kld": r["solo_kld"]})
+            ctx.append({"ckpt": name, "solo_ppl": r["solo_ppl"], "solo_kld": r.get("solo_kld")})
 
     eligible = [r for r in rows if r["recovery_degradation"] <= REC_MAX_DEGRADATION]
     best = min(eligible, key=lambda r: r["solo_ppl"]) if eligible else None
