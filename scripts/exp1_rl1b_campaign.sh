@@ -60,7 +60,8 @@ case "$PHASE" in
       rm -f "$F"
       $PY -m shadow_lab.teacher_data --model "$MODEL" --chat \
         --prompts-file "$PROMPTS" --out "$F" \
-        --num-seq "$SEQ_PER_CHUNK" --seq-len 512 --seed $((SEEDBASE + i))
+        --num-seq "$SEQ_PER_CHUNK" --seq-len 512 --seed $((SEEDBASE + i)) \
+        --bucket-repeat "${GEN_BUCKET_REPEAT:-1}"
     done
     echo "[rl1b] half $HALF generation complete"
     ;;
