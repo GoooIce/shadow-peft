@@ -39,7 +39,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from shadow_lab import tiers
 from shadow_peft import ShadowPeftModel
 
-MAX_NEW = 128
+MAX_NEW = 1024
 MAX_PROMPT_CHARS = 600
 
 PRESETS = {
@@ -88,6 +88,10 @@ PRESETS = {
              "runs/exp1/n4b-rl-axis2_Q0_30m/verdict.json", "win"),
             ("ptq_30m", "B0_30m 训后换 nvfp4(PTQ-swap)", "runs/exp1/n4b-rl_B0_30m",
              "runs/exp1/n4b-rl-axis2_B0_30m_ptq/verdict.json", ""),
+            ("s_only_10m", "影子单独推理 Q0@10M（仅 345M）", "runs/exp1/grace-rl_Q0",
+             "runs/exp1/grace-rl-axis2_Q0/verdict.json", "solo"),
+            ("s_only_30m", "影子单独推理 Q0@30M（仅 345M）", "runs/exp1/n4b-rl_Q0_30m",
+             "runs/exp1/n4b-rl-axis2_Q0_30m/verdict.json", "solo"),
             ("quant", "4-bit 不修补", None, None, "q"),
         ],
         "axis_note": "留出自蒸馏池(axis2) ppl — wiki 轴在此模型上失真，仅作过程记录",
@@ -114,7 +118,7 @@ button:disabled{background:#475569;cursor:wait}
 .card h3{font-size:13.5px;margin-bottom:2px}
 .card .meta{font-size:12px;color:#94a3b8;margin-bottom:8px}
 .card .out{font-size:13.5px;white-space:pre-wrap;word-break:break-word;color:#f1f5f9}
-.card.bf h3{color:#4ade80}.card.win h3{color:#4ade80}.card.q h3{color:#fbbf24}
+.card.bf h3{color:#4ade80}.card.win h3{color:#4ade80}.card.q h3{color:#fbbf24}.card.solo h3{color:#a78bfa}.card.solo{border-color:#7c3aed}
 .t{color:#64748b;font-size:12px;margin-top:8px}
 .presets{display:flex;gap:8px;flex-wrap:wrap}
 .preset{background:#334155;color:#cbd5e1;border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer}
@@ -124,11 +128,11 @@ details.method ul{padding-left:18px;display:grid;gap:4px;margin-top:6px}
 details.method b{color:#e2e8f0}
 </style></head><body><div class="wrap">
 <h1>__TITLE__</h1>
-<div class="sub">__SUB__ · 逐词生成、无缓存全前缀重算 · 温度 0 为贪心__CHATNOTE__</div>
+<div class="sub">__SUB__ · 逐词生成、无缓存全前缀重算 · 温度 0 为贪心 · 耗时随生成长度超线性增长（1024 词全列约需半小时以上），建议先用 64 词__CHATNOTE__</div>
 <textarea id="prompt">__DEFAULT__</textarea>
 <div class="presets">__PRESETS__</div>
 <div class="row">
-<label>生成长度 <input type="range" id="n" min="16" max="128" value="64" oninput="show('n')"><span class="val" id="nv">64</span></label>
+<label>生成长度 <input type="range" id="n" min="16" max="1024" value="64" oninput="show('n')"><span class="val" id="nv">64</span></label>
 <label>温度 <input type="range" id="t" min="0" max="12" value="0" oninput="show('t')"><span class="val" id="tv">0(贪心)</span></label>
 <label>前 k 采样 <input type="range" id="k" min="0" max="100" value="0" oninput="show('k')"><span class="val" id="kv">0(全词表)</span></label>
 <button id="go" onclick="gen()">生成对比</button>
@@ -195,6 +199,8 @@ def build_page(cfg) -> str:
             meta = f"受损基座 · ppl_quant {any_v.get('ppl_quant', '—')}"
         else:
             meta = _meta(cid, verdict_path)
+            if cid.startswith("s_only"):
+                meta = "shadow_only（卡上 ppl 为双路系统的 axis2 值，仅作参照） · " + meta
         ppls.append(f"{cid} {meta}")
         cards.append(
             f'<div class="card {css}"><h3>{title}</h3><div class="meta">{meta}</div>'
@@ -245,7 +251,15 @@ def build_models(cfg):
         if cid.startswith("ptq"):
             n = shadow_quant.project_linears(shadow_quant.collect_shadow_linears(peft), "nvfp4")
             print(f"PTQ-swap column {cid}: {n} shadow linears projected to nvfp4", flush=True)
-        models[cid] = adapter(peft)
+        if cid.startswith("s_only"):
+            # shadow-only inference: the shadow trunk scores with its frozen
+            # lm_head copy — the base path never runs
+            from shadow_peft import ShadowForCausalLM
+
+            wrapper = ShadowForCausalLM(peft, inference_mode="shadow_only").eval()
+            models[cid] = adapter(wrapper)
+        else:
+            models[cid] = adapter(peft)
     return tok, models
 
 
