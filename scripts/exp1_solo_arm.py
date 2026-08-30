@@ -52,14 +52,27 @@ PROBE_RL = "用一句话解释什么是模型量化"
 WEIGHT_ARMS = {0.3: "S3", 1.0: "S10"}
 
 
+def load_shadow_instance(shadow_path: str, base_model_path: str):
+    """Explicit shadow instance with the embedding table resized to the BASE
+    vocab — the small LFM2.5 checkpoints ship 65,536 rows while the 2.6B
+    token space is 128,000 (same family tokenizer, cropped tables); feeding
+    base ids into the cropped table device-asserts."""
+    from transformers import AutoConfig
+
+    inst = AutoModelForCausalLM.from_pretrained(shadow_path, dtype=torch.bfloat16)
+    target = AutoConfig.from_pretrained(base_model_path).vocab_size
+    current = inst.get_input_embeddings().weight.shape[0]
+    if current < target:
+        print(f"resizing shadow embeddings {current} -> {target} (base vocab)", flush=True)
+        inst.resize_token_embeddings(target)
+    return inst
+
+
 def build_solo(model_path: str, ckpt: str, shadow_path: str | None = None,
                device: str = "cuda") -> ShadowForCausalLM:
     base_q = AutoModelForCausalLM.from_pretrained(model_path, dtype=torch.bfloat16)
     tiers.apply_training_conversion(base_q, "w4a16", torch.device(device), fake_quant=True)
-    shadow_inst = (
-        AutoModelForCausalLM.from_pretrained(shadow_path, dtype=torch.bfloat16)
-        if shadow_path else None
-    )
+    shadow_inst = load_shadow_instance(shadow_path, model_path) if shadow_path else None
     peft = ShadowPeftModel.from_pretrained(base_q.to(device), ckpt,
                                            shadow_model=shadow_inst).eval()
     return ShadowForCausalLM(peft, inference_mode="shadow_only").eval()
@@ -222,10 +235,7 @@ def main() -> None:
 
     print(f"=== 2/4 arm {arm} (ce_kl + shadow-CE x{args.solo_weight}"
           f"{', explicit shadow ' + args.shadow_model if args.shadow_model else ''}) ===", flush=True)
-    shadow_inst = (
-        AutoModelForCausalLM.from_pretrained(args.shadow_model, dtype=torch.bfloat16)
-        if args.shadow_model else None
-    )
+    shadow_inst = load_shadow_instance(args.shadow_model, args.model) if args.shadow_model else None
     cfg = TrainConfig(
         bits=0,
         backbone_tier="w4a16",
@@ -253,10 +263,7 @@ def main() -> None:
     base = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16).to("cuda").eval()
     eval_base = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16)
     tiers.apply_training_conversion(eval_base, "w4a16", torch.device("cuda"), fake_quant=True)
-    reload_shadow = (
-        AutoModelForCausalLM.from_pretrained(args.shadow_model, dtype=torch.bfloat16)
-        if args.shadow_model else None
-    )
+    reload_shadow = load_shadow_instance(args.shadow_model, args.model) if args.shadow_model else None
     student = ShadowPeftModel.from_pretrained(eval_base.to("cuda"), str(out_dir / "train" / "final"),
                                               shadow_model=reload_shadow).eval()
     if is_rl:
