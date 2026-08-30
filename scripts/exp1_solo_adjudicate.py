@@ -51,11 +51,17 @@ def main() -> None:
     solo_ref = _load(root / f"{prefix}_ref_{ref_src}" / "verdict.json")["solo_ppl"]
 
     rows = []
-    for arm, lam in (("S3", 0.3), ("S10", 1.0)):
-        v = _load(root / f"{prefix}_{arm}" / "verdict.json")
+    for arm, lam in (("S3", 0.3), ("S10", 1.0), ("E35", "explicit"), ("E12", "explicit")):
+        p = root / f"{prefix}_{arm}" / "verdict.json"
+        if not p.exists():
+            if arm.startswith("E"):
+                continue  # solo2 explicit-shadow arms are optional rows
+            raise SystemExit(f"missing verdict: {p}")
+        v = _load(p)
         if rl:
-            rec = _load(root / f"solo-rl-axis2_{arm}" / "verdict.json")["ppl_shadow"]
-            rec_axis = "axis2"
+            ax = root / f"solo-rl-axis2_{arm}" / "verdict.json"
+            rec = _load(ax)["ppl_shadow"] if ax.exists() else v["ppl_shadow"]
+            rec_axis = "axis2" if ax.exists() else "wiki"
         else:
             rec = v["ppl_shadow"]
             rec_axis = "wiki"
@@ -64,6 +70,7 @@ def main() -> None:
         rows.append({
             "arm": arm,
             "solo_weight": lam,
+            "shadow_model": v.get("shadow_model"),
             "recovery_ppl": rec,
             "recovery_axis": rec_axis,
             "recovery_degradation": round(deg, 4),

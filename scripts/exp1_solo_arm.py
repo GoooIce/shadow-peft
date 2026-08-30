@@ -52,10 +52,16 @@ PROBE_RL = "用一句话解释什么是模型量化"
 WEIGHT_ARMS = {0.3: "S3", 1.0: "S10"}
 
 
-def build_solo(model_path: str, ckpt: str, device: str = "cuda") -> ShadowForCausalLM:
+def build_solo(model_path: str, ckpt: str, shadow_path: str | None = None,
+               device: str = "cuda") -> ShadowForCausalLM:
     base_q = AutoModelForCausalLM.from_pretrained(model_path, dtype=torch.bfloat16)
     tiers.apply_training_conversion(base_q, "w4a16", torch.device(device), fake_quant=True)
-    peft = ShadowPeftModel.from_pretrained(base_q.to(device), ckpt).eval()
+    shadow_inst = (
+        AutoModelForCausalLM.from_pretrained(shadow_path, dtype=torch.bfloat16)
+        if shadow_path else None
+    )
+    peft = ShadowPeftModel.from_pretrained(base_q.to(device), ckpt,
+                                           shadow_model=shadow_inst).eval()
     return ShadowForCausalLM(peft, inference_mode="shadow_only").eval()
 
 
@@ -88,6 +94,9 @@ def main() -> None:
                       help=f"train mode: shadow-path CE weight (one of {sorted(WEIGHT_ARMS)})")
     mode.add_argument("--ckpt", default=None,
                       help="eval-only mode: existing shadow checkpoint dir")
+    ap.add_argument("--shadow-model", default=None,
+                    help="explicit pretrained shadow model path (e.g. ~/models/LFM2.5-350M-Base); "
+                         "train mode mounts it, eval paths reload checkpoints onto it")
     ap.add_argument("--src-verdict", default=None,
                     help="eval-only: copy recovery fields from this verdict")
     ap.add_argument("--model", default=str(Path.home() / "models" / "LFM2.5-2.6B-Base"))
@@ -95,6 +104,8 @@ def main() -> None:
     ap.add_argument("--heldout", default=None,
                     help="held-out pool for the rl-pass SOLO axis (ids stream)")
     ap.add_argument("--tag", default="", help="'' = base -> solo_{arm}; 'rl' -> solo-rl_{arm}")
+    ap.add_argument("--suffix", default="",
+                    help="train mode: free-form arm name (e.g. E35 for the explicit-shadow arms)")
     ap.add_argument("--out-dir", default=None)
     ap.add_argument("--max-tokens", type=float, default=1e7)
     ap.add_argument("--lr", type=float, default=1e-5)
@@ -116,7 +127,7 @@ def main() -> None:
         arm = f"ref_{src.name}"
         out_dir = Path(args.out_dir or f"runs/exp1/{prefix}_{arm}")
     else:
-        arm = WEIGHT_ARMS[args.solo_weight]
+        arm = args.suffix or WEIGHT_ARMS[args.solo_weight]
         out_dir = Path(args.out_dir or f"runs/exp1/{prefix}_{arm}")
     out_dir.mkdir(parents=True, exist_ok=True)
     tok = AutoTokenizer.from_pretrained(args.model)
@@ -136,7 +147,7 @@ def main() -> None:
 
     def solo_eval(ckpt: str) -> dict:
         print(f"=== shadow_only eval ({ckpt}) ===", flush=True)
-        solo = build_solo(args.model, ckpt)
+        solo = build_solo(args.model, ckpt, shadow_path=args.shadow_model)
         if is_rl:
             ppl = eval_ppl_ids(solo, solo_stream, chunks=AXIS_CHUNKS, device="cuda",
                                context_len=AXIS_CTX)
@@ -209,7 +220,12 @@ def main() -> None:
         del base, quant_copy
         torch.cuda.empty_cache()
 
-    print(f"=== 2/4 arm {arm} (ce_kl + shadow-CE x{args.solo_weight}) ===", flush=True)
+    print(f"=== 2/4 arm {arm} (ce_kl + shadow-CE x{args.solo_weight}"
+          f"{', explicit shadow ' + args.shadow_model if args.shadow_model else ''}) ===", flush=True)
+    shadow_inst = (
+        AutoModelForCausalLM.from_pretrained(args.shadow_model, dtype=torch.bfloat16)
+        if args.shadow_model else None
+    )
     cfg = TrainConfig(
         bits=0,
         backbone_tier="w4a16",
@@ -229,14 +245,20 @@ def main() -> None:
         pad_id=pad_id,
         save_dir=str(out_dir / "train"),
     )
-    report = train_shadow(cfg)
+    report = train_shadow(cfg, shadow_model=shadow_inst)
     ppl_shadow = report.final_ppl_20chunks  # internal axis; rl recovery judged on axis2
+    del shadow_inst
 
     print("=== 3/4 KLD(bf16 || quant+shadow) ===", flush=True)
     base = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16).to("cuda").eval()
     eval_base = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16)
     tiers.apply_training_conversion(eval_base, "w4a16", torch.device("cuda"), fake_quant=True)
-    student = ShadowPeftModel.from_pretrained(eval_base.to("cuda"), str(out_dir / "train" / "final")).eval()
+    reload_shadow = (
+        AutoModelForCausalLM.from_pretrained(args.shadow_model, dtype=torch.bfloat16)
+        if args.shadow_model else None
+    )
+    student = ShadowPeftModel.from_pretrained(eval_base.to("cuda"), str(out_dir / "train" / "final"),
+                                              shadow_model=reload_shadow).eval()
     if is_rl:
         # wiki axis for the process record only; recovery judgment lands in the axis2 re-eval
         axis_text_wiki = despace_wikitext(load_wikitext2_test_text())
@@ -258,6 +280,7 @@ def main() -> None:
         "tier": "w4a16",
         "loss_mode": "ce_kl",
         "solo_weight": args.solo_weight,
+        "shadow_model": args.shadow_model,
         "model": args.model,
         "shadow_layers": 1,
         "shadow_intermediate": 53760,
