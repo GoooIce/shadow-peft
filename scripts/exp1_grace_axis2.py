@@ -62,6 +62,9 @@ def main() -> None:
                     help="full output run prefix (overrides --axis-tag, e.g. n4b-rl-axis2)")
     ap.add_argument("--ptq-arms", default="",
                     help="comma-separated arms to additionally evaluate in PTQ-swap nvfp4 form")
+    ap.add_argument("--shadow-models", default="",
+                    help="comma-separated arm=path entries: explicit shadow models to reload "
+                         "those arms' checkpoints onto (e.g. E35=/root/models/LFM2.5-350M-Base)")
     ap.add_argument("--chunks", type=int, default=AXIS_CHUNKS)
     args = ap.parse_args()
 
@@ -72,6 +75,25 @@ def main() -> None:
     unknown = [a for a in ptq_arms if a not in arms]
     if unknown:
         ap.error(f"--ptq-arms must be a subset of --arms (unknown: {unknown})")
+    shadow_models = {}
+    for entry in args.shadow_models.split(","):
+        if entry.strip():
+            arm, _, path = entry.partition("=")
+            shadow_models[arm.strip()] = path.strip()
+
+    def load_explicit_shadow(arm: str):
+        """Explicit-shadow arms save a trunk whose arch only the source model
+        knows — reload the instance (with base-vocab resize) they were built on."""
+        path = shadow_models.get(arm)
+        if path is None:
+            return None
+        from transformers import AutoConfig
+
+        inst = AutoModelForCausalLM.from_pretrained(path, dtype=torch.bfloat16)
+        target = AutoConfig.from_pretrained(args.model).vocab_size
+        if inst.get_input_embeddings().weight.shape[0] < target:
+            inst.resize_token_embeddings(target)
+        return inst
     runs_root = Path(args.runs_root)
     axis_label = f"held-out self-distilled pool ({Path(args.data).name}), full-row stream, ctx={AXIS_CTX}, chunks={args.chunks}"
 
@@ -119,7 +141,9 @@ def main() -> None:
         print(f"=== {axis_prefix}_{out_arm} ===", flush=True)
         base_q = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16)
         tiers.apply_training_conversion(base_q, "w4a16", torch.device(device), fake_quant=True)
-        student = ShadowPeftModel.from_pretrained(base_q.to(device), str(ckpt)).eval()
+        student = ShadowPeftModel.from_pretrained(
+            base_q.to(device), str(ckpt), shadow_model=load_explicit_shadow(arm)
+        ).eval()
         if ptq_swap:
             from shadow_lab import shadow_quant
 
