@@ -98,6 +98,11 @@ def main() -> None:
     ap.add_argument("--num-seq", type=int, default=10000)
     ap.add_argument("--seq-len", type=int, default=512)
     ap.add_argument("--batch", type=int, default=64)
+    ap.add_argument("--bucket-repeat", type=int, default=1,
+                    help="chat mode: replicate each equal-length prompt bucket this many "
+                         "times — bigger batches without padding (conv hybrids require "
+                         "exactly-equal prompt lengths; sampling temp varies the "
+                         "continuations across replicas)")
     ap.add_argument("--greedy-prefix", type=int, default=4)
     ap.add_argument("--temp", type=float, default=1.0)
     ap.add_argument("--top-k", type=int, default=0, help="0 => full vocab sampling")
@@ -128,6 +133,11 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     buckets = _chat_buckets(tokenizer, args.prompts_file) if args.chat else None
+    if buckets and args.bucket_repeat > 1:
+        for L in buckets:
+            buckets[L] = buckets[L] * args.bucket_repeat
+        print(f"bucket-repeat x{args.bucket_repeat}: top bucket now "
+              f"{max(len(b) for b in buckets.values())} prompts", flush=True)
     lengths = sorted(buckets, key=lambda L: -len(buckets[L])) if buckets else []
     if buckets:
         print(f"chat buckets: {len(buckets)} lengths, top sizes "
