@@ -85,7 +85,8 @@ def main() -> None:
 
     eligible = [r for r in rows if r["recovery_degradation"] <= REC_MAX_DEGRADATION]
     best = min(eligible, key=lambda r: r["solo_ppl"]) if eligible else None
-    if best is not None:
+    meaningful = best is not None and best["solo_gain_vs_005"] >= SOLO_GAIN_MEANINGFUL
+    if meaningful:
         verdict, best_arm = "dual_role_viable", best["arm"]
     elif any(r["solo_gain_vs_005"] >= SOLO_GAIN_MEANINGFUL for r in rows):
         verdict = "solo_at_recovery_cost"
@@ -104,9 +105,11 @@ def main() -> None:
         "verdict": verdict,
         "criteria": {
             "recovery_line": f"recovery degradation <= {REC_MAX_DEGRADATION:.0%} vs the 10M B0 ref",
-            "best": "lowest solo_ppl among eligible arms",
-            "solo_at_recovery_cost": f"solo gain >= {SOLO_GAIN_MEANINGFUL:.0%} but every arm "
-            "degrades recovery beyond the line — trade-off curve delivered",
+            "best": "lowest solo_ppl among eligible arms AND solo gain >= the meaningful line "
+            "(a still-degenerate solo must not read as 'viable')",
+            "solo_meaningful": f"solo ppl improvement over the 0.05 ref >= {SOLO_GAIN_MEANINGFUL:.0%}",
+            "solo_at_recovery_cost": "meaningful solo gain but every arm degrades recovery "
+            "beyond the line — trade-off curve delivered",
             "solo_not_learnable": f"no arm reaches {SOLO_GAIN_MEANINGFUL:.0%} solo gain — "
             "representation/head bottleneck, next entry: unfreeze the shadow head or two-phase",
         },
