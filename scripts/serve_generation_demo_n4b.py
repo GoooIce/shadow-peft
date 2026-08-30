@@ -255,8 +255,11 @@ PAGE_RENDERED = ""
 
 def encode_prompt(prompt: str) -> torch.Tensor:
     if CHAT:
-        ids = TOK.apply_chat_template([{"role": "user", "content": prompt}],
-                                      add_generation_prompt=True)
+        # two-step (string then encode): apply_chat_template's tokenized
+        # return type differs across transformers versions
+        text = TOK.apply_chat_template([{"role": "user", "content": prompt}],
+                                       add_generation_prompt=True, tokenize=False)
+        ids = TOK(text, add_special_tokens=False).input_ids
     else:
         ids = TOK(prompt, add_special_tokens=False).input_ids
         if TOK.bos_token_id is not None:
