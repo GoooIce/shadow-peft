@@ -52,7 +52,7 @@ case "$PHASE" in
       N=$(printf "%02d" "$i")
       F="runs/exp1/teacher_2p6b_rl_chat_1b_${HALF}_${N}.jsonl"
       LINES=$(wc -l < "$F" 2>/dev/null || echo 0)
-      if [ "$LINES" -eq "$SEQ_PER_CHUNK" ]; then
+      if [ "$LINES" -ge "$SEQ_PER_CHUNK" ]; then
         echo "[rl1b] chunk ${HALF}_${N} complete ($LINES seqs) — skip"
         continue
       fi
