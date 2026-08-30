@@ -126,6 +126,11 @@ class TrainConfig:
     cka_weight: float = 1.0
     cka_min_tokens: int = CKA_MIN_TOKENS
     shadow_loss_weight: float = 0.05
+    # Own-head solo (exp1-solo2b): score the shadow-path CE with the explicit
+    # shadow model's OWN pretrained lm_head instead of the base-head copy —
+    # solo then starts at the pretrained model's capability. Shape-clean only
+    # (shadow hidden must equal base hidden; e.g. LFM2.5-1.2B-Base on 2.6B).
+    solo_own_head: bool = False
     shadow_layers: int = 2
     # Width knobs for the implicit shadow trunk (exp1-floor-2 structure sweep;
     # None = derive from base like before). hidden_size itself is NOT a knob —
@@ -368,6 +373,14 @@ def train_shadow(cfg: TrainConfig, shadow_model=None) -> TrainReport:
     want_all_hidden = cfg.loss_mode == "ce_kl_hmse"  # every layer (hidden-MSE)
     want_penult = cfg.loss_mode == "dkd_gate_ib_cka"  # penultimate only (span-CKA)
     use_ib = cfg.loss_mode in ("dkd_gate_ib", "dkd_gate_ib_cka")
+    # Own-head solo: snapshot the explicit shadow's pretrained head BEFORE
+    # mounting strips it (prepare_shadow_model keeps backbone only).
+    own_head_sd = None
+    if cfg.solo_own_head and shadow_model is not None:
+        head = shadow_model.get_output_embeddings()
+        if head is None:
+            raise ValueError("solo_own_head=True but the shadow model has no output head")
+        own_head_sd = {k: v.detach().clone() for k, v in head.state_dict().items()}
     task = ShadowForCausalLM(
         get_shadow_model(base, shadow_cfg, shadow_model=shadow_model),
         shadow_loss_weight=cfg.shadow_loss_weight,
@@ -382,6 +395,17 @@ def train_shadow(cfg: TrainConfig, shadow_model=None) -> TrainReport:
         ),
     )
     task.to(device)
+    if own_head_sd is not None:
+        w = own_head_sd["weight"]
+        if w.shape != task.shadow_lm_head.weight.shape:
+            raise ValueError(
+                f"solo_own_head shape mismatch: the shadow's pretrained head is "
+                f"{tuple(w.shape)} but the wrapper's shadow head is "
+                f"{tuple(task.shadow_lm_head.weight.shape)} — own-head solo needs a "
+                "same-hidden shadow (e.g. LFM2.5-1.2B-Base on the 2.6B base)"
+            )
+        task.shadow_lm_head.load_state_dict(own_head_sd)
+        log("solo head: the explicit shadow's own pretrained lm_head (frozen)")
     task.train()
     if cfg.gradient_checkpointing:
         task.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})

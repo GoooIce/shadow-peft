@@ -68,14 +68,31 @@ def load_shadow_instance(shadow_path: str, base_model_path: str):
     return inst
 
 
+def own_head_state(shadow_path: str, model_path: str) -> dict:
+    """The explicit shadow's pretrained lm_head state (base-vocab resized)."""
+    inst = load_shadow_instance(shadow_path, model_path)
+    head = inst.get_output_embeddings()
+    assert head is not None, "shadow model has no output head"
+    return {k: v.detach().clone() for k, v in head.state_dict().items()}
+
+
 def build_solo(model_path: str, ckpt: str, shadow_path: str | None = None,
-               device: str = "cuda") -> ShadowForCausalLM:
+               own_head: bool = False, device: str = "cuda") -> ShadowForCausalLM:
     base_q = AutoModelForCausalLM.from_pretrained(model_path, dtype=torch.bfloat16)
     tiers.apply_training_conversion(base_q, "w4a16", torch.device(device), fake_quant=True)
     shadow_inst = load_shadow_instance(shadow_path, model_path) if shadow_path else None
+    head_sd = own_head_state(shadow_path, model_path) if own_head else None
     peft = ShadowPeftModel.from_pretrained(base_q.to(device), ckpt,
                                            shadow_model=shadow_inst).eval()
-    return ShadowForCausalLM(peft, inference_mode="shadow_only").eval()
+    wrapper = ShadowForCausalLM(peft, inference_mode="shadow_only").eval()
+    if head_sd is not None:
+        if head_sd["weight"].shape != wrapper.shadow_lm_head.weight.shape:
+            raise ValueError(
+                f"own-head shape mismatch {tuple(head_sd['weight'].shape)} vs "
+                f"{tuple(wrapper.shadow_lm_head.weight.shape)} — same-hidden shadows only"
+            )
+        wrapper.shadow_lm_head.load_state_dict(head_sd)
+    return wrapper
 
 
 def greedy_sample(model: ShadowForCausalLM, tok, prompt: str, chat: bool, n: int) -> str:
@@ -107,6 +124,9 @@ def main() -> None:
                       help=f"train mode: shadow-path CE weight (one of {sorted(WEIGHT_ARMS)})")
     mode.add_argument("--ckpt", default=None,
                       help="eval-only mode: existing shadow checkpoint dir")
+    ap.add_argument("--own-head", action="store_true",
+                    help="score the shadow path with the explicit shadow's OWN pretrained "
+                         "lm_head (same-hidden shadows only, e.g. 1.2B on the 2.6B base)")
     ap.add_argument("--shadow-model", default=None,
                     help="explicit pretrained shadow model path (e.g. ~/models/LFM2.5-350M-Base); "
                          "train mode mounts it, eval paths reload checkpoints onto it")
@@ -160,7 +180,8 @@ def main() -> None:
 
     def solo_eval(ckpt: str) -> dict:
         print(f"=== shadow_only eval ({ckpt}) ===", flush=True)
-        solo = build_solo(args.model, ckpt, shadow_path=args.shadow_model)
+        solo = build_solo(args.model, ckpt, shadow_path=args.shadow_model,
+                          own_head=args.own_head)
         if is_rl:
             ppl = eval_ppl_ids(solo, solo_stream, chunks=AXIS_CHUNKS, device="cuda",
                                context_len=AXIS_CTX)
@@ -241,6 +262,7 @@ def main() -> None:
         backbone_tier="w4a16",
         tier_fake_quant=True,
         loss_mode="ce_kl",
+        solo_own_head=args.own_head,
         model=args.model,
         data=args.data,
         max_tokens=args.max_tokens,
@@ -287,6 +309,7 @@ def main() -> None:
         "tier": "w4a16",
         "loss_mode": "ce_kl",
         "solo_weight": args.solo_weight,
+        "solo_own_head": args.own_head,
         "shadow_model": args.shadow_model,
         "model": args.model,
         "shadow_layers": 1,

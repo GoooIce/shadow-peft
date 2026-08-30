@@ -20,7 +20,7 @@
 #       scripts/exp1_rl1b_campaign.sh > runs/logs/$(date +%m%d)-rl1b-gen-a.log 2>&1 < /dev/null &'
 set -e
 cd "$(dirname "$0")/.."
-PY=.venv/bin/python
+PY="${PY:-.venv/bin/python}"
 
 PHASE="${PHASE:?PHASE required (genhalf|mergepool|ab100|axis2|final1b)}"
 MODEL="${MODEL:-$HOME/models/LFM2.5-2.6B}"
@@ -66,8 +66,12 @@ case "$PHASE" in
     ;;
 
   mergepool)
-    # dc4a owns half a; pull half b from gooo over the direct link
-    rsync -a gooo:Code/shadow-peft/runs/exp1/teacher_2p6b_rl_chat_1b_b_*.jsonl runs/exp1/
+    # GB10 layout: dc4a owns half a, half b is pulled from gooo over the
+    # direct link. Single-box layout (AutoDL): both halves are local — skip
+    # the bridge, and skip the push-back/md5 round trip to gooo entirely.
+    if ! ls runs/exp1/teacher_2p6b_rl_chat_1b_b_00.jsonl >/dev/null 2>&1; then
+      rsync -a gooo:Code/shadow-peft/runs/exp1/teacher_2p6b_rl_chat_1b_b_*.jsonl runs/exp1/
+    fi
     cat $(for i in $(seq 0 $((N_CHUNKS - 1))); do printf "runs/exp1/teacher_2p6b_rl_chat_1b_a_%02d.jsonl " "$i"; done) \
         $(for i in $(seq 0 $((N_CHUNKS - 1))); do printf "runs/exp1/teacher_2p6b_rl_chat_1b_b_%02d.jsonl " "$i"; done) > "$POOL"
     MD5=$(md5sum "$POOL" | cut -d" " -f1)
@@ -76,12 +80,14 @@ case "$PHASE" in
 for line in open('$POOL'): t += len(json.loads(line)['ids'])
 print(t)")
     echo "[rl1b] merged pool: $ROWS rows, $TOKENS tokens, md5 $MD5"
-    rsync -a "$POOL" gooo:Code/shadow-peft/runs/exp1/
+    [ "${RL1B_NO_GBRIDGE:-0}" != "1" ] && rsync -a "$POOL" gooo:Code/shadow-peft/runs/exp1/
     echo "{\"rows\": $ROWS, \"tokens\": $TOKENS, \"md5\": \"$MD5\", \"halves\": {\"a\": \"seed 303xx (dc4a)\", \"b\": \"seed 304xx (gooo)\"}, \"chunks_per_half\": $N_CHUNKS, \"seq_per_chunk\": $SEQ_PER_CHUNK}" > runs/exp1/rl1b_pool_manifest.json
     rsync -a runs/exp1/rl1b_pool_manifest.json gooo:Code/shadow-peft/runs/exp1/
-    goooMD5=$(ssh gooo "md5sum Code/shadow-peft/$POOL" | cut -d" " -f1)
-    [ "$goooMD5" = "$MD5" ] || { echo "[rl1b] md5 MISMATCH on gooo ($goooMD5 vs $MD5)"; exit 1; }
-    echo "[rl1b] pool merged + md5 verified on both machines"
+    if [ "${RL1B_NO_GBRIDGE:-0}" != "1" ]; then
+      goooMD5=$(ssh gooo "md5sum Code/shadow-peft/$POOL" | cut -d" " -f1)
+      [ "$goooMD5" = "$MD5" ] || { echo "[rl1b] md5 MISMATCH on gooo ($goooMD5 vs $MD5)"; exit 1; }
+    fi
+    echo "[rl1b] pool merged (md5 $MD5)"
     ;;
 
   ab100)
