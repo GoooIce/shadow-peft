@@ -94,15 +94,22 @@ def sample(repo, out_name, n):
                 url = f"{API}/{repo}/repo?Revision=master&FilePath={urllib.parse.quote(p)}"
                 print(f"[corpus] {repo}: shard {shard_i} <- {p}")
                 urllib.request.urlretrieve(url, local)
-            tbl = pq.read_table(local, columns=None)
-            col = "text" if "text" in tbl.column_names else tbl.column_names[0]
-            for val in tbl.column(col).to_pylist():
+            tbl = pq.ParquetFile(local)
+            names = tbl.schema_arrow.names
+            col = "text" if "text" in names else names[0]
+            for rg in range(tbl.num_row_groups):
                 if written >= n:
                     break
-                text = val or ""
-                if text.strip():
-                    f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
-                    written += 1
+                # row-group at a time: the 2GB no-GPU boot mode OOM-kills a
+                # whole-file read_table on ~1GB shards
+                chunk = tbl.read_row_group(rg, columns=[col])
+                for text in chunk.column(col).to_pylist():
+                    if written >= n:
+                        break
+                    text = text or ""
+                    if text.strip():
+                        f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
+                        written += 1
             shard_i += 1
     # keep only the sampled jsonl; shards are scratch
     for i in range(shard_i):
