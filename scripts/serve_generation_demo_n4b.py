@@ -152,7 +152,7 @@ async function gen(){
  const b=document.getElementById('go');b.disabled=true;b.textContent='生成中…';
  for(const m of IDS){document.getElementById('t_'+m).textContent='…'}
  try{
-  const r=await fetch('/generate',{method:'POST',headers:{Content-Type:'application/json'},body:JSON.stringify(body)});
+  const r=await fetch('/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const j=await r.json();
   for(const m of IDS){
    document.getElementById('o_'+m).textContent=j[m].text||'(空)';
