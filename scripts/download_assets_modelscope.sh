@@ -58,29 +58,58 @@ case "$STAGE" in
   corpora|all)
     mkdir -p "$CORPUS_DIR"
     python - <<EOF
-# Stream-sample the shadow-pretraining corpora (no 100B download): fixed doc
-# count per language into plain jsonl {"text": ...}, reproducible via seed.
-import json, os
-from modelscope.msdatasets import MsDataset
+# Sample the shadow-pretraining corpora WITHOUT MsDataset (its streaming
+# wrapper breaks against datasets>=4: load_dataset_with_ctx() signature
+# clash). Instead: ModelScope dataset file-tree API -> bounded parquet
+# shard download -> pyarrow local sampling into plain jsonl {"text": ...}.
+import json, os, urllib.parse, urllib.request
+import pyarrow.parquet as pq
 
 DOCS = int("${CORPUS_DOCS}")
 OUT = os.path.expanduser("${CORPUS_DIR}")
+API = "https://modelscope.cn/api/v1/datasets"
 
-def sample(repo, out_name, n, text_key="text"):
+def list_parquet(repo):
+    url = f"{API}/{repo}/repo/tree?Revision=master&Recursive=true"
+    with urllib.request.urlopen(url, timeout=60) as r:
+        files = json.load(r)["Data"]["Files"]
+    paths = sorted(f["Path"] for f in files if f["Path"].endswith(".parquet"))
+    if not paths:
+        raise SystemExit(f"no parquet files listed for {repo}")
+    return paths
+
+def sample(repo, out_name, n):
     path = os.path.join(OUT, out_name)
     if os.path.exists(path) and sum(1 for _ in open(path)) >= n:
         print(f"[corpus] {out_name} already complete — skip")
         return
-    print(f"[corpus] streaming {repo} -> {path} ({n} docs)")
-    ds = MsDataset.load(repo, split="train", streaming=True)
+    written = 0
+    shard_i = 0
     with open(path, "w") as f:
-        for i, row in enumerate(ds):
-            if i >= n:
+        for p in list_parquet(repo):
+            if written >= n:
                 break
-            text = row.get(text_key) or row.get("content") or ""
-            if text.strip():
-                f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
-    print(f"[corpus] wrote {min(i + 1, n)} docs")
+            local = os.path.join(OUT, f"_shard_{repo.replace('/', '_')}_{shard_i}.parquet")
+            if not os.path.exists(local):
+                url = f"{API}/{repo}/repo?Revision=master&FilePath={urllib.parse.quote(p)}"
+                print(f"[corpus] {repo}: shard {shard_i} <- {p}")
+                urllib.request.urlretrieve(url, local)
+            tbl = pq.read_table(local, columns=None)
+            col = "text" if "text" in tbl.column_names else tbl.column_names[0]
+            for val in tbl.column(col).to_pylist():
+                if written >= n:
+                    break
+                text = val or ""
+                if text.strip():
+                    f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
+                    written += 1
+            shard_i += 1
+    # keep only the sampled jsonl; shards are scratch
+    for i in range(shard_i):
+        scratch = os.path.join(OUT, f"_shard_{repo.replace('/', '_')}_{i}.parquet")
+        if os.path.exists(scratch):
+            os.remove(scratch)
+    print(f"[corpus] wrote {written} docs -> {path}")
 
 sample("Datawhale/fineweb-edu-100b-shuffle", "shadow_pretrain_en.jsonl", DOCS)
 if "${SKIP_ZH:-0}" != "1":
