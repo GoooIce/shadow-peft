@@ -60,9 +60,12 @@ def _gradient_report() -> dict:
 
 
 def _evaluation(episode: int, small: bool, large: bool | None) -> dict:
-    hashes = [("initial", "initial", True), ("small", "small", small)]
+    hashes = [
+        ("initial", "initial", 1.0, True),
+        ("small", "small", 1.1 if small else 0.9, small),
+    ]
     if large is not None:
-        hashes.append(("large", "large", large))
+        hashes.append(("large", "large", 1.1 if large else 0.9, large))
     return {
         "episode": {
             "index": episode,
@@ -80,17 +83,22 @@ def _evaluation(episode: int, small: bool, large: bool | None) -> dict:
             {
                 "label": label,
                 "clip_sha256": clip_hash,
+                "reward": reward,
                 **(
                     {"replay_audit": {"exact": True, "matches": {"reward": True}}}
                     if label == "initial"
                     else {}
                 ),
             }
-            for label, clip_hash, _ in hashes
+            for label, clip_hash, reward, _ in hashes
         ],
         "comparisons": [
-            {"label": label, "non_degrading": non_degrading}
-            for label, _, non_degrading in hashes
+            {
+                "label": label,
+                "reward_delta_vs_baseline": reward - 1.0,
+                "non_degrading": non_degrading,
+            }
+            for label, _, reward, non_degrading in hashes
         ],
     }
 
@@ -134,3 +142,36 @@ def test_gate_rejects_an_evaluation_from_different_gradient_sources() -> None:
         assert "source runs" in str(error)
     else:  # pragma: no cover - the assertion gives a clearer failure than pytest alone
         raise AssertionError("mismatched source runs were accepted")
+
+
+def test_gate_recomputes_rewards_and_rejects_stale_comparison_fields() -> None:
+    evaluation = _evaluation(7, small=True, large=False)
+    evaluation["comparisons"][1]["non_degrading"] = False
+
+    try:
+        FINALIZE.summarize_gate(_gradient_report(), evaluation)
+    except ValueError as error:
+        assert "comparison" in str(error)
+    else:  # pragma: no cover - the assertion gives a clearer failure than pytest alone
+        raise AssertionError("stale non-degrading flag was accepted")
+
+    evaluation = _evaluation(7, small=True, large=False)
+    evaluation["comparisons"][1]["reward_delta_vs_baseline"] = -123.0
+    try:
+        FINALIZE.summarize_gate(_gradient_report(), evaluation)
+    except ValueError as error:
+        assert "comparison" in str(error)
+    else:  # pragma: no cover - the assertion gives a clearer failure than pytest alone
+        raise AssertionError("stale reward delta was accepted")
+
+
+def test_frozen_generation_budget_includes_all_replay_audits() -> None:
+    assert FINALIZE.generation_budget(_gradient_report()["protocol"]) == {
+        "gradient_candidates": 720,
+        "gradient_replay_audits": 24,
+        "episode_7_centers": 24,
+        "episode_7_replay_audit": 8,
+        "episode_8_centers": 16,
+        "episode_8_replay_audit": 8,
+        "total": 800,
+    }

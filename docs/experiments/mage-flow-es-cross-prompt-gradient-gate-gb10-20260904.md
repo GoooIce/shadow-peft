@@ -17,6 +17,11 @@ episode 7 同批比较 initial 与两个候选；若两者均不退化选较大�
 该值，若均退化则停止。入选中心必须再在 episode 8 相对 initial 不退化，才可冻结配置。
 所有 initial 评估均做一次逐字段 exact replay；不得在失败后继续缩步长或更换 prompt。
 
+生成预算的完整口径为：三批主候选 720 张、三次梯度首候选 exact replay 24 张、episode 7
+中心与 replay 32 张、episode 8 中心与 replay 24 张，最大合计 800 张。原票据预算段曾只把
+前三批主候选写为“梯度观测 720 张”，遗漏同一冻结启动脚本已启用的 24 张重放；这是
+2026-09-05 提交后规格评审确认的披露偏差，实际运行路径和选择自由度未发生事后变化。
+
 ## 三批梯度观测
 
 三个臂共 90/90 candidates 成功，均包含一次 exact replay，模型权重保持冻结。
@@ -68,6 +73,10 @@ episode 8 再次对 initial 做 exact replay；入选中心未保持非退化：
 最终 `result.json` 为 `status=stopped-confirmation`、`passes=false`、
 `frozen_config=null`。这支持一个更窄的结论：三批平均梯度比 EXP-005 的单批梯度更可能在首个
 未见批次上保持，但仍没有通过连续两批泛化门禁；当前证据不支持启动长期 ES 主实验。
+
+提交后门禁终结器改为从每个 record 的 reward 独立重算 `reward_delta_vs_baseline` 和
+`non_degrading`，并拒绝中间 comparison 字段不一致的输入。用上列原始 GB10 产物复算仍得到
+相同的 `stopped-confirmation` 结论，因此该完整性修复不改变本实验判定。
 
 ## 产物与完整性
 

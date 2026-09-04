@@ -37,6 +37,15 @@ def exact_replay(evaluation: dict) -> bool:
     )
 
 
+def _finite_number(value: object, *, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"center evaluation {field} must be a finite number")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"center evaluation {field} must be a finite number")
+    return result
+
+
 def comparison_for_clip(evaluation: dict, clip_sha256: str) -> dict:
     records = [
         record
@@ -52,7 +61,45 @@ def comparison_for_clip(evaluation: dict, clip_sha256: str) -> dict:
     ]
     if len(comparisons) != 1:
         raise ValueError("center evaluation comparison is missing or ambiguous")
-    return comparisons[0]
+    baseline_reward = _finite_number(
+        evaluation["records"][0].get("reward"), field="baseline reward"
+    )
+    candidate_reward = _finite_number(
+        records[0].get("reward"), field="candidate reward"
+    )
+    reward_delta = candidate_reward - baseline_reward
+    non_degrading = candidate_reward >= baseline_reward
+    reported_delta = _finite_number(
+        comparisons[0].get("reward_delta_vs_baseline"),
+        field="comparison reward delta",
+    )
+    if not math.isclose(reported_delta, reward_delta, rel_tol=0.0, abs_tol=1e-12):
+        raise ValueError("center evaluation comparison reward delta is inconsistent")
+    if comparisons[0].get("non_degrading") is not non_degrading:
+        raise ValueError("center evaluation comparison non-degrading flag is inconsistent")
+    return {
+        **comparisons[0],
+        "reward_delta_vs_baseline": reward_delta,
+        "non_degrading": non_degrading,
+    }
+
+
+def generation_budget(protocol: dict) -> dict[str, int]:
+    """Return the maximum frozen image-generation budget, including replay audits."""
+    episode_size = int(protocol["episode_size"])
+    observation_count = len(protocol["observation_episodes"])
+    population_size = int(protocol["population_size"])
+    candidate_count = len(protocol["alphas"])
+    budget = {
+        "gradient_candidates": observation_count * population_size * episode_size,
+        "gradient_replay_audits": observation_count * episode_size,
+        "episode_7_centers": (1 + candidate_count) * episode_size,
+        "episode_7_replay_audit": episode_size,
+        "episode_8_centers": 2 * episode_size,
+        "episode_8_replay_audit": episode_size,
+    }
+    budget["total"] = sum(budget.values())
+    return budget
 
 
 def _validate_protocol(gradient_report: dict) -> dict:
@@ -176,6 +223,7 @@ def summarize_gate(
     selected = max(passing, key=lambda candidate: candidate["alpha"]) if passing else None
     base = {
         "schema_version": 1,
+        "generation_budget": generation_budget(protocol),
         "gate_passes": selected is not None,
         "selected_candidate": selected,
         "gate": {

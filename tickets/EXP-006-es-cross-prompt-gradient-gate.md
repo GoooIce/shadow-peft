@@ -35,8 +35,10 @@ EXP-005 证明 sigma=0.003 在 32M 维 NVFP4 clip 空间有稳定可测的 antit
 
 ## 预算
 
-- 梯度观测：30 candidates × 3 batches × 8 images = 720 张，4 steps。
-- 中心评估：初始中心带一次 replay，加最多 2 个候选；每批最多 32 张，复核再最多 24 张。
+- 梯度观测：30 candidates × 3 batches × 8 images = 720 张，另有每批首个 candidate
+  的 exact replay 共 3 × 8 = 24 张，合计 744 张，4 steps。
+- 中心评估：episode 7 的 initial、2 个候选及 initial replay 共最多 32 张；episode 8 的
+  initial、入选中心及 initial replay 再最多 24 张。含全部审计的冻结总上限为 800 张。
 - 预计 gooo 单 GB10 约 45–60 分钟，峰值内存沿用 EXP-005 的约 31.2GB。
 
 ## 验收标准
@@ -65,3 +67,8 @@ EXP-005 证明 sigma=0.003 在 32M 维 NVFP4 clip 空间有稳定可测的 antit
 - 2026-09-04：`result.json` 冻结为 `status=stopped-confirmation`、`passes=false`、
   `frozen_config=null`，不启动 EXP-001。远端/本地 38 个文件 SHA-256 全部一致；完整报告见
   `docs/experiments/mage-flow-es-cross-prompt-gradient-gate-gb10-20260904.md`。
+- 2026-09-05：提交后规格评审发现预算段只列了 720 张主候选、漏列启动脚本从运行前即固定
+  启用的三次首候选 exact replay（24 张）。实际执行路径固定为 744 张梯度观测加 56 张中心
+  评测，最大总数 800 张；这是预算披露偏差，不是事后增加生成或选择自由度。门禁终结器现从
+  record reward 重算差值与非退化结论，并拒绝与中间 comparison 字段不一致的报告；原始产物
+  重算后仍为 `stopped-confirmation`。

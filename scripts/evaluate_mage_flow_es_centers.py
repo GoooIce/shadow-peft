@@ -7,26 +7,22 @@ import argparse
 import gc
 import hashlib
 import importlib.metadata
-import io
 import json
 import os
 import platform
 import re
 import socket
-import statistics
 import time
 from pathlib import Path
 
-from shadow_lab.es_quant import ClipGenomeLayout, FrozenLinearWeights, materialize_es_candidate
+from shadow_lab.es_quant import ClipGenomeLayout, FrozenLinearWeights
 from shadow_lab.image_eval import (
     RewardCalibration,
-    RewardInput,
-    aggregate_episode_reward,
     episode_prompt_batch,
     load_frozen_eval_samples,
-    score_reward_batch,
 )
 from shadow_lab.image_reward_models import HPSv21Scorer, OpenCLIPH14Scorer
+from shadow_lab.mage_es_eval import evaluate_clips as evaluate_mage_es_clips
 
 
 def parse_args() -> argparse.Namespace:
@@ -83,12 +79,6 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def sha256_tensor(value) -> str:
-    return hashlib.sha256(
-        value.detach().cpu().contiguous().numpy().tobytes()
-    ).hexdigest()
-
-
 def package_version(name: str) -> str | None:
     try:
         return importlib.metadata.version(name)
@@ -134,27 +124,6 @@ def parse_candidates(values: list[str]) -> list[tuple[str, Path]]:
     return candidates
 
 
-def png_bytes(image) -> bytes:
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    return buffer.getvalue()
-
-
-def generate_inputs(pipeline, samples, args) -> list[RewardInput]:
-    inputs = []
-    for sample in samples:
-        image = pipeline.generate(
-            [sample.prompt],
-            seeds=[sample.seed],
-            heights=[args.height],
-            widths=[args.width],
-            steps=args.steps,
-            cfg=args.cfg,
-        )[0]
-        inputs.append(RewardInput(png_bytes(image), sample))
-    return inputs
-
-
 def evaluate_clips(
     *,
     torch,
@@ -168,56 +137,21 @@ def evaluate_clips(
     calibration,
     args,
 ) -> dict:
-    quantize_started = time.perf_counter()
-    quantization = materialize_es_candidate(
-        transformer,
-        master,
-        layout,
-        clips,
-        device="cuda",
+    return evaluate_mage_es_clips(
+        torch_runtime=torch,
+        clips=clips,
+        transformer=transformer,
+        master=master,
+        layout=layout,
+        pipeline=pipeline,
+        prompt_batch=prompt_batch,
+        scorers=scorers,
+        calibration=calibration,
+        height=args.height,
+        width=args.width,
+        steps=args.steps,
+        cfg=args.cfg,
     )
-    torch.cuda.synchronize()
-    quantize_seconds = time.perf_counter() - quantize_started
-    if quantization["trainable_parameters_after"] != 0:
-        raise RuntimeError("center materialization left trainable weights")
-
-    generate_started = time.perf_counter()
-    reward_inputs = generate_inputs(pipeline, prompt_batch, args)
-    torch.cuda.synchronize()
-    generate_seconds = time.perf_counter() - generate_started
-    score_started = time.perf_counter()
-    scores = score_reward_batch(reward_inputs, scorers)
-    episode = aggregate_episode_reward(scores, calibration)
-    torch.cuda.synchronize()
-    score_seconds = time.perf_counter() - score_started
-    if not episode.valid or episode.value is None:
-        raise RuntimeError(episode.failure_reason)
-    return {
-        "reward": episode.value,
-        "clip_sha256": sha256_tensor(clips),
-        "clip_statistics": {
-            "min": float(clips.min()),
-            "max": float(clips.max()),
-            "mean": float(clips.mean()),
-            "std": float(clips.std()),
-        },
-        "weighted_reconstruction_error": quantization[
-            "weighted_reconstruction_error"
-        ],
-        "quantized_layers": quantization["quantized_layers"],
-        "clip_group_count": quantization["clip_group_count"],
-        "trainable_parameters_after": quantization["trainable_parameters_after"],
-        "axis_means": {
-            axis: statistics.fmean(row["scores"][axis] for row in scores)
-            for axis in ("hps_v2_1", "clip_h14")
-        },
-        "image_sha256": [item.image_sha256 for item in reward_inputs],
-        "timing_seconds": {
-            "quantize": quantize_seconds,
-            "generate": generate_seconds,
-            "score": score_seconds,
-        },
-    }
 
 
 def replay_comparison(first: dict, replay: dict) -> dict:
@@ -522,6 +456,10 @@ def main() -> None:
             "image_reward_models_sha256": sha256_file(
                 Path(__file__).resolve().parents[1]
                 / "src/shadow_lab/image_reward_models.py"
+            ),
+            "mage_es_eval_sha256": sha256_file(
+                Path(__file__).resolve().parents[1]
+                / "src/shadow_lab/mage_es_eval.py"
             ),
             "nvfp4_runtime_sha256": sha256_file(
                 Path(__file__).resolve().parents[1] / "src/shadow_lab/nvfp4_runtime.py"
