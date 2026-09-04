@@ -3,7 +3,7 @@ id: EXP-001
 type: experiment
 status: blocked
 priority: P0
-depends_on: [ENG-005, EXP-005, EXP-006]
+depends_on: [ENG-005, EXP-005, EXP-006, EXP-007]
 hardware: GB10
 phase: 3
 ---
@@ -39,3 +39,5 @@ phase: 3
 
 - 2026-09-04：EXP-006 跨 prompt 梯度门禁在第二个连续未见 batch 失败，未冻结 ES 配置；
   按停止规则本票保持 blocked，不启动 100 代搜索或主实验。
+- 2026-09-05：用户要求以 20× 预算运行 EXP-007；本票新增该依赖，在高功效复核通过前继续
+  blocked。

@@ -211,3 +211,32 @@ def test_load_gradient_sources_enforces_common_noise_and_disjoint_prompts(
             expected_population_size=4,
             expected_episode_size=2,
         )
+
+
+def test_gradient_aggregation_accepts_a_preregistered_larger_batch_count(
+    tmp_path: Path,
+) -> None:
+    sources = [
+        _write_gradient_source(
+            tmp_path / f"episode-{episode}",
+            episode=episode,
+            prompt_ids=[f"p{episode}-a", f"p{episode}-b"],
+            reward_scale=float(episode + 1),
+        )
+        for episode in range(4)
+    ]
+
+    loaded = AGGREGATE.load_gradient_sources(
+        sources,
+        expected_episode_offsets=list(range(4)),
+        expected_population_size=4,
+        expected_episode_size=2,
+    )
+    report, _ = AGGREGATE.aggregate_gradient_sources(
+        loaded,
+        [0.00003, 0.0001],
+    )
+
+    assert report["protocol"]["observation_episodes"] == [0, 1, 2, 3]
+    assert report["protocol"]["gradient_batch_count"] == 4
+    assert len(report["consistency"]["pairwise"]) == 6

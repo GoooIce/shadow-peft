@@ -72,9 +72,11 @@ def load_gradient_sources(
     expected_es_seed: int = 20260906,
     expected_schedule_seed: int = 20260904,
 ) -> list[dict]:
-    if len(source_runs) != 3 or len(expected_episode_offsets) != 3:
-        raise ValueError("cross-prompt aggregation requires exactly three source runs")
-    if len(set(expected_episode_offsets)) != 3 or any(
+    if len(source_runs) < 2 or len(source_runs) != len(expected_episode_offsets):
+        raise ValueError(
+            "cross-prompt aggregation requires matching source runs and episode offsets"
+        )
+    if len(set(expected_episode_offsets)) != len(expected_episode_offsets) or any(
         episode < 0 for episode in expected_episode_offsets
     ):
         raise ValueError("expected episode offsets must be unique and non-negative")
@@ -182,6 +184,7 @@ def load_gradient_sources(
                 "replay_exact": replay_exact,
                 "initial_clips": clips,
                 "config": config,
+                "schedule_seed": expected_schedule_seed,
             }
         )
     return loaded
@@ -283,10 +286,15 @@ def average_gradient_candidates(
 
 
 def aggregate_gradient_sources(
-    sources: list[dict], alphas: list[float]
+    sources: list[dict],
+    alphas: list[float],
+    *,
+    clip_step_rms_max: float = 0.02,
 ) -> tuple[dict, list[tuple[dict, torch.Tensor]]]:
-    if len(sources) != 3:
-        raise ValueError("cross-prompt aggregation requires exactly three loaded sources")
+    if len(sources) < 2:
+        raise ValueError("cross-prompt aggregation requires at least two loaded sources")
+    if not math.isfinite(clip_step_rms_max) or clip_step_rms_max <= 0:
+        raise ValueError("clip-step RMS maximum must be finite and positive")
     labels = [f"episode-{source['episode_index']}" for source in sources]
     gradients = [source["estimate"].vector for source in sources]
     consistency, mean_gradient = gradient_consistency(labels, gradients)
@@ -335,15 +343,19 @@ def aggregate_gradient_sources(
             "observation_episodes": [
                 source["episode_index"] for source in sources
             ],
+            "gradient_batch_count": len(sources),
             "population_size": config.population_size,
             "episode_size": len(sources[0]["prompt_sample_ids"]),
             "sigma": config.sigma,
             "es_seed": config.seed,
-            "schedule_seed": 20260904,
+            "schedule_seed": sources[0]["schedule_seed"],
             "shaping": config.shaping,
-            "aggregation": "elementwise arithmetic mean of three z-score ES gradients",
+            "aggregation": (
+                f"elementwise arithmetic mean of {len(sources)} "
+                "z-score ES gradients"
+            ),
             "alphas": alphas,
-            "clip_step_rms_max": 0.02,
+            "clip_step_rms_max": clip_step_rms_max,
         },
         "initial_clip_sha256": sha256_tensor(sources[0]["initial_clips"]),
         "sources": source_records,
@@ -363,16 +375,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-run", action="append", required=True, type=Path)
     parser.add_argument(
         "--expected-episode-offsets",
-        nargs=3,
+        nargs="+",
         type=int,
         default=(4, 5, 6),
     )
+    parser.add_argument("--expected-population-size", type=int, default=30)
+    parser.add_argument("--expected-episode-size", type=int, default=8)
+    parser.add_argument("--expected-sigma", type=float, default=0.003)
+    parser.add_argument("--expected-es-seed", type=int, default=20260906)
+    parser.add_argument("--expected-schedule-seed", type=int, default=20260904)
     parser.add_argument(
         "--alphas",
         nargs=2,
         type=float,
         default=(0.00003, 0.0001),
     )
+    parser.add_argument("--clip-step-rms-max", type=float, default=0.02)
     parser.add_argument("--centers-dir", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     return parser.parse_args()
@@ -408,8 +426,17 @@ def main() -> None:
     sources = load_gradient_sources(
         args.source_run,
         expected_episode_offsets=list(args.expected_episode_offsets),
+        expected_population_size=args.expected_population_size,
+        expected_episode_size=args.expected_episode_size,
+        expected_sigma=args.expected_sigma,
+        expected_es_seed=args.expected_es_seed,
+        expected_schedule_seed=args.expected_schedule_seed,
     )
-    report, candidates = aggregate_gradient_sources(sources, list(args.alphas))
+    report, candidates = aggregate_gradient_sources(
+        sources,
+        list(args.alphas),
+        clip_step_rms_max=args.clip_step_rms_max,
+    )
 
     centers_dir.mkdir(parents=True)
     state = initialize_es(sources[0]["initial_clips"], sources[0]["config"])
