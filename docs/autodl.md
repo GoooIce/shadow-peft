@@ -93,6 +93,19 @@ curl -X POST https://api.autodl.com/api/v1/dev/instance/pro/power_off \
 - **释放实例不可逆**：`power_off` 数据保留；`release` 端点会清空一切，慎用。
 - 官方文档：[Pro 实例 API](https://www.autodl.com/docs/instance_pro_api/)、[通用 API](https://www.autodl.com/docs/common_api/)、[弹性部署 API（含地区码）](https://www.autodl.com/docs/esd_api_doc/)、[网盘](https://www.autodl.com/docs/netdisk/)、[省钱](https://www.autodl.com/docs/save_money/)。
 
+## 保存镜像（实测 2026-09-01，Pro6000 实例）
+
+- API：`POST /api/v1/dev/instance/pro/image/save`，body `{instance_uuid, image_name}`，返回 `data.image_uuid`；用 `POST /api/v1/dev/instance/pro/image/private/list`（分页）轮询 `status == "finished"`。
+- **前置条件：必须先关机**（运行中调用报「保存实例镜像前，请确保实例是关机状态」）。
+- **硬限制：镜像 >30G 直接拒绝**（「镜像大小超过30G限制」）。镜像打包整个系统盘，大模型/数据池放盘上就存不了——要么瘦身到 30G 内只存环境，要么靠网盘备份替代。124G 盘（含 67G 模型）实测被拒。
+- **网盘 CLI（autopanel）实测补充**：盒内 `/usr/bin/autopanel` 有 up/down/ls/cd 等子命令（`export autopanel=<密码>`），但面板密码是**实例级**的（新实例首次开面板时设置，.env 里的旧密码无效）；CLI 校验失败只报 `invalid password`。绕过方式是走面板 HTTP API（`http://localhost:2022/autopanel/v1/...`，需 `Authorization: sha1("autodl"+密码+"AutoDL")` + `AutodlAutoPanelToken: <jupyter token，/init/jupyter/jupyter_config.py 里>` 双头），端点表可从盒内面板 JS chunk 里 grep（`/netdisk/list`、`/netdisk/upload`、`/auth/import` 等）。本次未走通（用户手动网页上传）。
+
+## Pro6000 实例档案（pro-78807a363319，2026-09-01 关机封存）
+
+- 2×RTX PRO 6000 96G（westd 区），`connect.westd.seetacloud.com:18000` root；密码用 .env token 调 snapshot API 取（Mac 侧 /tmp/autodl_pro6000_pw 会被系统定期清掉，随用随取）。
+- 盘上内容：shadow-peft rl1b 全部产物（B0_1b 完成 + Q0_1b 87.8% 中止、best ckpt 在）、1B 池、LFM2.5 四基模、Apodex-1.1-mini(35B)/1.0-0.8B、FrontierAgent（35B TP2 配置 + MCP 桥接 `plugins/tools/mcp_deepresearch.py` → /root/Code/agent_tools，原配置备份 *.bak-*）、备份硬链目录 /root/autodl-tmp/backup-rl1b-20260901（24G，已由用户上传夸克网盘）。
+- 状态：已关机（不存镜像——超 30G 限制，数据靠网盘备份）。恢复口径：开机 → `cd /root/Code/FrontierAgent && /root/miniconda3/bin/python3 scripts/run-sglang-native.py up`（35B TP2 双卡）→ `.apodex/run-gradio.sh`（6006 gradio，MCP 工具集）。外网映射：6006→`https://u755404-78807a363319.westd.seetacloud.com:8443`，6008→`https://uu755404-...:8443`。注意 60 天不开机会自动释放。
+
 ## 2026-08-24/25 dir1 实战补充（方向① 12B 实验一线经验）
 
 ### 网络与权重下载（最重要的新知识）

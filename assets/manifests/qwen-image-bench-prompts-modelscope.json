@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "source": "ModelScope",
+  "repo_id": "Qwen/Qwen-Image-Bench",
+  "revision": "master",
+  "license": "Apache-2.0",
+  "selected_files": 2,
+  "selected_bytes": 185548517,
+  "rows": 1000,
+  "text_rendering_rows": 198,
+  "checksum_file": "qwen-image-bench-prompts-modelscope.sha256",
+  "verified_on": "2026-09-04",
+  "notes": "Prompt metadata only; 18k generated-image assets and judge outputs outside the JSONL are not downloaded."
+}

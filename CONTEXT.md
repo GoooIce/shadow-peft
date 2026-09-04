@@ -23,9 +23,14 @@
 - **量化清单（Quantization Manifest）** — `quantize_model_*` 返回的字典：`quantized` / `skipped` / `tied` / `trimmed` / `quantization`。
 - **词表裁剪（Vocab Trimming）** — 把 `lm_head` 与嵌入裁剪到分词器实际长度（`trim_vocab_to`），需整词表处理绑定权重。
 - **非对称量化（Asymmetric Quantization）** — backbone 与影子适配器按不同精度部署的形态：backbone 低精度（PTQ），shadow 保持高精度承载任务专属修正。
+- **压缩引擎封装（`shadow_lab.slim`）** — AngelSlim 五压缩器（PTQ+nvfp4 / Distill / QAD / Sparsity / Speculative）的深模块封装层；backbone PTQ 的第二个压缩后端（trainer `backbone_backend="angelslim"`）。取代分两步：第一步并存（torchao tiers 与自家投机解码原型保留），第二步凭 QAD/AngelSpec 对照数据删旧。
+- **校准式量化（calibration-based quantization）** — GPTQ/AWQ：裸基座上跑校准前向、按 Hessian/激活统计求解权重格点，区别于 RTN。GPTQ 族的 `dequant_to_bf16` 把 fake-quant 权重直接留在原 Linear（训练数值，挂影子即可蒸馏）；weight-only 档无联合校准问题，静态激活档（fp8_static/w4a8）在裸基座校准、manifest 标 `joint_calibration=False`。
+- **通用 Llama 同构包装（GenericLlamaLike）** — 未被 AngelSlim 上游注册的 Llama 同构家族（Gemma/LFM2，投影层名与 Llama 一致）经 model_type 前缀解析后由桥接层惰性注册的通用包装。
 - **挽回率（Recovery Rate）** — shadow 对量化损失的挽回比例：(ppl_quant − ppl_quant+shadow) / (ppl_quant − ppl_bf16)。
 - **联合校准（Joint Calibration）** — 激活量化 scale 的校准前向挂上 shadow 联跑；若在无注入分布上校准，注入修正会落在校准范围外被截断。
 - **原生影子量化（Native Shadow Quantization）** — 影子权重在训练期间即处于部署精度格式（nvfp8 / nvfp4 两级缩放格点）的形态：权重全程在格点上，存训一致（部署即所见），无主权重与 STE。
+- **QUASAR 重建（QUASAR Reconstruction）** — 无 shadow 的 NVFP4 量化学生训练：保留 latent 高精度权重，以 AdamW 二阶矩作在线显著性，在每次前向搜索 E2M1 码分配并加权拟合 E4M3 块 scale，再用 STE 更新 latent 权重；它属于 QAD 对照臂，不改变“基座永远冻结”的 shadow 训练语义。
+- **跨 prompt 梯度泛化门禁（cross-prompt gradient generalization gate）** — 在多个互不重叠的训练 prompt 批上分别估计搜索方向，以方向一致性和连续未见批次的中心非退化作为放行条件的实验门禁；通过只表示更新有跨批泛化证据，不表示最终质量改善。
 - **置信度软门（Confidence Soft Gate）** — 蒸馏中按教师预测熵对 token 软降权的门：自信（低熵）token 权重高，不可靠 token 只降权不丢弃（源自 GRACE）。
 - **门控退化判据（Gate Degradation Criterion）** — 软门在自蒸馏设定下的退化监控：批内变异系数 <0.05 或门均值 >0.95 持续 500 步 → verdict 标 `gate_degraded=true`；只标注不回退（负结果时区分「配方无效」与「门控失效」）。
 - **解耦知识蒸馏（DKD）** — 把 KL 蒸馏分解为目标类与非目标类两项、分别加权的蒸馏形式。
@@ -35,6 +40,15 @@
 - **留出判定轴（axis2）** — 留出自蒸馏池上的评测轴（同 prompt 源、不交叠 seed、全行流）：RL/instruct 类模型的默认判定轴——wikitext 类外部语料对后训练模型深度 OOD，会扭曲恢复率原点、掩蔽真实信号（exp1-grace rl 遍实测）。
 - **残差匹配噪声注入（residual-matched noise injection）** — 机制归因臂的噪声协议：每步对影子权重计算量化格点的舍入残差并在块内随机重排，前向/反向在加噪权重上进行、优化器步作用在干净主权重上——统计上匹配原生量化训练的隐式噪声，但不落格点（`shadow_lab.shadow_quant`）。
 - **影子独立生成（shadow-only generation）** — 推理模式 `shadow_only`：仅影子干 + 冻结的基座头副本出词，基座不参与。训练中的影子路 CE（`shadow_loss_weight`，默认 0.05）是其唯一监督来源；该权重即「恢复角色 vs 独立生成角色」的双角色权衡旋钮。
+
+## 分层恢复调度（exp6）
+
+- **贪心逐组层调度（greedy layer-group schedule）** — `train_shadow` 的 `layer_schedule`：`end2end`（现行端到端，逐位不变）之外的新训练形态——按层序把基座适配层切成组，前缀 no_grad 推进、组内带梯度重放，最后以端到端 polish 阶段（`polish_token_frac` 预算）收尾；贪心阶段只用隐态 MSE，KL/CE 只活在 polish。
+- **捕获-重放（capture-and-replay）** — `shadow_lab.layerwise` 的层驱动接缝：一次 no_grad 前向用 hooks 记录每个包装层的调用帧（注意力掩码/位置编码原样）与层边界状态 `(基座隐态 h, 影子态 s)`；组训练只重放组内的层。按模型族的掩码数学零重实现，重放与模型自身前向逐位一致（`replay_parity` 预检门，GB10 实测 max_abs_diff=0）。
+- **影子链重算（shadow-chain recompute）** — 利用 `ShadowUpdate` 只吃基座隐态的代数（`s' = s + g(h)·(T(h)−s)`），从缓存 h 轨迹带梯度重建前缀影子链，让梯度回传到前缀 update 模块。
+- **局部梯度盲区（local gradient blind spot）** — 对齐第 k 层教师隐态的局部损失给不了 `update[k]` 梯度（它在第 k 层之后执行、只喂第 k+1 层的注入）；组末层的 update 永远留给 polish 阶段，`tests/lab/test_layerwise.py` 把该事实钉成受保护断言。
+- **注入零初始化（injection ZeroInit）** — `injection_ups` 初始为全零：挂载即恒等映射；首个 optimizer step 之前，注入输出上游的一切梯度（downs、影子态、重算链）精确为零，第一步只训 ups。
+- **逐层归因（per-layer attribution）** — 新测量轴：训练前后各拍一次每层归一化隐态 MSE（学生 vs 教师），回答「恢复发生在哪些层」；落在 `TrainReport.layer_attribution` / verdict。
 
 ## 推理挽具（harness）
 

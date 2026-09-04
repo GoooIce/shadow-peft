@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-09-04T16:50:00+08:00",
+  "source": "ModelScope",
+  "repo_type": "dataset",
+  "repo_id": "Lakonik/t2i-prompts-hpsv2",
+  "revision_requested": "master",
+  "head_short_revision_observed": "9729f819",
+  "modelscope_last_modified": "2025-11-11T10:18:55Z",
+  "license_tag": "Apache License 2.0",
+  "visibility": "public",
+  "files": 4,
+  "examples": 3200,
+  "schema": {
+    "prompt": "string"
+  },
+  "local_layout": "${CORPUS_DIR:-$HOME/data}/t2i-prompts-hpsv2",
+  "checksum_inventory": "assets/manifests/t2i-prompts-hpsv2-modelscope.sha256",
+  "notes": [
+    "This is a third-party ModelScope mirror of the HPS-v2 text-to-image prompt set, not an official HPS project repository.",
+    "The mutable master branch is accepted only with the complete SHA-256 inventory as the immutable snapshot identity.",
+    "Prompt split assignment is intentionally deferred to ENG-003 so the one-shot human test set is not exposed during baseline setup."
+  ]
+}

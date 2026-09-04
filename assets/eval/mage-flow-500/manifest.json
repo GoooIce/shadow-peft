@@ -1,0 +1,75 @@
+{
+  "candidates": {
+    "path": "candidates.jsonl",
+    "rows": 751,
+    "sha256": "83fee502591fcb45c613cba3a7fc30c9717ee6b2da466f5680c671039de098a1"
+  },
+  "inputs": {
+    "content_gate_accepted": {
+      "passed_rows": 747,
+      "path": "/home/goooice/runs/mage-flow/prompt-filter-eval-candidates-751-20260904/accepted.jsonl",
+      "sha256": "b6c8af4a713c3c60994a8894e70af98ab3a8c56dd05da9ef4a578f6de46e365a"
+    },
+    "content_gate_run": {
+      "accepted": 747,
+      "path": "/home/goooice/runs/mage-flow/prompt-filter-eval-candidates-751-20260904/run.json",
+      "rejected": 4,
+      "screened": 751,
+      "sha256": "c2905326f73578d57fb23f78bb17cfd97c491547471bc0818cb9499760aad229"
+    },
+    "geneval": {
+      "path": "/home/goooice/Code/geneval/prompts/evaluation_metadata.jsonl",
+      "revision": "modelscope:JunweiXi/EvalGEN@master;spec:github:djghosh13/geneval@af4902f24d3ca90ebbb446dd9891a59e0f82725f",
+      "sha256": "5c48e0813e812e3c373fa5c8ed07a8f0a483be30272b4427b0559c8048e67c13"
+    },
+    "text_rendering": {
+      "path": "/home/goooice/data/qwen-image-bench/qwen_image_bench_hf_v0518.jsonl",
+      "revision": "modelscope:Qwen/Qwen-Image-Bench@master",
+      "sha256": "3def4dbb901bc75a13b755864e288a6e8f9a50010c1310129f57a7a84f44c005"
+    }
+  },
+  "policy": {
+    "geneval_role": "checkpoint/test diagnostic; never an episode hard-zero gate",
+    "human_test": "one-time holdout; never expose during ES or annotation-app development",
+    "paired_seed": "each sample seed is immutable and shared by every candidate",
+    "primary_reward_axes": [
+      "hps_v2_1",
+      "clip_h14"
+    ]
+  },
+  "pool": {
+    "path": "pool.jsonl",
+    "rows": 500,
+    "sha256": "13620c7317447ff5e2e279fd20a69d20871e1a2d98f30f7419b8c63d0f707e29"
+  },
+  "sample_seed_base": 7300000,
+  "schema_version": 1,
+  "selection_seed": 20260904,
+  "splits": {
+    "auto_test": {
+      "path": "auto_test.jsonl",
+      "rows": 60,
+      "sha256": "d1273fe63ce9eb8269492313142364edbb40d3cc689a15fadf36345e47e6d428"
+    },
+    "checkpoint_val": {
+      "path": "checkpoint_val.jsonl",
+      "rows": 60,
+      "sha256": "2e4e83889228810208dbeedb5c948e924866dc5f91fb2f6f6aff9dbeb4300a64"
+    },
+    "es_train": {
+      "path": "es_train.jsonl",
+      "rows": 320,
+      "sha256": "9afe837225f309912afb1f828f26ac349a7ba68482f647faae6f88f786853bf3"
+    },
+    "human_dev": {
+      "path": "human_dev.jsonl",
+      "rows": 30,
+      "sha256": "dc5d748a269f60a022de27f0d7ba3940036fe86247799f00ead6b06b097d0f24"
+    },
+    "human_test": {
+      "path": "human_test.jsonl",
+      "rows": 30,
+      "sha256": "17e77b2376c3bf8753016fc3291a7fd95aefa9ff3456feef2be3c888c5b618c9"
+    }
+  }
+}

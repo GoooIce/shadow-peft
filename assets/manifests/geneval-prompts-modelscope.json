@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "source": "ModelScope",
+  "repo_id": "JunweiXi/EvalGEN",
+  "revision": "master",
+  "license": "Apache-2.0",
+  "archive": "EvalGEN.zip",
+  "archive_bytes": 14538198340,
+  "modelscope_lfs_object_sha256": "86a03f3f167a7a34552644c306267f0148774e10ced45925b3d9860324e682dd",
+  "official_spec": {
+    "repo": "djghosh13/geneval",
+    "commit": "af4902f24d3ca90ebbb446dd9891a59e0f82725f",
+    "path": "prompts/evaluation_metadata.jsonl",
+    "sha256": "5c48e0813e812e3c373fa5c8ed07a8f0a483be30272b4427b0559c8048e67c13",
+    "rows": 553
+  },
+  "verification": {
+    "method": "HTTP-range ZIP central-directory scan; prompt slug matched to official metadata",
+    "modelscope_unique_prompt_slugs": 553,
+    "official_prompts_matched": 553,
+    "missing": 0
+  },
+  "verified_on": "2026-09-04",
+  "notes": "The 14.5 GB archive is not downloaded wholesale; HTTP range requests prove all official prompt identities are present, while the pinned official JSONL supplies structured GenEval annotations."
+}

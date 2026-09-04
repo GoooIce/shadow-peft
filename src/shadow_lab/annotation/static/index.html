@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Shadow Blind Review</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main>
+      <section id="login" class="login-card">
+        <p class="eyebrow">LOCAL · BLIND · AUDITABLE</p>
+        <h1>图像质量盲测</h1>
+        <p>输入负责人发给你的本地访问令牌。令牌只保留在当前标签页。</p>
+        <label>访问令牌<input id="token" type="password" autocomplete="off"></label>
+        <button id="login-button" class="primary">开始标注</button>
+        <p id="login-error" class="error" role="alert"></p>
+      </section>
+
+      <section id="workspace" hidden>
+        <header>
+          <div>
+            <p id="mode-label" class="eyebrow">SHADOW BLIND REVIEW</p>
+            <strong id="annotator-name"></strong>
+          </div>
+          <div class="status-cluster">
+            <span id="progress">0 / 0</span>
+            <span id="save-state" class="saved">● 已保存</span>
+            <button id="help-button" class="quiet">H 指南</button>
+          </div>
+        </header>
+
+        <article id="task" hidden>
+          <div class="prompt-block">
+            <span id="workspace-title">图像质量盲测</span>
+            <p id="prompt"></p>
+            <small id="review-reason" class="review-reason" hidden></small>
+          </div>
+          <div class="image-grid">
+            <button class="image-card" data-side="left" aria-label="查看左图原图">
+              <span>LEFT</span><img id="left-image" alt="左侧候选图">
+            </button>
+            <button class="image-card" data-side="right" aria-label="查看右图原图">
+              <span>RIGHT</span><img id="right-image" alt="右侧候选图">
+            </button>
+          </div>
+          <div class="zoom-row">
+            <label>同步缩放 <input id="zoom" type="range" min="100" max="220" value="100"></label>
+          </div>
+          <div class="decision-row" role="group" aria-label="选择偏好">
+            <button data-decision="left"><kbd>1</kbd> 左胜</button>
+            <button data-decision="tie"><kbd>2</kbd> 平局</button>
+            <button data-decision="right"><kbd>3</kbd> 右胜</button>
+            <button data-decision="skip"><kbd>0</kbd> 跳过</button>
+          </div>
+          <fieldset id="reasons">
+            <legend>可选原因</legend>
+            <label><input type="checkbox" value="prompt_following">提示遵循</label>
+            <label><input type="checkbox" value="visual_quality">视觉质量</label>
+            <label><input type="checkbox" value="artifact_or_structure">伪影 / 结构</label>
+            <label id="text-reason"><input type="checkbox" value="text_accuracy">文字正确性</label>
+          </fieldset>
+          <div class="action-row">
+            <button id="undo" class="quiet">⌫ 撤销上一题</button>
+            <button id="submit" class="primary" disabled>Enter 确认并下一题</button>
+          </div>
+          <p id="task-error" class="error" role="alert"></p>
+        </article>
+        <section id="complete" class="complete-card" hidden>
+          <p class="eyebrow">QUEUE COMPLETE</p>
+          <h2>当前分配已完成</h2>
+          <p>所有确认过的答案均已写入本地审计日志。</p>
+        </section>
+      </section>
+    </main>
+
+    <dialog id="help-dialog">
+      <button id="help-close" class="dialog-close">关闭</button>
+      <h2>一页标注指南</h2>
+      <ol>
+        <li>判断哪张图更符合 prompt，同时兼顾整体视觉质量。</li>
+        <li>没有可靠差异时选“平局”；图片损坏或无法判断时选“跳过”。</li>
+        <li>先按 1/2/3/0 选择，再按 Enter 确认。Backspace 可撤销上一题。</li>
+        <li>不要猜测模型身份；页面已隐藏模型、文件名和实验臂。</li>
+        <li>复核模式仅出现于答案冻结后；裁决仍保持盲态，完成后才允许去盲。</li>
+      </ol>
+    </dialog>
+    <dialog id="image-dialog" class="image-dialog">
+      <button id="image-close" class="dialog-close">关闭</button>
+      <img id="large-image" alt="候选图原图预览">
+    </dialog>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

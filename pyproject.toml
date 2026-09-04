@@ -21,6 +21,11 @@ quant = [
   # Backbone PTQ tiers (w8a8_fp8 / w4a16) for shadow_lab.
   "torchao>=0.18,<0.19",
 ]
+angelslim = [
+  # Compression-engine bridge (shadow_lab.slim): calibration-based backbone
+  # PTQ (GPTQ/AWQ/nvfp4), QAD/Distill arms, sparsity, AngelSpec drafters.
+  "angelslim>=0.5.0",
+]
 experiment = [
   # shadow_lab training & eval stack.
   "datasets>=2.19",
@@ -29,6 +34,9 @@ experiment = [
 
 [project.urls]
 Repository = "https://github.com/ShadowLLM/shadow-peft"
+
+[project.scripts]
+shadow-annotate = "shadow_lab.annotation.cli:main"
 
 [dependency-groups]
 dev = [

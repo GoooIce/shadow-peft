@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "source": "ModelScope",
+  "repo_id": "facebook/mask2former-swin-small-coco-instance",
+  "revision": "master",
+  "license": "other",
+  "selected_files": 5,
+  "selected_bytes": 275617578,
+  "checkpoint": "model.safetensors",
+  "checksum_file": "mask2former-coco-modelscope.sha256",
+  "verified_on": "2026-09-04",
+  "notes": "Transformers-compatible COCO instance-segmentation backend for the GB10 GenEval port. ModelScope exposes a mutable master and the upstream model card declares license 'other'; the SHA-256 inventory is the immutable identity, and redistribution requires a separate license review. This is not the legacy MMDetection checkpoint used by the original GenEval environment."
+}

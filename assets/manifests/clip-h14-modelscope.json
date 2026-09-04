@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "source": "ModelScope",
+  "repo_id": "laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+  "revision": "master",
+  "license": "MIT",
+  "selected_files": 10,
+  "selected_bytes": 3948144003,
+  "checkpoint": "open_clip_model.safetensors",
+  "checksum_file": "clip-h14-modelscope.sha256",
+  "verified_on": "2026-09-04",
+  "notes": "Only the OpenCLIP checkpoint and tokenizer/config assets are selected; duplicate PyTorch/HF weight copies in the 15.78 GB repository are intentionally excluded."
+}

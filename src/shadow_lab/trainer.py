@@ -50,8 +50,19 @@ from .grace import (
     gated_dkd_loss,
     span_cka_loss,
 )
+from .layerwise import (
+    _wrapped_layers,
+    capture_frames,
+    group_forward_loss,
+    layer_groups,
+    layer_mse_table,
+)
 
 LOSS_MODES = ("ce", "ce_kl", "ce_kl_hmse", "dkd_gate", "dkd_gate_ib", "dkd_gate_ib_cka")
+
+# Backbone compression backends: torchao (shadow_lab.tiers, legacy) or
+# AngelSlim (shadow_lab.slim, calibration-based).
+BACKENDS = ("torchao", "angelslim")
 # GRACE loss ladder (exp1-grace): the trainer owns these distill terms — the
 # task wrapper only contributes CE + shadow-CE (wrapper distill weight is 0).
 GRACE_MODES = ("dkd_gate", "dkd_gate_ib", "dkd_gate_ib_cka")
@@ -80,9 +91,12 @@ _PROFILES: dict[int, BitProfile] = {
 class TrainConfig:
     bits: int = 1
     # Backbone tier seam (direction ①): "bits" = the E1/E2 shadow-side packed
-    # path driven by `bits`; otherwise a torchao tier {bf16, w8a8_fp8, w4a16}
-    # applied to the backbone (requires bits=0, never trims the vocab).
+    # path driven by `bits`; otherwise a backbone tier interpreted by
+    # `backbone_backend` — torchao {bf16, w8a8_fp8, w4a16} (legacy, slated for
+    # deletion in replacement step 2) or AngelSlim {ANGELSLIM_TIERS}
+    # (calibration-based; requires bits=0, never trims the vocab).
     backbone_tier: str = "bits"
+    backbone_backend: str = "torchao"
     # Train against the tier's fake-quant numerics (real kernels have no
     # autograd); eval still measures both paths.
     tier_fake_quant: bool = False
@@ -167,27 +181,79 @@ class TrainConfig:
     # Activation-memory relief for 12B-class distillation (frozen base with
     # shadow grads flowing through); non-reentrant so no-grad inputs are fine.
     gradient_checkpointing: bool = False
+    # Greedy layer schedule (exp6: docs/exp6-layer-group-recovery.md):
+    # "end2end" = the unchanged joint loop; "per_layer" / "groups" prepend a
+    # greedy hidden-MSE phase over layer groups (no-grad cached prefix, the
+    # group's layers replayed with grad) and keep the joint loop as the polish
+    # phase for the remaining polish_token_frac of the budget.
+    layer_schedule: str = "end2end"
+    group_size: int = 4
+    polish_token_frac: float = 0.3
+    # Recompute the prefix shadow chain under grad inside each greedy step so
+    # the ShadowUpdate modules receive gradients during the greedy phase (the
+    # local blind-spot mitigation); False leaves them to the polish phase.
+    layerwise_recompute_chain: bool = True
     seed: int = 0
     save_dir: str | None = None  # None -> experiment/runs/{tag}_{loss_mode}
     device: str | None = None  # None -> pick_device()
     pad_id: int = QWEN3_ENDOFTEXT_ID
 
     def __post_init__(self):
+        if self.backbone_backend not in BACKENDS:
+            raise ValueError(
+                f"unsupported backbone_backend={self.backbone_backend!r} (expected one of {BACKENDS})"
+            )
         if self.backbone_tier == "bits":
             if self.bits not in _PROFILES:
                 raise ValueError(f"unsupported bits={self.bits} (expected one of {sorted(_PROFILES)})")
         else:
             if self.bits != 0:
                 raise ValueError(
-                    "torchao backbone tiers require bits=0 "
+                    "backbone tiers require bits=0 "
                     "(the shadow-side packed path driven by bits>0 is the E1/E2 protocol)"
                 )
-            if self.backbone_tier not in tiers.TIERS:
-                raise ValueError(
-                    f"unsupported backbone_tier={self.backbone_tier!r} (expected 'bits' or one of {tiers.TIERS})"
-                )
+            if self.backbone_backend == "torchao":
+                if self.backbone_tier not in tiers.TIERS:
+                    raise ValueError(
+                        f"unsupported backbone_tier={self.backbone_tier!r} for backend 'torchao' "
+                        f"(expected 'bits' or one of {tiers.TIERS})"
+                    )
+            else:
+                from .slim import ANGELSLIM_TIERS, FAKE_QUANT_TIERS
+
+                if self.backbone_tier not in ANGELSLIM_TIERS:
+                    raise ValueError(
+                        f"unsupported backbone_tier={self.backbone_tier!r} for backend 'angelslim' "
+                        f"(expected 'bits' or one of {ANGELSLIM_TIERS})"
+                    )
+                if self.tier_fake_quant and self.backbone_tier not in FAKE_QUANT_TIERS:
+                    raise ValueError(
+                        f"tier_fake_quant requires one of {FAKE_QUANT_TIERS} "
+                        f"(dequant_to_bf16 is a GPTQ-family knob; got {self.backbone_tier!r})"
+                    )
         if self.loss_mode not in LOSS_MODES:
             raise ValueError(f"unsupported loss_mode={self.loss_mode!r} (expected one of {LOSS_MODES})")
+        if self.layer_schedule not in ("end2end", "per_layer", "groups"):
+            raise ValueError(
+                f"unsupported layer_schedule={self.layer_schedule!r} "
+                "(expected 'end2end', 'per_layer' or 'groups')"
+            )
+        if self.layer_schedule != "end2end":
+            if not 0.0 <= self.polish_token_frac < 1.0:
+                raise ValueError(
+                    f"polish_token_frac must be in [0, 1), got {self.polish_token_frac}"
+                )
+            if self.group_size < 1:
+                raise ValueError(f"group_size must be >= 1, got {self.group_size}")
+            if self.gradient_checkpointing:
+                raise ValueError(
+                    "gradient_checkpointing is an end2end-loop relief; the greedy "
+                    "layer schedule does not need it (and would bypass it)"
+                )
+            if self.shadow_noise is not None:
+                raise ValueError(
+                    "shadow_noise has no greedy-phase protocol; run it end2end"
+                )
         if self.shadow_noise is not None:
             from .shadow_quant import FORMATS
 
@@ -225,6 +291,11 @@ class TrainReport:
     trainable_params: int
     wall_time_s: float
     save_dir: str
+    # exp6 layer-schedule axes (0.0 / None when the schedule is end2end):
+    # peak CUDA training memory and per-phase wall-clock split.
+    peak_mem_gb: float = 0.0
+    phase_seconds: dict | None = None
+    layer_attribution: dict | None = None
     # GRACE modes only: gate/IB monitoring summary for the arm verdict
     # (gate_degraded, final gate stats, beta trajectory bounds). None for
     # the legacy three modes — verdict fields stay isomorphic to the floor
@@ -244,16 +315,28 @@ def _summary_args_dump(cfg: TrainConfig) -> dict:
     return {k: _json_safe(v) for k, v in asdict(cfg).items()}
 
 
-def _quantize_base(base, cfg: TrainConfig, student_vocab: int | None) -> dict:
-    """The backbone seam: torchao tiers (direction ①) or the E1/E2 packed path.
+def _quantize_base(base, cfg: TrainConfig, tokenizer, calib_batches) -> dict:
+    """The backbone seam: a tiered backend (torchao legacy / AngelSlim) or the
+    E1/E2 packed path.
 
-    ``student_vocab`` is kept for signature compatibility but vocab trimming is
-    disabled: on LFM ``len(tokenizer)`` (64,400) < embed rows (65,536), and
-    teacher-sampled ids cover the full softmax — trimming the tail rows makes
-    training batches assert in ``F.embedding``. The ~2% embedding saving is
-    not worth a silently wrong student support.
+    The AngelSlim backend consumes ``calib_batches`` at conversion time (the
+    GPTQ solve runs before shadow mounting, iron rule 1); the torchao
+    backend ignores them. Vocab trimming stays disabled on LFM
+    (``len(tokenizer)`` (64,400) < embed rows (65,536), and teacher-sampled
+    ids cover the full softmax — trimming the tail rows makes training
+    batches assert in ``F.embedding``).
     """
     if cfg.bits == 0:
+        if cfg.backbone_backend == "angelslim":
+            from .slim import convert_backbone
+
+            return convert_backbone(
+                base,
+                tokenizer,
+                cfg.backbone_tier,
+                calib_batches,
+                fake_quant=cfg.tier_fake_quant,
+            )
         device = next(base.parameters()).device
         return tiers.apply_training_conversion(
             base, cfg.backbone_tier, device, fake_quant=cfg.tier_fake_quant
@@ -344,14 +427,33 @@ def train_shadow(cfg: TrainConfig, shadow_model=None) -> TrainReport:
     torch.manual_seed(cfg.seed)
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.model)
-    student_vocab = len(tokenizer)  # pre-quantization width (trim input only)
+
+    # Teacher sequences load once, before the student build: the AngelSlim
+    # backend consumes calibration batches at conversion time (the GPTQ
+    # weight-grid solve runs on the bare base, before the shadow mounts).
+    seqs = load_teacher_data(cfg.data)
+    log(f"teacher sequences: {len(seqs)}")
+    calib_batches = None
+    if cfg.backbone_backend == "angelslim":
+        # Rank-independent RNG: the GPTQ grid depends on the calibration
+        # draws, so every DDP rank must convert an identical student (the
+        # rank-sharded `rng` above is for training batches only).
+        calib_rng = random.Random(cfg.seed)
+        n_calib = cfg.calib_steps if cfg.calib_steps > 0 else 8
+        calib_batches = [
+            make_batch(seqs, calib_rng, cfg.batch_seq, cfg.seq_len, device, pad_id=cfg.pad_id)
+            for _ in range(n_calib)
+        ]
 
     # --- student: quantized base + shadow ---
     base = AutoModelForCausalLM.from_pretrained(cfg.model, dtype=dtype).to(device)
-    manifest = _quantize_base(base, cfg, student_vocab)
+    manifest = _quantize_base(base, cfg, tokenizer, calib_batches)
     student_vocab = base.get_output_embeddings().weight.shape[0]  # true student width
     if cfg.bits == 0:
-        log(f"backbone tier={cfg.backbone_tier} format={manifest.get('format')}")
+        log(
+            f"backbone backend={cfg.backbone_backend} tier={cfg.backbone_tier} "
+            f"format={manifest.get('format')}"
+        )
     else:
         log(f"quantized={len(manifest['quantized'])} trimmed={manifest['trimmed']}")
     base.eval()
@@ -475,9 +577,7 @@ def train_shadow(cfg: TrainConfig, shadow_model=None) -> TrainReport:
                 ema_decay=cfg.ib_ema_decay,
             )
 
-    # --- data & eval text ---
-    seqs = load_teacher_data(cfg.data)
-    log(f"teacher sequences: {len(seqs)}")
+    # --- data & eval text --- (teacher sequences loaded before the student build)
     eval_text = load_wikitext2_test_text()
     eval_text = despace_wikitext(eval_text)
 
@@ -505,6 +605,142 @@ def train_shadow(cfg: TrainConfig, shadow_model=None) -> TrainReport:
     best_ppl = ppl
     last_good_state = {k: v.detach().clone() for k, v in task.state_dict().items() if v.requires_grad}
     t0 = time.time()
+
+    # Peak-memory axis is measured across BOTH schedules from the same point
+    # (after setup/eval, before the first training step) so the exp6 verdict
+    # compares like with like.
+    if str(device).startswith("cuda"):
+        torch.cuda.reset_peak_memory_stats()
+
+    layerwise = cfg.layer_schedule != "end2end"
+    phase_seconds: dict = {}
+    attribution: dict | None = None
+    if layerwise:
+        n_base_layers = len(_wrapped_layers(task.peft_model))
+        groups = layer_groups(n_base_layers, cfg.layer_schedule, cfg.group_size)
+        greedy_budget = int(cfg.max_tokens * (1.0 - cfg.polish_token_frac))
+        group_budget = greedy_budget // len(groups)
+        log(
+            f"layer schedule {cfg.layer_schedule}: groups={groups} "
+            f"greedy_tokens<={greedy_budget} (per group {group_budget}) "
+            f"polish_frac={cfg.polish_token_frac} "
+            f"recompute_chain={cfg.layerwise_recompute_chain}"
+        )
+
+        # Attribution axis: per-layer normalized MSE vs teacher, at init and
+        # after training — where the recovery actually happened. Its own rng so
+        # the draws never perturb the training-batch sequence.
+        attr_rng = random.Random(123)
+
+        @torch.no_grad()
+        def snapshot_attribution() -> list[float]:
+            b = make_batch(seqs, attr_rng, cfg.batch_seq, cfg.seq_len, device, pad_id=cfg.pad_id)
+            t_out = teacher(
+                input_ids=b["input_ids"], attention_mask=b["attention_mask"],
+                use_cache=False, output_hidden_states=True,
+            )
+            s_out = task(
+                input_ids=b["input_ids"], attention_mask=b["attention_mask"],
+                use_cache=False, output_hidden_states=True,
+            )
+            return layer_mse_table(s_out.hidden_states, t_out.hidden_states, b["labels"])
+
+        attribution = {"init": snapshot_attribution(), "final": None}
+
+        greedy_step = 0
+        greedy_seen = 0
+        t_phase = time.time()
+        for a, b in groups:
+            group_tokens = 0
+            while group_tokens < group_budget:
+                greedy_step += 1
+                batch = make_batch(seqs, rng, local_batch, cfg.seq_len, device, pad_id=cfg.pad_id)
+                group_tokens += local_batch * cfg.seq_len * world
+                greedy_seen += local_batch * cfg.seq_len * world
+                with torch.no_grad():
+                    cap = capture_frames(
+                        task.peft_model,
+                        input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                    )
+                    t_out = teacher(
+                        input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                        use_cache=False,
+                        output_hidden_states=True,
+                    )
+                loss = group_forward_loss(
+                    task.peft_model,
+                    cap,
+                    group=(a, b),
+                    teacher_hidden_states=t_out.hidden_states,
+                    labels=batch["labels"],
+                    recompute_chain=cfg.layerwise_recompute_chain,
+                )
+                loss_val = loss.item()
+                if ddp:
+                    lv = torch.tensor(loss_val, device=device)
+                    dist.all_reduce(lv)
+                    loss_val = lv.item() / world
+                # Spike guard, same protocol as the joint loop (rank-averaged
+                # decision so DDP replicas stay in lockstep).
+                if len(recent_losses) >= 20:
+                    median = sorted(recent_losses[-50:])[len(recent_losses[-50:]) // 2]
+                    if loss_val > 4.0 * median:
+                        task.load_state_dict(last_good_state, strict=False)
+                        log(
+                            f"greedy {a}-{b} step {greedy_step}: SPIKE {loss_val:.1f} "
+                            f"> 4x median {median:.2f}, rolled back"
+                        )
+                        continue
+                opt.zero_grad()
+                loss.backward()
+                if ddp:
+                    _sync_grads(trainable, world)
+                torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                opt.step()
+                if shadow_linears:
+                    from shadow_lab import shadow_quant
+
+                    shadow_quant.project_linears(shadow_linears, cfg.shadow_quant)
+                recent_losses.append(loss_val)
+
+                if greedy_step % cfg.log_every == 0:
+                    msg = {
+                        "phase": f"greedy{a}-{b}",
+                        "step": greedy_step,
+                        "tokens": greedy_seen,
+                        "loss": loss_val,
+                        "tok_per_s": greedy_seen / max(time.time() - t_phase, 1e-9),
+                    }
+                    log(str(msg))
+                    if rank == 0:
+                        log_f.write(json.dumps(msg) + "\n")
+                        log_f.flush()
+                if greedy_step % cfg.eval_every == 0:
+                    # Snapshot on EVERY rank (spike-guard rollback restores this).
+                    last_good_state = {
+                        k: v.detach().clone() for k, v in task.state_dict().items() if v.requires_grad
+                    }
+                    if rank == 0:
+                        ppl = eval_ppl(
+                            task, tokenizer, eval_text, device=device, context_len=cfg.ppl_context_len
+                        )
+                        log(f"greedy {a}-{b} step {greedy_step}: eval PPL {ppl:.1f} (best {best_ppl:.1f})")
+                        if ppl < best_ppl:
+                            best_ppl = ppl
+                            task.peft_model.save_pretrained(save_dir / "best")
+        phase_seconds["greedy"] = time.time() - t_phase
+        tokens_seen = group_budget * len(groups)
+        log(f"greedy phase done: {greedy_step} steps, {tokens_seen} tokens, PPL best {best_ppl:.1f}")
+
+    # Phase boundary: the loss SCALE changes (greedy hidden-MSE ~1e-2 vs joint
+    # CE ~4). Carrying the median across the boundary makes every polish step
+    # look like a spike and the guard dead-loops on rollbacks.
+    if layerwise:
+        recent_losses = []
+
+    t_polish = time.time()
 
     while tokens_seen < cfg.max_tokens:
         step += 1
@@ -639,6 +875,7 @@ def train_shadow(cfg: TrainConfig, shadow_model=None) -> TrainReport:
 
         if step % cfg.log_every == 0:
             msg = {
+                "phase": "polish" if layerwise else "end2end",
                 "step": step,
                 "tokens": tokens_seen,
                 "loss": loss_val,
@@ -683,6 +920,13 @@ def train_shadow(cfg: TrainConfig, shadow_model=None) -> TrainReport:
                     best_ppl = ppl
                     task.peft_model.save_pretrained(save_dir / "best")
 
+    phase_seconds["polish"] = time.time() - t_polish
+    if attribution is not None:
+        attribution["final"] = snapshot_attribution()
+    peak_mem_gb = (
+        torch.cuda.max_memory_allocated() / 1e9 if str(device).startswith("cuda") else 0.0
+    )
+
     final_ppl = float("nan")
     if rank == 0:
         task.peft_model.save_pretrained(save_dir / "final")
@@ -719,6 +963,9 @@ def train_shadow(cfg: TrainConfig, shadow_model=None) -> TrainReport:
         wall_time_s=time.time() - t0,
         save_dir=str(save_dir),
         grace=grace_summary,
+        peak_mem_gb=round(peak_mem_gb, 3),
+        phase_seconds=({k: round(v, 1) for k, v in phase_seconds.items()} if layerwise else None),
+        layer_attribution=attribution,
     )
     if rank == 0:
         summary = {**asdict(report), "refine_iters": refine_iters, "args": _summary_args_dump(cfg)}

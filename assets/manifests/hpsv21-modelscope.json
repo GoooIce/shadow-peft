@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "source": "ModelScope",
+  "repo_id": "AI-ModelScope/HPSv2",
+  "revision": "master",
+  "license": "Apache-2.0",
+  "selected_files": 3,
+  "selected_bytes": 1972490113,
+  "checkpoint": "HPS_v2.1_compressed.pt",
+  "checksum_file": "hpsv21-modelscope.sha256",
+  "verified_on": "2026-09-04",
+  "notes": "ModelScope exposes only a mutable master; the SHA-256 inventory is the immutable identity used by this project."
+}

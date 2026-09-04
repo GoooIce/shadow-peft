@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "source": "ModelScope",
+  "repo_id": "microsoft/Mage-Flow-Turbo",
+  "revision": "master",
+  "downloaded_at": "2026-09-04",
+  "repository_updated_at": "2026-07-23T13:58:58Z",
+  "license": "mit",
+  "file_count": 43,
+  "total_bytes": 17507370503,
+  "checksum_file": "mage-flow-turbo-modelscope.sha256",
+  "runtime_source": {
+    "repository": "https://github.com/microsoft/Mage.git",
+    "commit": "76bec2bb3818863f470de7e867c2dc7f1d0bfd83"
+  },
+  "components": {
+    "pipeline": "mage_flow.MageFlowPipeline",
+    "transformer": "mage_flow.MageFlow",
+    "vae": "mage_flow.MageVAE",
+    "text_encoder": "transformers.Qwen3VLForConditionalGeneration",
+    "tokenizer": "transformers.AutoProcessor",
+    "scheduler": "diffusers.FlowMatchEulerDiscreteScheduler"
+  },
+  "notes": [
+    "ModelScope exposes only the master branch and no immutable commit revision for this mirror.",
+    "The SHA-256 inventory is therefore the immutable identity used by this project.",
+    "Model and future dataset assets must come from ModelScope; the official Microsoft source repository supplies runtime code only."
+  ]
+}

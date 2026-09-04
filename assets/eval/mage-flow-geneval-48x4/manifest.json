@@ -1,0 +1,17 @@
+{
+  "output": {
+    "path": "geneval-expanded.jsonl",
+    "rows": 192,
+    "sha256": "759076fb465864fc6a5c5d7f08d8f1637fbbbd9ad2f12bfab82d00048ba12216"
+  },
+  "policy": {
+    "cluster_unit": "parent GenEval prompt",
+    "replicas": 4,
+    "seed_stride": 100000000
+  },
+  "schema_version": 1,
+  "source": {
+    "path": "/Users/devel0per/Code/shadow-peft/assets/eval/mage-flow-500/auto_test.jsonl",
+    "sha256": "d1273fe63ce9eb8269492313142364edbb40d3cc689a15fadf36345e47e6d428"
+  }
+}

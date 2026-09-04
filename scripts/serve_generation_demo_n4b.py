@@ -16,6 +16,13 @@
         q0_30m  — native-nvfp4 @30M (axis2 4.2835)
         ptq_30m — the b0_30m checkpoint PTQ-swapped to nvfp4 (axis2 4.4706)
 
+    --preset rl1b (port 6006, Pro6000 box, chat-template prompts)
+        full    — full-precision LFM2.5-2.6B (post-trained)
+        b0_1b   — bf16 shadow @1B (axis2 3.8997, all-time rl champion)
+        ptq_1b  — the b0_1b checkpoint PTQ-swapped to nvfp4 (axis2 3.8990)
+        b0_100m — bf16 @100M lr3e-5 (axis2 3.9307, gate100 winner)
+        quant   — w4a16 damaged base only
+
 rl-preset card numbers read the AXIS2 verdicts (the wiki axis is distorted on
 this model); prompts go through the chat template (the model opens a <think>
 block — reasoning traces in the output are on-distribution). Column ppl and
@@ -29,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -95,6 +103,29 @@ PRESETS = {
             ("quant", "4-bit 不修补", None, None, "q"),
         ],
         "axis_note": "留出自蒸馏池(axis2) ppl — wiki 轴在此模型上失真，仅作过程记录",
+    },
+    "rl1b": {
+        "model": str(Path.home() / "models" / "LFM2.5-2.6B"),
+        "port": 6006,
+        "chat": True,
+        "title": "LFM2.5-2.6B(RL) 4-bit 生成测试：100M → 1B 剂量对比（exp1-rl1b）",
+        "presets": [
+            "用一句话解释什么是模型量化",
+            "Write a haiku about mountains.",
+            "9.11 和 9.9 哪个大？为什么？",
+            "给一个 Python 函数：判断回文字符串",
+        ],
+        "columns": [
+            ("full", "全精度基座(RL)", None, None, "bf"),
+            ("b0_1b", "B0 bf16 影子 @1B（新王）", "runs/exp1/rl1b_B0_1b",
+             "runs/exp1/rl1b-axis2_B0_1b/verdict.json", "win"),
+            ("ptq_1b", "B0_1b 训后换 nvfp4(部署形态)", "runs/exp1/rl1b_B0_1b",
+             "runs/exp1/rl1b-axis2_B0_1b_ptq/verdict.json", ""),
+            ("b0_100m", "B0 bf16 影子 @100M(gate100 胜者)", "runs/exp1/rl1b_B0_100m_lr3",
+             "runs/exp1/rl1b-axis2-100m_B0_100m_lr3/verdict.json", ""),
+            ("quant", "4-bit 不修补", None, None, "q"),
+        ],
+        "axis_note": "留出自蒸馏池(axis2) ppl；1B 影子已越过教师本身(recovery≈1.9，轴原点以下)，比较的是绝对 ppl",
     },
 }
 
@@ -352,7 +383,16 @@ def main() -> None:
     for fn in MODELS.values():
         fn(torch.tensor([[TOK.bos_token_id or 1]], device="cuda"))
     print(f"ready on http://0.0.0.0:{port}", flush=True)
-    ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
+
+    class V6Server(ThreadingHTTPServer):
+        address_family = socket.AF_INET6
+
+    try:  # dual-stack bind: platform gateways may reach the container over v6
+        httpd = V6Server(("::", port), Handler)
+        print(f"dual-stack bound on [::]:{port}", flush=True)
+    except OSError:
+        httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    httpd.serve_forever()
 
 
 if __name__ == "__main__":
