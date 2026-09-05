@@ -55,3 +55,11 @@ def test_gallery_path_cannot_escape_the_controlled_root(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="outside"):
         MONITOR.resolve_gallery_path(gallery, "../secret.png")
+
+
+def test_empty_precreated_episode_directory_is_still_pending(tmp_path: Path) -> None:
+    (tmp_path / "gradient-episode-3").mkdir()
+
+    status = MONITOR.build_status(tmp_path)
+
+    assert status["gradient"]["episodes"][3]["state"] == "pending"

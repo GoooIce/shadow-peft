@@ -56,7 +56,8 @@ def _episode_status(
     complete = bool(run and int(run.get("completed_generations", 0)) >= 1)
     if not complete and summary_paths:
         complete = True
-    state = "done" if complete else "running" if episode.exists() else "pending"
+    has_activity = bool(rows or run or summary_paths)
+    state = "done" if complete else "running" if has_activity else "pending"
     failures = sum(row.get("failure_reason") is not None for row in rows)
     replays = sum(isinstance(row.get("replay_audit"), dict) for row in rows)
     exact_replays = sum(
