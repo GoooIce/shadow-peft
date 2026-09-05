@@ -8,6 +8,7 @@ import os
 import random
 import statistics
 import tempfile
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TypedDict
@@ -137,16 +138,35 @@ def run_mage_qad(
         "stage": stages[min(progress["stage_index"], 3)][0],
     }
     atomic_json(report_path, report)
+    invocation_started = time.time()
+
+    def publish(phase: str, **details):
+        live = {
+            "updated_at": time.time(),
+            "elapsed_seconds": time.time() - invocation_started,
+            "stage": report["stage"],
+            "phase": phase,
+            "completed_optimizer_steps": progress["step"],
+            **details,
+        }
+        if torch.cuda.is_available():
+            live["cuda_allocated_gib"] = torch.cuda.memory_allocated() / 2**30
+            live["cuda_peak_gib"] = torch.cuda.max_memory_allocated() / 2**30
+        atomic_json(out / "live.json", live)
+
     try:
         while progress["stage_index"] < len(stages):
             stage, budget = stages[progress["stage_index"]]
             report["stage"] = stage
             optimizer.zero_grad(set_to_none=True)
+            publish("preparing_trajectory", next_step=progress["step"] + 1)
             batch = source(train[progress["step"] % len(train)])
+            publish("forward_backward", next_step=progress["step"] + 1)
             training_loss = trajectory_loss(controller.model, teacher, batch, backward=True)
             parameters = controller.parameters()
             if any(p.grad is None or not torch.isfinite(p.grad).all() for p in parameters):
                 raise FloatingPointError("missing or non-finite all-layer gradient")
+            publish("optimizer_step")
             optimizer.step()
             if any(not torch.isfinite(p).all() for p in parameters):
                 raise FloatingPointError("non-finite latent master")
@@ -169,10 +189,18 @@ def run_mage_qad(
                 with torch.random.fork_rng():
                     python_rng = random.getstate()
                     try:
-                        val_loss = statistics.fmean(
-                            trajectory_loss(controller.model, teacher, source(r))
-                            for r in validation
-                        )
+                        losses = []
+                        publish("qad_val", completed=0, total=len(validation))
+                        for index, row in enumerate(validation):
+                            losses.append(trajectory_loss(controller.model, teacher, source(row)))
+                            if (index + 1) % 8 == 0 or index + 1 == len(validation):
+                                publish(
+                                    "qad_val",
+                                    completed=index + 1,
+                                    total=len(validation),
+                                    mean_loss_so_far=statistics.fmean(losses),
+                                )
+                        val_loss = statistics.fmean(losses)
                     finally:
                         random.setstate(python_rng)
                 if not math.isfinite(val_loss):
@@ -222,6 +250,7 @@ def run_mage_qad(
                     progress["stage_step"] = 0
                     progress["stage_initial_loss"] = val_loss
                     progress["stage_best_step"] = progress["step"]
+            publish("saving_checkpoint", training_loss=training_loss)
             if improved:
                 save_checkpoint(
                     out / progress["best_checkpoint"], controller, optimizer, identity, progress

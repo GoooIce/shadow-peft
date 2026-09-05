@@ -105,12 +105,27 @@ def build_qad_pool(sources: list[dict], evaluation: list[dict]) -> tuple[list[di
                 selected.append(queue.popleft())
     if len(selected) < 1152:
         raise ValueError("insufficient distinct non-evaluation prompts for QAD")
+    # Reserve validation within each selected stratum before assigning training.
+    # Taking all training rows first would exhaust minority strata entirely.
+    selected_groups = defaultdict(list)
+    for source in selected[:1152]:
+        selected_groups[source["stratum"]].append(source)
+    quotas = {name: len(group) * 128 // 1152 for name, group in selected_groups.items()}
+    remainder = 128 - sum(quotas.values())
+    ranked = sorted(
+        selected_groups, key=lambda name: (-(len(selected_groups[name]) * 128 % 1152), name)
+    )
+    for name in ranked[:remainder]:
+        quotas[name] += 1
+    assignments = {"qad_train": [], "qad_val": []}
+    for name, group in sorted(selected_groups.items()):
+        assignments["qad_val"].extend(group[: quotas[name]])
+        assignments["qad_train"].extend(group[quotas[name] :])
     rows = []
     used_seeds = {r["seed"] for r in evaluation}
     seed = 0
-    for split, count in QAD_COUNTS.items():
-        for _ in range(count):
-            source = selected[len(rows)]
+    for split in QAD_COUNTS:
+        for source in sorted(assignments[split], key=lambda row: data_hash([row])):
             while seed in used_seeds:
                 seed += 1
             row = dict(source, split=split, seed=seed, sample_id="qad-" + data_hash([source])[:24])

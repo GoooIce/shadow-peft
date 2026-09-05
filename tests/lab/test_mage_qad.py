@@ -382,3 +382,23 @@ def test_campaign_selects_earliest_best_and_early_stops_after_128_formal_steps(t
     assert report["progress"]["stages"][-1]["early_stop"]
     assert report["selected_checkpoint"] == "best-1.pt"
     assert not report["es_authorized"]
+
+
+def test_rare_qad_stratum_is_represented_in_both_train_and_validation():
+    from shadow_lab.mage_qad_data import build_qad_pool
+
+    sources = [
+        dict(
+            prompt=f"isolated {i}",
+            source="test",
+            source_revision="v1",
+            source_id=str(i),
+            stratum="rare" if i < 90 else "common",
+        )
+        for i in range(1200)
+    ]
+    excluded = [dict(prompt=f"eval {i}", sample_id=f"e{i}", seed=i) for i in range(500)]
+    rows, manifest = build_qad_pool(sources, excluded)
+    assert manifest["strata"]["qad_val"].get("rare", 0) == 10
+    assert manifest["strata"]["qad_train"]["rare"] == 80
+    assert len(rows) == 1152
