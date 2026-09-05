@@ -353,7 +353,15 @@ def load_observation_prefix(path: Path, expected: tuple[CandidateSpec, ...]):
 def layout_record(layout: ClipGenomeLayout) -> dict:
     return {
         "dimension": layout.dimension,
-        "layers": [asdict(layer) for layer in layout.layers],
+        "layers": [
+            {
+                "name": layer.name,
+                "shape": list(layer.shape),
+                "start": layer.start,
+                "stop": layer.stop,
+            }
+            for layer in layout.layers
+        ],
     }
 
 

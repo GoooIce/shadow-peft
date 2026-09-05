@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from shadow_lab.es import CandidateSpec
+from shadow_lab.es_quant import ClipGenomeLayout, LayerClipSlice
 
 SCRIPT_PATH = Path(__file__).parents[2] / "scripts" / "run_mage_flow_es.py"
 SPEC = importlib.util.spec_from_file_location("run_mage_flow_es", SCRIPT_PATH)
@@ -116,3 +117,13 @@ def test_prompt_episode_offset_does_not_change_es_generation() -> None:
     assert RUNNER.prompt_episode_index(2, offset=4) == 6
     with pytest.raises(ValueError, match="non-negative"):
         RUNNER.prompt_episode_index(0, offset=-1)
+
+
+def test_layout_record_survives_json_roundtrip_for_resume_comparison() -> None:
+    layout = ClipGenomeLayout(
+        layers=(LayerClipSlice("proj", (8, 2), 0, 16),),
+        dimension=16,
+    )
+    record = RUNNER.layout_record(layout)
+
+    assert json.loads(json.dumps(record)) == record
