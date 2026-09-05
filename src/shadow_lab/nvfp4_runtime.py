@@ -7,6 +7,7 @@ it never infers native execution from storage dtype alone.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 
@@ -233,6 +234,7 @@ def materialize_native_nvfp4(
     clip_by_layer: Mapping[str, torch.Tensor | float] | None = None,
     target_modules: tuple[str, ...] | None = None,
     exclude_modules: tuple[str, ...] = (),
+    saliency_by_layer: Mapping[str, torch.Tensor] | None = None,
     use_triton_kernel: bool = False,
 ) -> dict:
     """Destructively materialize eligible Linear weights for native W4A4.
@@ -244,6 +246,8 @@ def materialize_native_nvfp4(
 
     if scheme not in {"rtn", "quasar-grid", "external-clip"}:
         raise ValueError("scheme must be rtn, quasar-grid, or external-clip")
+    if saliency_by_layer is not None and scheme != "external-clip":
+        raise ValueError("saliency_by_layer requires external-clip")
     if scheme != "external-clip" and clip_by_layer is not None:
         raise ValueError("clip_by_layer is only valid for external-clip")
 
@@ -256,6 +260,8 @@ def materialize_native_nvfp4(
     if not eligible:
         raise ValueError("no native-NVFP4 eligible Linear layers")
     eligible_names = {row.name for row in eligible}
+    if saliency_by_layer is not None and set(saliency_by_layer) != eligible_names:
+        raise ValueError("saliency must exactly match eligible layers")
     if scheme == "external-clip":
         if clip_by_layer is None:
             raise ValueError("external-clip requires clip_by_layer")
@@ -285,6 +291,7 @@ def materialize_native_nvfp4(
     clip_group_count = 0
     clip_factor_counts = [0] * len(quasar_config.clip_factors)
     layer_reports: list[dict] = []
+    packed_hashes: dict[str, str] = {}
     for row in eligible:
         linear = root.get_submodule(row.name)
         if not isinstance(linear, nn.Linear):  # pragma: no cover - mutation guard
@@ -314,11 +321,18 @@ def materialize_native_nvfp4(
                 reconstruction = reconstruct_nvfp4_with_clip(
                     original,
                     clip_by_layer[row.name],
-                    saliency=None,
+                    saliency=(saliency_by_layer[row.name].to(original.device)
+                              if saliency_by_layer is not None else None),
                     config=quasar_config,
                 )
             layer_error = reconstruction.weighted_error.item()
             layer_clip_groups = reconstruction.clip_factor_value.numel()
+            if saliency_by_layer is not None:
+                digest = hashlib.sha256()
+                for tensor in (reconstruction.weight_packed, reconstruction.weight_scale,
+                               reconstruction.tensor_scale):
+                    digest.update(tensor.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes())
+                packed_hashes[row.name] = digest.hexdigest()
             install_reconstructed_nvfp4_linear(
                 linear,
                 reconstruction,
@@ -341,6 +355,7 @@ def materialize_native_nvfp4(
 
     return {
         "scheme": scheme,
+        "packed_weight_hashes": packed_hashes,
         "format": "nvfp4_w4a4",
         "quant_representation": "torchao.NVFP4Tensor",
         "compute_kernel": "unverified_pending_profiler",

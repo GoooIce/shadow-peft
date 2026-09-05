@@ -67,6 +67,7 @@ class QuasarNVFP4Config:
     target_modules: tuple[str, ...] | None = None
     exclude_modules: tuple[str, ...] = ("lm_head",)
     quantize_activations: bool = True
+    dynamic_activation_scale: bool = False
     saliency_eps: float = 1e-12
 
     def __post_init__(self) -> None:
@@ -469,7 +470,8 @@ class QuasarNVFP4Linear(nn.Module):
     def _quantize_input(self, value: torch.Tensor) -> torch.Tensor:
         if not self.config.quantize_activations:
             return value
-        scale = self.input_tensor_scale if self._input_scale_initialized else None
+        scale = (self.input_tensor_scale
+                 if self._input_scale_initialized and not self.config.dynamic_activation_scale else None)
         reconstructed, observed_scale = quantize_nvfp4_activation(value, scale)
         if scale is None:
             self.input_tensor_scale.copy_(observed_scale)
@@ -502,6 +504,7 @@ class PackedNVFP4Linear(nn.Module):
         self.in_features = source.in_features
         self.out_features = source.out_features
         self.activation_nvfp4 = source.config.quantize_activations
+        self.dynamic_activation_scale = source.config.dynamic_activation_scale
         if self.activation_nvfp4 and not (source.input_tensor_scale > 0).all():
             raise RuntimeError(
                 "cannot materialize NVFP4 W4A4 before an activation calibration forward"
@@ -530,7 +533,9 @@ class PackedNVFP4Linear(nn.Module):
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         if self.activation_nvfp4:
-            value, _ = quantize_nvfp4_activation(value, 1.0 / self.input_global_scale)
+            value, _ = quantize_nvfp4_activation(
+                value, None if self.dynamic_activation_scale else 1.0 / self.input_global_scale
+            )
         weight = self.dequantize_weight(value.dtype)
         return F.linear(value, weight, self.bias)
 

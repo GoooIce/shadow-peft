@@ -2,7 +2,7 @@
 id: EXP-008
 type: engineering
 category: enhancement
-status: ready-for-agent
+status: in-progress
 priority: P0
 depends_on: [ENG-003, ENG-004]
 blocks: [EXP-001]
@@ -118,3 +118,20 @@ ES 最终候选只解封一次 `auto_test` 60 条：平均 paired Reward delta �
 - 2026-09-05：`.out-of-scope/` 不存在，没有相似的历史拒绝；该需求不是已实现功能。
 - 2026-09-05：维护者完成三轮决策并全部接受推荐答案；本票进入 `ready-for-agent`，但创建
   票据不代表已领取、实现或启动实验。
+
+## 实现进度与证据
+
+- 2026-09-05：领取并实现 `scripts/run_mage_flow_healing.py`；数据隔离、四阶段 QAD、原子
+  检查点、自动/人工门、显著性 healed master、受限 N=8/N=30 和最终门已接通。
+- 操作流程与产物合同见 `docs/mage-two-stage-healing.md`；配置见
+  `configs/mage-qad/exp008.json`。
+- 本地验证覆盖四步同输入、174 层训练范围、W4A4、精确续训、最小验证损失选择、128-step
+  early stop、packed 重放、数据泄漏、非补偿质量门、盲测和显式人工放行。
+- 状态保持 `in-progress`：真实新数据池、GB10 分级训练/原生 kernel/图片质量证据及维护者
+  两次人工放行尚未完成。没有启动旧 ES 或生成真实部署许可。
+- 最终验证：`.venv/bin/python -m pytest -q` → **416 passed, 18 skipped**；新增/修改文件
+  Ruff 检查通过，Mage QAD/healing 模块及 CLI 的 `uvx ty check ... --python .venv/bin/python`
+  通过；CLI `--help` / `train --help` 通过。
+- Code review 起点：`00413c270e89d9966520a326994ab52b77b3396c`。
+  **Standards**：硬规范问题 0，低优先级维护性建议 1（ES 状态读写可进一步集中到工作流对象）。
+  **Spec**：阻断性发现 0；后续复核建议的排除 manifest 完整性校验已补充并经失败→通过测试验证。

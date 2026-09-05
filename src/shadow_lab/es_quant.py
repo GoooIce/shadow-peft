@@ -101,6 +101,14 @@ class FrozenLinearWeights:
         return cls(tuple(weights))
 
     @property
+    def saliency_by_layer(self) -> dict[str, torch.Tensor] | None:
+        return None
+
+    def validate_layout(self, layout: ClipGenomeLayout) -> None:
+        if tuple(item.name for item in self._weights) != tuple(layer.name for layer in layout.layers):
+            raise ValueError("master/layout layer mismatch")
+
+    @property
     def parameter_count(self) -> int:
         return sum(item.value.numel() for item in self._weights)
 
@@ -170,7 +178,10 @@ def materialize_es_candidate(
 ) -> dict:
     """Restore BF16 masters, then materialize exactly one native NVFP4 candidate."""
 
+    master.validate_layout(layout)
     master.restore(root, device)
+    saliency = master.saliency_by_layer
+    options = {"saliency_by_layer": saliency} if saliency is not None else {}
     return materialize_native_nvfp4(
         root,
         scheme="external-clip",
@@ -178,4 +189,5 @@ def materialize_es_candidate(
         clip_by_layer=layout.split(clips),
         target_modules=tuple(layer.name for layer in layout.layers),
         use_triton_kernel=use_triton_kernel,
+        **options,
     )

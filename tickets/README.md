@@ -28,7 +28,7 @@
 | [EXP-005](EXP-005-es-hyperparameter-calibration.md) | Experiment | Phase 2 sigma/alpha 校准 | done（门禁失败） | ENG-003, ENG-004 |
 | [EXP-006](EXP-006-es-cross-prompt-gradient-gate.md) | Experiment | Phase 2b 跨 prompt 梯度门禁 | done（门禁失败） | EXP-005 |
 | [EXP-007](EXP-007-es-cross-prompt-gradient-gate-20x.md) | Experiment | Phase 2c 跨 prompt 梯度门禁 20× 扩展 | done（人工视觉否决，不可部署） | EXP-006 |
-| [EXP-008](EXP-008-mage-nvfp4-two-stage-healing.md) | Engineering | Mage NVFP4 两阶段修复 | ready-for-agent | ENG-003, ENG-004 |
+| [EXP-008](EXP-008-mage-nvfp4-two-stage-healing.md) | Engineering | Mage NVFP4 两阶段修复 | in-progress | ENG-003, ENG-004 |
 | [EXP-001](EXP-001-gb10-main-study.md) | Experiment | GB10 主实验与人工验收 | blocked | ENG-005, EXP-005, EXP-006, EXP-007, EXP-008 |
 | [EXP-002](EXP-002-qwen3-vl-nvfp4.md) | Experiment | Qwen3-VL NVFP4 扩展 | blocked | RES-002, EXP-001 |
 | [EXP-003](EXP-003-vae-nvfp4.md) | Experiment | VAE NVFP4 可行性与扩展 | blocked | RES-002, EXP-001 |

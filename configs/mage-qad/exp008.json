@@ -1,0 +1,9 @@
+{
+  "learning_rate": 0.00001,
+  "weight_decay": 0.01,
+  "formal_steps": 1024,
+  "validation_interval": 16,
+  "seed": 8008,
+  "height": 512,
+  "width": 512
+}
