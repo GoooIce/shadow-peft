@@ -126,6 +126,9 @@ def run_mage_qad(
             raise RuntimeError("QAD campaign is terminal")
         saved = load_checkpoint(latest_path, controller, optimizer, identity)
         progress = saved["progress"]
+        # Model/optimizer/RNG are restored. Do not retain the full CPU artifact
+        # (including deployment weights) throughout training and the next save.
+        del saved
     else:
         torch.manual_seed(config.seed)
         random.seed(config.seed)

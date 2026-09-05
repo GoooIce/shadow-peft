@@ -279,7 +279,10 @@ def test_all_174_linears_use_w4a4_and_nonquantized_modules_stay_frozen():
     assert all(not p.requires_grad for p in pipeline["vae"].parameters())
 
 
-def test_staged_campaign_resume_matches_uninterrupted_training(tmp_path):
+def test_staged_campaign_resume_matches_uninterrupted_training(tmp_path, monkeypatch):
+    import weakref
+
+    import shadow_lab.mage_qad_campaign as campaign
     from shadow_lab.mage_qad_campaign import MageQADConfig, run_mage_qad
     from shadow_lab.mage_qad_checkpoint import read_checkpoint
     from shadow_lab.mage_qad_data import build_qad_pool
@@ -291,8 +294,18 @@ def test_staged_campaign_resume_matches_uninterrupted_training(tmp_path):
     excluded = [dict(prompt=f"e{i}", sample_id=f"e{i}", seed=i) for i in range(500)]
     rows, manifest = build_qad_pool(sources, excluded)
     base, teacher = Denoiser(), Denoiser()
+    restored_payloads = []
+    original_load = campaign.load_checkpoint
+
+    def tracked_load(*args, **kwargs):
+        saved = original_load(*args, **kwargs)
+        restored_payloads.append(weakref.ref(saved["packed"]["proj"]["weight_packed"]))
+        return saved
+
+    monkeypatch.setattr(campaign, "load_checkpoint", tracked_load)
 
     def source(row):
+        assert all(ref() is None for ref in restored_payloads), "resume retains deployment payload"
         generator = torch.Generator().manual_seed(row["seed"])
         return MageTrajectory(
             torch.randn(1, 2, 16, generator=generator),
@@ -320,7 +333,7 @@ def test_staged_campaign_resume_matches_uninterrupted_training(tmp_path):
     run_mage_qad(
         split, teacher, source, rows, manifest, identity, config, tmp_path / "resumed", stop_after=1
     )
-    run_mage_qad(
+    resumed_report = run_mage_qad(
         split,
         teacher,
         source,
@@ -332,6 +345,7 @@ def test_staged_campaign_resume_matches_uninterrupted_training(tmp_path):
         resume=True,
         stop_after=1,
     )
+    assert resumed_report["status"] == "paused", resumed_report.get("error")
     a = read_checkpoint(tmp_path / "continuous" / "latest.pt")
     b = read_checkpoint(tmp_path / "resumed" / "latest.pt")
     assert a["sha256"] == b["sha256"]
