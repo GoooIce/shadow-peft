@@ -343,6 +343,9 @@ print(json.dumps(result))
                 plan["config"],
                 "--campaign",
                 plan["campaign"],
+                *(["--resume"] if plan.get("resume") else []),
+                "--checkpoint-interval",
+                str(plan.get("checkpoint_interval", 500)),
             ],
             "qad",
         )
