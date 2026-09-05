@@ -23,6 +23,7 @@ from shadow_lab.image_eval import (
 )
 from shadow_lab.image_reward_models import HPSv21Scorer, OpenCLIPH14Scorer
 from shadow_lab.mage_es_eval import evaluate_clips as evaluate_mage_es_clips
+from shadow_lab.mage_es_gallery import CapturingPipeline
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,6 +68,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--cfg", type=float, default=1.0)
     parser.add_argument("--audit-first-candidate", action="store_true")
+    parser.add_argument(
+        "--image-dir",
+        type=Path,
+        help="Optional controlled directory for exact generated PNG scoring inputs.",
+    )
     parser.add_argument("--out", required=True, type=Path)
     return parser.parse_args()
 
@@ -170,6 +176,12 @@ def replay_comparison(first: dict, replay: dict) -> dict:
     return {"exact": all(matches.values()), "matches": matches}
 
 
+def verify_captured_images(result: dict, images: list[dict]) -> None:
+    captured = [record["image_sha256"] for record in images]
+    if captured != result["image_sha256"]:
+        raise RuntimeError("persisted image bytes differ from scored image bytes")
+
+
 def reward_deltas(records: list[dict]) -> list[dict]:
     if not records:
         raise ValueError("center evaluation has no records")
@@ -201,15 +213,18 @@ def validate_source_run(
     run = json.loads(run_path.read_text(encoding="utf-8"))
     experiment = json.loads(experiment_path.read_text(encoding="utf-8"))
     identity = experiment["identity"]
-    if identity["model"]["metadata_and_size_sha256"] != model_identity[
-        "metadata_and_size_sha256"
-    ]:
+    if (
+        identity["model"]["metadata_and_size_sha256"]
+        != model_identity["metadata_and_size_sha256"]
+    ):
         raise ValueError("center evaluation model differs from source sigma arm")
     for key in ("prompts", "calibration", "hps_v2_1", "clip_h14"):
         if identity["assets"][key]["sha256"] != assets[key]["sha256"]:
             raise ValueError(f"center evaluation {key} differs from source sigma arm")
     if run["generation"]["schedule_seed"] != schedule_seed:
-        raise ValueError("center evaluation schedule seed differs from source sigma arm")
+        raise ValueError(
+            "center evaluation schedule seed differs from source sigma arm"
+        )
     episode_offset = int(run["generation"].get("episode_offset", 0))
     if episode_index < episode_offset + run["completed_generations"]:
         raise ValueError("center evaluation must use an unseen episode index")
@@ -220,12 +235,16 @@ def validate_source_run(
         if summary.get("prompt_episode_index", episode_offset + generation) != (
             episode_offset + generation
         ):
-            raise ValueError("source run prompt episode index differs from its manifest")
+            raise ValueError(
+                "source run prompt episode index differs from its manifest"
+            )
         seen_ids.update(summary["prompt_sample_ids"])
     seen_ids.update(excluded_sample_ids or ())
     overlap = seen_ids.intersection(episode_sample_ids)
     if overlap:
-        raise ValueError(f"center evaluation episode reuses source prompts: {sorted(overlap)}")
+        raise ValueError(
+            f"center evaluation episode reuses source prompts: {sorted(overlap)}"
+        )
     return {
         "run_path": str(run_path),
         "run_sha256": sha256_file(run_path),
@@ -256,9 +275,9 @@ def validate_source_runs(
         current_ids = set()
         for generation in range(int(run["completed_generations"])):
             summary = json.loads(
-                (
-                    source_run / f"generation-{generation:04d}-summary.json"
-                ).read_text(encoding="utf-8")
+                (source_run / f"generation-{generation:04d}-summary.json").read_text(
+                    encoding="utf-8"
+                )
             )
             current_ids.update(str(value) for value in summary["prompt_sample_ids"])
         overlap = source_ids.intersection(current_ids)
@@ -291,7 +310,9 @@ def atomic_write_json(path: Path, value: dict) -> None:
 def main() -> None:
     args = parse_args()
     if args.episode_index < 0 or args.episode_size <= 0 or args.reward_batch_size <= 0:
-        raise ValueError("episode index must be non-negative and sizes must be positive")
+        raise ValueError(
+            "episode index must be non-negative and sizes must be positive"
+        )
     if args.height % 16 or args.width % 16:
         raise ValueError("Mage image dimensions must be multiples of 16")
     out_path = args.out.expanduser().resolve()
@@ -308,6 +329,7 @@ def main() -> None:
         path.expanduser().resolve() for path in args.additional_source_run
     ]
     prior_paths = [path.expanduser().resolve() for path in args.prior_evaluation]
+    image_dir = args.image_dir.expanduser().resolve() if args.image_dir else None
 
     samples = load_frozen_eval_samples(prompts_path)
     if any(sample.split != "es_train" for sample in samples):
@@ -378,33 +400,19 @@ def main() -> None:
         HPSv21Scorer(hps_checkpoint, batch_size=args.reward_batch_size),
         OpenCLIPH14Scorer(clip_checkpoint, batch_size=args.reward_batch_size),
     ]
+    if image_dir is not None:
+        pipeline = CapturingPipeline(pipeline, image_dir)
 
     records = []
+    sample_ids = [sample.sample_id for sample in prompt_batch]
     for index, (label, path) in enumerate(candidates):
         payload = torch.load(path, map_location="cpu", weights_only=True)
         clips = payload["clips"]
         if clips.numel() != layout.dimension or not torch.isfinite(clips).all():
             raise ValueError(f"candidate {label} clip shape/value mismatch")
-        result = evaluate_clips(
-            torch=torch,
-            clips=clips,
-            transformer=transformer,
-            master=master,
-            layout=layout,
-            pipeline=pipeline,
-            prompt_batch=prompt_batch,
-            scorers=scorers,
-            calibration=calibration,
-            args=args,
-        )
-        record = {
-            "label": label,
-            "path": str(path),
-            "file_sha256": sha256_file(path),
-            **result,
-        }
-        if args.audit_first_candidate and index == 0:
-            replay = evaluate_clips(
+        if image_dir is None:
+            images = []
+            result = evaluate_clips(
                 torch=torch,
                 clips=clips,
                 transformer=transformer,
@@ -416,7 +424,62 @@ def main() -> None:
                 calibration=calibration,
                 args=args,
             )
+        else:
+            with pipeline.capture(label, sample_ids) as images:
+                result = evaluate_clips(
+                    torch=torch,
+                    clips=clips,
+                    transformer=transformer,
+                    master=master,
+                    layout=layout,
+                    pipeline=pipeline,
+                    prompt_batch=prompt_batch,
+                    scorers=scorers,
+                    calibration=calibration,
+                    args=args,
+                )
+            verify_captured_images(result, images)
+        record = {
+            "label": label,
+            "path": str(path),
+            "file_sha256": sha256_file(path),
+            **result,
+        }
+        if images:
+            record["images"] = images
+        if args.audit_first_candidate and index == 0:
+            if image_dir is None:
+                replay_images = []
+                replay = evaluate_clips(
+                    torch=torch,
+                    clips=clips,
+                    transformer=transformer,
+                    master=master,
+                    layout=layout,
+                    pipeline=pipeline,
+                    prompt_batch=prompt_batch,
+                    scorers=scorers,
+                    calibration=calibration,
+                    args=args,
+                )
+            else:
+                with pipeline.capture(f"{label}-replay", sample_ids) as replay_images:
+                    replay = evaluate_clips(
+                        torch=torch,
+                        clips=clips,
+                        transformer=transformer,
+                        master=master,
+                        layout=layout,
+                        pipeline=pipeline,
+                        prompt_batch=prompt_batch,
+                        scorers=scorers,
+                        calibration=calibration,
+                        args=args,
+                    )
+                verify_captured_images(replay, replay_images)
             record["replay_audit"] = replay_comparison(result, replay)
+            if replay_images:
+                record["replay_images"] = replay_images
             if not record["replay_audit"]["exact"]:
                 raise RuntimeError("first center replay audit was not exact")
         records.append(record)
@@ -458,8 +521,11 @@ def main() -> None:
                 / "src/shadow_lab/image_reward_models.py"
             ),
             "mage_es_eval_sha256": sha256_file(
+                Path(__file__).resolve().parents[1] / "src/shadow_lab/mage_es_eval.py"
+            ),
+            "mage_es_gallery_sha256": sha256_file(
                 Path(__file__).resolve().parents[1]
-                / "src/shadow_lab/mage_es_eval.py"
+                / "src/shadow_lab/mage_es_gallery.py"
             ),
             "nvfp4_runtime_sha256": sha256_file(
                 Path(__file__).resolve().parents[1] / "src/shadow_lab/nvfp4_runtime.py"
@@ -480,6 +546,7 @@ def main() -> None:
             "cfg": args.cfg,
         },
         "dimension": layout.dimension,
+        "image_directory": str(image_dir) if image_dir is not None else None,
         "records": records,
         "comparisons": reward_deltas(records),
     }

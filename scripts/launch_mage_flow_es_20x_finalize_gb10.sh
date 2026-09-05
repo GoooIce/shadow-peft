@@ -80,6 +80,7 @@ for episode in $(seq 24 31); do
       --steps 4 \
       --cfg 1.0 \
       --audit-first-candidate \
+      --image-dir "$output_root/gallery/selection-episode-$episode" \
       --out "$evaluation"
   fi
   selection_args+=(--selection-evaluation "$evaluation")
@@ -131,6 +132,7 @@ for episode in $(seq 32 39); do
       --steps 4 \
       --cfg 1.0 \
       --audit-first-candidate \
+      --image-dir "$output_root/gallery/confirmation-episode-$episode" \
       --out "$evaluation"
   fi
   confirmation_args+=(--confirmation-evaluation "$evaluation")

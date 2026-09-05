@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 SCRIPT_PATH = Path(__file__).parents[2] / "scripts" / "evaluate_mage_flow_es_centers.py"
-SPEC = importlib.util.spec_from_file_location("evaluate_mage_flow_es_centers", SCRIPT_PATH)
+SPEC = importlib.util.spec_from_file_location(
+    "evaluate_mage_flow_es_centers", SCRIPT_PATH
+)
 assert SPEC is not None and SPEC.loader is not None
 EVALUATE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(EVALUATE)
@@ -44,6 +46,17 @@ def test_reward_deltas_use_first_center_as_paired_baseline() -> None:
         {"label": "up", "reward_delta_vs_baseline": 0.25, "non_degrading": True},
         {"label": "down", "reward_delta_vs_baseline": -0.25, "non_degrading": False},
     ]
+
+
+def test_verify_captured_images_requires_the_scored_png_bytes() -> None:
+    result = {"image_sha256": ["first", "second"]}
+    images = [{"image_sha256": "first"}, {"image_sha256": "second"}]
+
+    EVALUATE.verify_captured_images(result, images)
+
+    images[1]["image_sha256"] = "different"
+    with pytest.raises(RuntimeError, match="differ"):
+        EVALUATE.verify_captured_images(result, images)
 
 
 def test_source_run_requires_the_next_disjoint_prompt_batch(tmp_path: Path) -> None:
