@@ -156,7 +156,7 @@ def collect(
                 f"p=Path('/proc/{auxiliary_pid}/stat'); "
                 "alive=p.is_file() and p.read_text().split(') ',1)[1].split()[0]!='Z'; "
                 f"r=Path({str(auxiliary_directory / 'report.json')!r}); "
-                "print(json.dumps(dict(alive=alive,report=json.loads(r.read_text()))))"
+                "print(json.dumps(dict(alive=alive,report=json.loads(r.read_text()) if r.is_file() else None)))"
             )
             remote = subprocess.run(
                 [
@@ -172,7 +172,11 @@ def collect(
                 timeout=20,
             )
             remote_state = json.loads(remote.stdout)
-            reports["auxiliary"] = remote_state["report"]
+            if remote_state["report"] is not None:
+                reports["auxiliary"] = remote_state["report"]
+            elif not remote_state["alive"]:
+                atomic_json(root / "progress.json", dict(phase="failed", updated_at=time.time()))
+                return
             for arm, report in reports.items():
                 if report["data_sha256"] != identity["data_sha256"]:
                     raise ValueError("displayed prompts differ from experiment data")

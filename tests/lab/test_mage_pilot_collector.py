@@ -71,3 +71,27 @@ def test_completed_ballot_is_not_reopened_after_artifact_mutation(tmp_path):
     m.collect(tmp_path, tmp_path, "unused", tmp_path, {}, "identity", ready, 0, 0)
     assert not ready.is_set()
     assert json.loads((tmp_path / "progress.json").read_text())["phase"] == "invalid"
+
+
+def test_remote_death_before_first_report_is_terminal(tmp_path, monkeypatch):
+    m = module()
+    m.atomic_json(tmp_path / "report.json", dict(status="running", data_sha256="data"))
+    monkeypatch.setattr(
+        m.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout=json.dumps(dict(alive=False, report=None))),
+    )
+    ready = threading.Event()
+    m.collect(
+        tmp_path,
+        tmp_path,
+        "unused",
+        Path("unused"),
+        dict(data_sha256="data"),
+        "identity",
+        ready,
+        os.getpid(),
+        999999999,
+    )
+    assert json.loads((tmp_path / "progress.json").read_text())["phase"] == "failed"
+    assert not ready.is_set()
