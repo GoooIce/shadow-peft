@@ -7,7 +7,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+PAGE = r"""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>EXP-008 · 正式训练进度</title><style>:root{color-scheme:dark;font-family:system-ui,"PingFang SC",sans-serif;background:#11151a;color:#edf2f7}main{max-width:950px;margin:auto;padding:40px 24px}h1{font-size:30px;font-weight:550}p{line-height:1.7;color:#aab6c1}.panel{background:#1a2028;border:1px solid #35404a;border-radius:14px;padding:24px;margin:20px 0}.meta{color:#b4e4d5;font-size:13px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.value{font-size:28px;margin-top:10px}.bar{height:6px;background:#35404a;border-radius:8px;margin-top:18px}.bar span{display:block;background:#b4e4d5;height:100%;border-radius:8px}a{color:#b4e4d5}pre{white-space:pre-wrap;font:14px/1.8 system-ui}@media(max-width:600px){.grid{grid-template-columns:1fr}.value{font-size:23px}}</style>
 <main><div class="meta">EXP-008 / FULL TRAINING</div><h1>174 层，图像＋文本教师监督</h1><p>从原始模型重新训练 · 1024 条训练提示词 / 128 条独立验证提示词<br>4 步去噪 · 512×512 · 文本损失初始贡献 10%，校准后固定</p>
 <section class="panel"><div class="meta" id="state">正在读取状态…</div><h2 id="phase">准备中</h2><div class="grid"><div>已更新步数<div class="value" id="steps">—</div></div><div>当前阶段<div class="value" id="stage">—</div></div><div>峰值显存<div class="value" id="memory">—</div></div></div><div class="bar"><span id="bar"></span></div><p id="detail"></p></section>
