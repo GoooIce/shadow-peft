@@ -80,3 +80,17 @@ SHA-256，服务重启先校验原产物，不能覆盖已有投票对应的图�
 本地完整测试 424 passed、18 skipped；收集器后续可靠性修复新增 5 项测试通过。
 独立 Web 测试目录验证了自动保存、刷新恢复、8 题锁定和主动揭盲；测试票未写入真实服务。
 浏览器验证已按用户指令切换至 ego-browser，规则记录在 `agent.md`。
+
+## 原模型参考（用户追加）
+
+用户要求用相同提示词再运行原模型。使用原始 `Mage-Flow-Turbo` BF16 权重和上游生成流程，
+对 8 条验证提示词保持原种子、512×512、4 步去噪、CFG=1；首张额外重复一次验证 PNG 一致性。
+这组图片作为独立参考，不加入原两组的配对数值判定，也不改变已保存盲投。
+
+dc4a 输出：`~/runs/mage-flow/exp008-text-pilot-bf16-reference-20260905/`。
+输入：`~/data/mage-qad-exp008-20260905/text-pilot/bf16-reference-prompts.jsonl`。
+执行已有 `scripts/run_mage_flow_bf16_baseline.py`，PID 795316。
+参考画廊构建器逐条验证 prompt/seed、生成设置和 PNG SHA-256 后才导出 `public/`。
+已完成 8 张图片，含模型加载总耗时 157.56 秒；首张重复生成 PNG 哈希完全一致。
+参考页：`http://192.168.1.177:8780`，已用 ego-browser 验证全部 8 张 512×512 图片加载。
+产物已备份到 `runs-local/mage-flow/exp008-text-pilot-20260905/bf16-reference/`。
