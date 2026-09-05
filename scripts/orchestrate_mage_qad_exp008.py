@@ -236,11 +236,14 @@ print(json.dumps(result))
                 json.loads(line) for line in source.read_text().splitlines() if line.strip()
             )
         probe_sample = json.loads(Path(plan["probe_sample"]).read_text())
-        combined = [
-            r
-            for r in combined
-            if prompt_identity(r["prompt"]) != prompt_identity(probe_sample["prompt"])
-        ]
+        excluded_prompts = {prompt_identity(probe_sample["prompt"])}
+        for exclusion_path in plan.get("protocol_development_exclusions", []):
+            excluded_prompts.update(
+                prompt_identity(json.loads(line)["prompt"])
+                for line in Path(exclusion_path).read_text().splitlines()
+                if line.strip()
+            )
+        combined = [r for r in combined if prompt_identity(r["prompt"]) not in excluded_prompts]
         sources = root / "accepted-sources.jsonl"
         sources.write_text("".join(json.dumps(row) + "\n" for row in combined))
         cli = [plan["python"], "-u", "scripts/run_mage_flow_healing.py"]
