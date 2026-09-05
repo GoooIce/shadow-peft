@@ -1,6 +1,8 @@
 """Real subprocess tests for experiment supervision (no model execution)."""
 
+import hashlib
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -111,3 +113,62 @@ def test_worker_result_committed_during_liveness_check(tmp_path, monkeypatch, re
             run()
     else:
         run()
+
+
+def test_prepared_campaign_preserves_frozen_data_and_excludes_protocol_prompts(tmp_path):
+    from shadow_lab.mage_qad_data import build_qad_pool
+
+    m = load_monitor()
+    sources = [
+        dict(
+            prompt=f"formal {i}",
+            source="test",
+            source_revision="v1",
+            source_id=str(i),
+            stratum="test",
+        )
+        for i in range(1152)
+    ]
+    evaluation = [dict(prompt=f"eval {i}", sample_id=f"e{i}", seed=i) for i in range(500)]
+    rows, manifest = build_qad_pool(sources, evaluation)
+    (tmp_path / "qad.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    m.atomic_json(tmp_path / "manifest.json", manifest)
+    pilot_rows = [dict(prompt=f"pilot {i}") for i in range(16)]
+    m.atomic_json(tmp_path / "pilot.json", dict(train=pilot_rows[:8], validation=pilot_rows[8:]))
+    proof = dict(
+        status="completed",
+        arm="auxiliary",
+        trainable_layers=174,
+        train=[{}] * 8,
+        validation=[{}] * 8,
+        data_sha256=hashlib.sha256((tmp_path / "pilot.json").read_bytes()).hexdigest(),
+    )
+    m.atomic_json(tmp_path / "proof.json", proof)
+    m.atomic_json(tmp_path / "config.json", dict(text_initial_fraction=0.1, adamw_foreach=False))
+    m.atomic_json(tmp_path / "probe.json", dict(prompt="independent probe"))
+    exclusion = tmp_path / "exclude.jsonl"
+    exclusion.write_text("".join(json.dumps(r) + "\n" for r in pilot_rows))
+    plan = dict(
+        qad_data=str(tmp_path),
+        config=str(tmp_path / "config.json"),
+        probe_sample=str(tmp_path / "probe.json"),
+        protocol_development_exclusions=[str(exclusion)],
+        prepared=dict(
+            approved_protocol="image_and_text_174",
+            user_instruction="go",
+            data_sha256=manifest["data_sha256"],
+            pilot_data=str(tmp_path / "pilot.json"),
+            auxiliary_pilot_report=str(tmp_path / "proof.json"),
+            auxiliary_pilot_report_sha256=hashlib.sha256(
+                (tmp_path / "proof.json").read_bytes()
+            ).hexdigest(),
+        ),
+    )
+    assert m.validate_prepared_campaign(plan)["excluded_prompts"] == 17
+    with exclusion.open("a") as stream:
+        stream.write(json.dumps(dict(prompt=rows[0]["prompt"])) + "\n")
+    with pytest.raises(m.ExperimentFailed, match="leaked"):
+        m.validate_prepared_campaign(plan)
+    exclusion.write_text("")
+    with pytest.raises(m.ExperimentFailed, match="missing"):
+        m.validate_prepared_campaign(plan)

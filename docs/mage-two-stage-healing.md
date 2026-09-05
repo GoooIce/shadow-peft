@@ -30,6 +30,13 @@ VAE 冻结。训练前向执行权重和动态 activation NVFP4 fake quant，与
 噪声水印和 packing。学生沿四步 scheduler sigma 轨迹前进；每步教师使用同一个学生当前
 latent、conditioning、timestep，输出 MSE 每步反传后释放图，不反传整个滚动轨迹。
 
+维护者于 2026-09-05 根据独立小实验及盲投批准增加最终 block 文本输出的教师 MSE，
+使图像输出未使用的三条末层文本 Linear 也得到真实梯度。正式配置 `text_initial_fraction=0.1`：
+只在正式训练集首条样本校准一次，使文本损失初始贡献为图像损失的 10%，之后固定。
+`text-supervision.json` 与检查点 progress 保存样本身份、初始损失和系数；恢复不重新校准。
+图像/文本/总训练损失分别记录。`qad_val`、阶段门及最佳检查点选择仍仅使用图像教师 MSE。
+全部 174 层保持量化并训练，采用小实验一致的 AdamW `foreach=False`。
+
 每个阶段必须通过全层梯度、有限 latent/optimizer 状态、完整 AdamW 二阶矩和有限验证损失
 检查；preflight/pilot/正式阶段末损失不得高于阶段起点。训练选择只看 `qad_val`，持平保留
 最早检查点。正式阶段连续 128 steps 没有刷新全局最佳损失则提前停止。失败是终止状态，

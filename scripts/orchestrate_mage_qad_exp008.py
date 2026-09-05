@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import subprocess
@@ -12,7 +13,7 @@ import time
 from pathlib import Path
 
 from shadow_lab.mage_qad_campaign import atomic_json
-from shadow_lab.mage_qad_data import prompt_identity
+from shadow_lab.mage_qad_data import prompt_identity, validate_qad_manifest
 
 
 def read_json(path: Path):
@@ -21,6 +22,68 @@ def read_json(path: Path):
 
 class ExperimentFailed(RuntimeError):
     """A measured stage failure, distinct from recoverable monitor transport errors."""
+
+
+def validate_prepared_campaign(plan):
+    """Reuse frozen data and the completed 174-layer pilot as interface evidence."""
+    prepared = plan["prepared"]
+    if prepared["approved_protocol"] != "image_and_text_174" or not prepared["user_instruction"]:
+        raise ExperimentFailed("prepared launch requires the recorded protocol decision")
+    data = Path(plan["qad_data"])
+    rows = [json.loads(line) for line in (data / "qad.jsonl").read_text().splitlines()]
+    manifest = read_json(data / "manifest.json")
+    validate_qad_manifest(rows, manifest)
+    if manifest["data_sha256"] != prepared["data_sha256"]:
+        raise ExperimentFailed("prepared data identity changed")
+    proof_path = Path(prepared["auxiliary_pilot_report"])
+    if (
+        hashlib.sha256(proof_path.read_bytes()).hexdigest()
+        != prepared["auxiliary_pilot_report_sha256"]
+    ):
+        raise ExperimentFailed("174-layer pilot evidence changed")
+    proof = read_json(proof_path)
+    if (
+        proof["status"] != "completed"
+        or proof["arm"] != "auxiliary"
+        or proof["trainable_layers"] != 174
+        or len(proof["train"]) != 8
+        or len(proof["validation"]) != 8
+    ):
+        raise ExperimentFailed("174-layer auxiliary pilot did not complete")
+    pilot_data_path = Path(prepared["pilot_data"])
+    if hashlib.sha256(pilot_data_path.read_bytes()).hexdigest() != proof["data_sha256"]:
+        raise ExperimentFailed("pilot prompt identities changed")
+    pilot_data = read_json(pilot_data_path)
+    pilot_prompts = {
+        prompt_identity(row["prompt"])
+        for split in ("train", "validation")
+        for row in pilot_data[split]
+    }
+    if len(pilot_prompts) != 16:
+        raise ExperimentFailed("expected sixteen independent protocol-development prompts")
+    config = read_json(Path(plan["config"]))
+    if config.get("text_initial_fraction") != 0.1 or config.get("adamw_foreach") is not False:
+        raise ExperimentFailed("formal objective differs from the approved pilot rule")
+    exclusions = plan["protocol_development_exclusions"]
+    if not exclusions:
+        raise ExperimentFailed("protocol-development exclusions are required")
+    excluded = {prompt_identity(read_json(Path(plan["probe_sample"]))["prompt"])}
+    for path in exclusions:
+        excluded.update(
+            prompt_identity(json.loads(line)["prompt"])
+            for line in Path(path).read_text().splitlines()
+            if line.strip()
+        )
+    if not pilot_prompts.issubset(excluded):
+        raise ExperimentFailed("pilot prompts are missing from formal exclusions")
+    if any(prompt_identity(row["prompt"]) in excluded for row in rows):
+        raise ExperimentFailed("protocol-development prompt leaked into formal data")
+    return dict(
+        data_sha256=manifest["data_sha256"],
+        interface_evidence="completed_174_layer_pilot",
+        excluded_prompts=len(excluded),
+        approved_protocol=prepared["approved_protocol"],
+    )
 
 
 def process_alive(pid: int) -> bool:
@@ -159,10 +222,17 @@ def main():
         )
 
     try:
-        while True:
-            summaries = []
-            for shard in plan["screening"]:
-                code = """import json, os
+        cli = [plan["python"], "-u", "scripts/run_mage_flow_healing.py"]
+        if plan.get("prepared"):
+            publish(phase="prepared_data", preparation=validate_prepared_campaign(plan))
+            if args.observe_only:
+                publish(status="observing", downstream_launch_disabled=True)
+                return
+        else:
+            while True:
+                summaries = []
+                for shard in plan["screening"]:
+                    code = """import json, os
 from pathlib import Path
 p=Path(INPUT_PATH)
 a=p/'accepted.jsonl'
@@ -175,91 +245,92 @@ except ProcessLookupError: result['alive']=False
 if result['finished']: result['report']=json.loads((p/'run.json').read_text())
 print(json.dumps(result))
 """.replace("INPUT_PATH", repr(shard["directory"])).replace("INPUT_PID", str(shard["pid"]))
-                if shard["host"] == "local":
-                    result = subprocess.run(
-                        ["python3", "-c", code], capture_output=True, text=True, check=True
-                    )
-                else:
-                    result = retry_transport(
-                        ["ssh", "-o", "ConnectTimeout=10", shard["host"], "python3", "-"],
-                        input=code,
-                        capture_output=True,
-                        text=True,
-                    )
-                summary = json.loads(result.stdout)
-                summary["host"] = shard["host"]
-                summaries.append(summary)
-                if not summary["finished"] and not summary["alive"]:
-                    raise ExperimentFailed(
-                        f"screening process exited without completion: {shard['host']}"
-                    )
-            probe = read_json(Path(plan["probe_report"]))
-            publish(screening=summaries, probe=probe)
-            if args.observe_only:
-                publish(
-                    status="observing",
-                    phase="data_ready" if all(s["finished"] for s in summaries) else "screening",
-                    downstream_launch_disabled=True,
-                )
-                time.sleep(plan.get("poll_seconds", 30))
-                continue
-            if (not probe or probe.get("status") not in {"passed", "failed"}) and not process_alive(
-                plan["probe_pid"]
-            ):
+                    if shard["host"] == "local":
+                        result = subprocess.run(
+                            ["python3", "-c", code], capture_output=True, text=True, check=True
+                        )
+                    else:
+                        result = retry_transport(
+                            ["ssh", "-o", "ConnectTimeout=10", shard["host"], "python3", "-"],
+                            input=code,
+                            capture_output=True,
+                            text=True,
+                        )
+                    summary = json.loads(result.stdout)
+                    summary["host"] = shard["host"]
+                    summaries.append(summary)
+                    if not summary["finished"] and not summary["alive"]:
+                        raise ExperimentFailed(
+                            f"screening process exited without completion: {shard['host']}"
+                        )
                 probe = read_json(Path(plan["probe_report"]))
-                if not probe or probe.get("status") not in {"passed", "failed"}:
-                    raise ExperimentFailed("interface probe exited without a terminal report")
-            if probe and probe["status"] == "failed":
-                raise ExperimentFailed(
-                    "four-position interface probe failed; QAD launch prohibited"
+                publish(screening=summaries, probe=probe)
+                if args.observe_only:
+                    publish(
+                        status="observing",
+                        phase="data_ready"
+                        if all(s["finished"] for s in summaries)
+                        else "screening",
+                        downstream_launch_disabled=True,
+                    )
+                    time.sleep(plan.get("poll_seconds", 30))
+                    continue
+                if (
+                    not probe or probe.get("status") not in {"passed", "failed"}
+                ) and not process_alive(plan["probe_pid"]):
+                    probe = read_json(Path(plan["probe_report"]))
+                    if not probe or probe.get("status") not in {"passed", "failed"}:
+                        raise ExperimentFailed("interface probe exited without a terminal report")
+                if probe and probe["status"] == "failed":
+                    raise ExperimentFailed(
+                        "four-position interface probe failed; QAD launch prohibited"
+                    )
+                if all(s["finished"] for s in summaries) and probe and probe["status"] == "passed":
+                    break
+                time.sleep(plan.get("poll_seconds", 30))
+            publish(phase="freeze_data")
+            combined = []
+            for index, shard in enumerate(plan["screening"]):
+                if shard["host"] == "local":
+                    source = Path(shard["directory"]) / "accepted.jsonl"
+                else:
+                    source = root / f"accepted-{index}.jsonl"
+                    subprocess.run(
+                        [
+                            "rsync",
+                            "-a",
+                            f"{shard['host']}:{shard['directory']}/accepted.jsonl",
+                            str(source),
+                        ],
+                        check=True,
+                    )
+                combined.extend(
+                    json.loads(line) for line in source.read_text().splitlines() if line.strip()
                 )
-            if all(s["finished"] for s in summaries) and probe and probe["status"] == "passed":
-                break
-            time.sleep(plan.get("poll_seconds", 30))
-        publish(phase="freeze_data")
-        combined = []
-        for index, shard in enumerate(plan["screening"]):
-            if shard["host"] == "local":
-                source = Path(shard["directory"]) / "accepted.jsonl"
-            else:
-                source = root / f"accepted-{index}.jsonl"
-                subprocess.run(
-                    [
-                        "rsync",
-                        "-a",
-                        f"{shard['host']}:{shard['directory']}/accepted.jsonl",
-                        str(source),
-                    ],
-                    check=True,
+            probe_sample = json.loads(Path(plan["probe_sample"]).read_text())
+            excluded_prompts = {prompt_identity(probe_sample["prompt"])}
+            for exclusion_path in plan.get("protocol_development_exclusions", []):
+                excluded_prompts.update(
+                    prompt_identity(json.loads(line)["prompt"])
+                    for line in Path(exclusion_path).read_text().splitlines()
+                    if line.strip()
                 )
-            combined.extend(
-                json.loads(line) for line in source.read_text().splitlines() if line.strip()
+            combined = [r for r in combined if prompt_identity(r["prompt"]) not in excluded_prompts]
+            sources = root / "accepted-sources.jsonl"
+            sources.write_text("".join(json.dumps(row) + "\n" for row in combined))
+            child_run(
+                [
+                    *cli,
+                    "build-data",
+                    "--sources",
+                    str(sources),
+                    "--eval-pool",
+                    plan["evaluation_pool"],
+                    "--out",
+                    plan["qad_data"],
+                ],
+                "build_data",
             )
-        probe_sample = json.loads(Path(plan["probe_sample"]).read_text())
-        excluded_prompts = {prompt_identity(probe_sample["prompt"])}
-        for exclusion_path in plan.get("protocol_development_exclusions", []):
-            excluded_prompts.update(
-                prompt_identity(json.loads(line)["prompt"])
-                for line in Path(exclusion_path).read_text().splitlines()
-                if line.strip()
-            )
-        combined = [r for r in combined if prompt_identity(r["prompt"]) not in excluded_prompts]
-        sources = root / "accepted-sources.jsonl"
-        sources.write_text("".join(json.dumps(row) + "\n" for row in combined))
-        cli = [plan["python"], "-u", "scripts/run_mage_flow_healing.py"]
-        child_run(
-            [
-                *cli,
-                "build-data",
-                "--sources",
-                str(sources),
-                "--eval-pool",
-                plan["evaluation_pool"],
-                "--out",
-                plan["qad_data"],
-            ],
-            "build_data",
-        )
         child_run(
             [
                 *cli,

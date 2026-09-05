@@ -33,6 +33,7 @@
 - **Mage QUASAR QAD** — Mage Flow 的第一阶段 NVFP4 修复：以 BF16 Mage 为教师训练 MMDiT Linear 的 latent 权重，并在独立质量门通过后冻结为 ES 的 master 权重。它不同于只用均匀显著性选择 clip 的静态 QUASAR-grid 初始化。
 - **Mage NVFP4 两阶段修复（two-stage healing）** — 先执行 Mage QUASAR QAD，再以冻结的已修复 master 权重执行 ES clip refinement；阶段间设自动质量门和人工视觉门，前一阶段未放行时不得启动后一阶段。_避免：QUASAR 校准、ES 校准。_
 - **在线教师轨迹蒸馏（online teacher trajectory distillation）** — Mage QUASAR QAD 在四个去噪位置让 BF16 教师与 NVFP4 学生接收相同的学生当前 latent、prompt 和 timestep，并以教师 MMDiT 输出监督学生，直接约束滚动生成中累积的量化偏差。
+- **末层文本辅助监督（final-block text auxiliary supervision）** — EXP-008 在相同学生状态上额外匹配最终 MMDiT block 的教师文本输出，为图像输出未使用的末层文本分支提供梯度。系数仅在训练集首条样本校准一次（初始贡献为图像损失的 10%）并随检查点保存；验证和检查点选择仍只用图像教师误差。
 - **已修复 master（healed master）** — 通过 QUASAR 自动质量门与人工视觉门的 latent MMDiT 权重快照；它是后续 ES clip refinement 唯一允许使用的重建源，区别于原始 BF16 master 和静态 QUASAR-grid master。
 - **裁剪基因组（clip genome）** — 把参与 NVFP4 重建的各层、各分组裁剪阈值按稳定布局展平后的搜索向量；布局负责在向量切片与具名权重分组之间往返，使候选可重放、可哈希比较。
 - **演化策略搜索中心（ES search center）** — 演化策略当前搜索分布的中心点；在无约束 latent 空间中接受成对噪声估计的更新，再映射为有界裁剪基因组。配置、中心和 generation 游标共同构成可续跑的搜索状态。

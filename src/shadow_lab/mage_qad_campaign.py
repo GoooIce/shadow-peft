@@ -15,7 +15,7 @@ from typing import TypedDict
 
 import torch
 
-from .mage_qad import trajectory_loss
+from .mage_qad import trajectory_loss, trajectory_objective
 from .mage_qad_checkpoint import load_checkpoint, save_checkpoint
 from .mage_qad_data import validate_qad_manifest
 
@@ -43,6 +43,8 @@ class MageQADConfig:
     seed: int = 8008
     height: int = 512
     width: int = 512
+    text_initial_fraction: float = 0.0
+    adamw_foreach: bool | None = None
 
     def __post_init__(self):
         if min(self.height, self.width) <= 0 or self.height % 16 or self.width % 16:
@@ -55,6 +57,11 @@ class MageQADConfig:
             raise ValueError("learning rate must be positive and finite")
         if not math.isfinite(self.weight_decay) or self.weight_decay < 0:
             raise ValueError("weight decay must be nonnegative and finite")
+        if (
+            not math.isfinite(self.text_initial_fraction)
+            or not 0 <= self.text_initial_fraction <= 1
+        ):
+            raise ValueError("initial text loss fraction must be finite and within 0..1")
 
 
 class QADProgress(TypedDict):
@@ -68,6 +75,7 @@ class QADProgress(TypedDict):
     history: list[dict]
     stage_initial_loss: float | None
     stage_best_step: int
+    text_supervision: dict | None
 
 
 def run_mage_qad(
@@ -101,7 +109,10 @@ def run_mage_qad(
         raise FileExistsError("QAD output directory is not empty")
     out.mkdir(parents=True, exist_ok=True)
     optimizer = torch.optim.AdamW(
-        controller.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
+        controller.parameters(),
+        lr=config.learning_rate,
+        weight_decay=config.weight_decay,
+        foreach=config.adamw_foreach,
     )
     controller.bind_optimizer(optimizer)
     progress: QADProgress
@@ -125,6 +136,7 @@ def run_mage_qad(
             "history": [],
             "stage_initial_loss": None,
             "stage_best_step": 0,
+            "text_supervision": None,
         }
     train = [r for r in rows if r["split"] == "qad_train"]
     validation = [r for r in rows if r["split"] == "qad_val"]
@@ -155,6 +167,42 @@ def run_mage_qad(
         atomic_json(out / "live.json", live)
 
     try:
+        if config.text_initial_fraction:
+            if not resume:
+                publish("calibrating_text_supervision", sample_id=train[0]["sample_id"])
+                with torch.random.fork_rng():
+                    python_rng = random.getstate()
+                    try:
+                        calibration = trajectory_objective(
+                            controller.model, teacher, source(train[0])
+                        )
+                    finally:
+                        random.setstate(python_rng)
+                image_mse, text_mse = calibration["image_mse"], calibration["text_mse"]
+                if min(image_mse, text_mse) <= 0:
+                    raise ValueError(
+                        "text supervision calibration requires positive initial errors"
+                    )
+                progress["text_supervision"] = dict(
+                    coefficient=config.text_initial_fraction * image_mse / text_mse,
+                    initial_fraction=config.text_initial_fraction,
+                    calibration_sample_id=train[0]["sample_id"],
+                    calibration_split="qad_train",
+                    image_mse=image_mse,
+                    text_mse=text_mse,
+                )
+            supervision = progress.get("text_supervision")
+            if (
+                not supervision
+                or supervision["calibration_sample_id"] != train[0]["sample_id"]
+                or supervision["initial_fraction"] != config.text_initial_fraction
+                or not math.isfinite(supervision["coefficient"])
+                or supervision["coefficient"] <= 0
+            ):
+                raise ValueError("missing or invalid frozen text supervision coefficient")
+            report["text_supervision"] = supervision
+            atomic_json(out / "text-supervision.json", supervision)
+            atomic_json(report_path, report)
         while progress["stage_index"] < len(stages):
             stage, budget = stages[progress["stage_index"]]
             report["stage"] = stage
@@ -162,7 +210,19 @@ def run_mage_qad(
             publish("preparing_trajectory", next_step=progress["step"] + 1)
             batch = source(train[progress["step"] % len(train)])
             publish("forward_backward", next_step=progress["step"] + 1)
-            training_loss = trajectory_loss(controller.model, teacher, batch, backward=True)
+            if config.text_initial_fraction:
+                assert progress["text_supervision"] is not None
+                metrics = trajectory_objective(
+                    controller.model,
+                    teacher,
+                    batch,
+                    coefficient=progress["text_supervision"]["coefficient"],
+                    backward=True,
+                )
+                training_loss = metrics["objective"]
+            else:
+                training_loss = trajectory_loss(controller.model, teacher, batch, backward=True)
+                metrics = dict(objective=training_loss, image_mse=training_loss, text_mse=None)
             parameters = controller.parameters()
             if any(p.grad is None or not torch.isfinite(p.grad).all() for p in parameters):
                 raise FloatingPointError("missing or non-finite all-layer gradient")
@@ -181,6 +241,18 @@ def run_mage_qad(
             progress["step"] += 1
             progress["stage_step"] += 1
             invocation_steps += 1
+            atomic_json(
+                out / "last-step.json",
+                dict(
+                    step=progress["step"],
+                    stage=stage,
+                    metrics=metrics,
+                    gradient_layers=len(parameters),
+                    saliency_layers=controller.saliency_layer_count,
+                    finite_state=True,
+                    updated_at=time.time(),
+                ),
+            )
             at_end = progress["stage_step"] == budget
             early_stop = False
             improved = False
@@ -223,6 +295,7 @@ def run_mage_qad(
                         "stage": stage,
                         "qad_val_loss": val_loss,
                         "training_loss": training_loss,
+                        "training_metrics": metrics,
                     }
                 )
                 early_stop = (

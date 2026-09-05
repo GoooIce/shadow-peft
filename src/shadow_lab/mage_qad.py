@@ -86,6 +86,71 @@ def trajectory_loss(
     return sum(losses)
 
 
+def trajectory_objective(
+    student,
+    teacher,
+    trajectory: MageTrajectory,
+    *,
+    coefficient=0.0,
+    backward=False,
+    terminal_callback=None,
+) -> dict:
+    """Match final-block text and image outputs at the same student states.
+
+    A zero coefficient leaves the unused text graph out of backward entirely.
+    This is important: multiplying it by zero would manufacture zero gradients.
+    """
+    if not math.isfinite(coefficient) or coefficient < 0:
+        raise ValueError("text coefficient must be finite and nonnegative")
+    teacher.requires_grad_(False).eval()
+    captured = {}
+
+    def capture(key):
+        def hook(module, args, output):
+            if not isinstance(output, tuple) or len(output) != 2:
+                raise ValueError("Mage final block must return (text, image)")
+            captured[key] = output[0]
+
+        return hook
+
+    handles = [
+        student.transformer_blocks[-1].register_forward_hook(capture("student")),
+        teacher.transformer_blocks[-1].register_forward_hook(capture("teacher")),
+    ]
+    latent = trajectory.latent.detach().clone()
+    totals = dict(image_mse=0.0, text_mse=0.0, objective=0.0)
+    try:
+        for sigma, next_sigma in zip(trajectory.sigmas, trajectory.sigmas[1:], strict=False):
+            captured.clear()
+            inputs = dict(
+                trajectory.conditioning,
+                img=latent,
+                timesteps=torch.full((1,), sigma, dtype=latent.dtype, device=latent.device),
+            )
+            with torch.no_grad():
+                target = teacher(**inputs)
+            with torch.set_grad_enabled(backward):
+                prediction = student(**inputs)
+                image_loss = F.mse_loss(prediction.float(), target.float()) / 4
+                text_loss = F.mse_loss(captured["student"].float(), captured["teacher"].float()) / 4
+                objective = image_loss + coefficient * text_loss if coefficient else image_loss
+                if not all(torch.isfinite(x).item() for x in (image_loss, text_loss, objective)):
+                    raise FloatingPointError("non-finite text pilot loss")
+                if backward:
+                    objective.backward()
+            for key, value in zip(totals, (image_loss, text_loss, objective), strict=True):
+                totals[key] += float(value.detach())
+            latent = (latent.float() + (next_sigma - sigma) * prediction.detach().float()).to(
+                latent.dtype
+            )
+        if terminal_callback is not None:
+            terminal_callback(latent.detach())
+        return totals
+    finally:
+        for handle in handles:
+            handle.remove()
+
+
 class MageTrajectorySource:
     """Capture upstream's first denoiser inputs, including conditioning and noise.
 
