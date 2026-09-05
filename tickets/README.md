@@ -27,14 +27,15 @@
 | [ENG-005](ENG-005-human-annotation-app.md) | Engineering | 人类友好的盲测标注应用 | in-progress | RES-001, ENG-003 |
 | [EXP-005](EXP-005-es-hyperparameter-calibration.md) | Experiment | Phase 2 sigma/alpha 校准 | done（门禁失败） | ENG-003, ENG-004 |
 | [EXP-006](EXP-006-es-cross-prompt-gradient-gate.md) | Experiment | Phase 2b 跨 prompt 梯度门禁 | done（门禁失败） | EXP-005 |
-| [EXP-007](EXP-007-es-cross-prompt-gradient-gate-20x.md) | Experiment | Phase 2c 跨 prompt 梯度门禁 20× 扩展 | in-progress | EXP-006 |
-| [EXP-001](EXP-001-gb10-main-study.md) | Experiment | GB10 主实验与人工验收 | blocked | ENG-005, EXP-005, EXP-006, EXP-007 |
+| [EXP-007](EXP-007-es-cross-prompt-gradient-gate-20x.md) | Experiment | Phase 2c 跨 prompt 梯度门禁 20× 扩展 | done（人工视觉否决，不可部署） | EXP-006 |
+| [EXP-008](EXP-008-mage-nvfp4-two-stage-healing.md) | Engineering | Mage NVFP4 两阶段修复 | ready-for-agent | ENG-003, ENG-004 |
+| [EXP-001](EXP-001-gb10-main-study.md) | Experiment | GB10 主实验与人工验收 | blocked | ENG-005, EXP-005, EXP-006, EXP-007, EXP-008 |
 | [EXP-002](EXP-002-qwen3-vl-nvfp4.md) | Experiment | Qwen3-VL NVFP4 扩展 | blocked | RES-002, EXP-001 |
 | [EXP-003](EXP-003-vae-nvfp4.md) | Experiment | VAE NVFP4 可行性与扩展 | blocked | RES-002, EXP-001 |
 | [EXP-004](EXP-004-ablations-and-report.md) | Experiment | 消融、泛化与报告 | blocked | EXP-001 |
 
 RES-001、RES-002、ENG-001、ENG-002、ENG-003 与 ENG-004 已于 2026-09-04 完成。
-Phase 2 与 Phase 2b 均已按预注册门禁结束且未冻结配置；EXP-006 的三批平均梯度通过首个
-未见批次、但在第二个未见批次退化。用户已要求以精确 16,000 张预算领取 EXP-007 做高功效
-复核，完成前 EXP-001 不得启动。ENG-005 已在研究结论通过人工评审后并行领取，仍等待真实
-人员 pilot。
+Phase 2 与 Phase 2b 均已按预注册门禁结束且未冻结配置；EXP-007 在静态 QUASAR-grid 起点
+完成梯度与选择阶段后被人工视觉否决，并在确认 6/8 时停止，不可部署。EXP-008 已完成
+triage，要求先以 BF16 Mage 教师执行完整 QUASAR QAD，通过自动与人工质量门后才能从 healed
+master 重做 ES；EXP-001 继续 blocked。ENG-005 仍等待真实人员 pilot。

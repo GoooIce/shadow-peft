@@ -1,12 +1,13 @@
 ---
 id: EXP-007
 type: experiment
-status: in-progress
+status: done
 priority: P0
 depends_on: [EXP-006]
 blocks: [EXP-001]
 hardware: GB10
 phase: 2c
+verdict: stopped-invalid-for-deployment
 ---
 
 # Phase 2c：ES 跨 prompt 梯度门禁 20× 扩展
@@ -59,3 +60,9 @@ EXP-006 的 800 张预算只足以快速否决三批平均梯度，无法充分�
 
 - 2026-09-05：用户要求将 EXP-006 的 800 张预算放大到 20 倍；领取本票并在运行前冻结为
   上述恰好 16,000 张、40 个互不重叠 episode 的协议。
+- 2026-09-05：24/24 梯度 episode 与 8/8 选择 episode 完成；静态 QUASAR-grid 起点上的
+  `alpha=0.0001` 在选择集取得平均 Reward delta `+0.110890`、8/8 批不退化。确认集完成
+  6/8 后，维护者检查实际落盘图片并判定视觉质量明显不可用，要求立即停止。生成、评分、
+  收尾和协调进程均已终止；两台 GB10 无本实验残留进程。
+- 本票没有生成最终 `result.json`，不得宣称确认门通过；已完成数据只可作为“静态
+  QUASAR-grid 起点不足”的负结果，不得用于部署或初始化后续 ES。替代流程见 EXP-008。

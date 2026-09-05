@@ -3,7 +3,7 @@ id: EXP-001
 type: experiment
 status: blocked
 priority: P0
-depends_on: [ENG-005, EXP-005, EXP-006, EXP-007]
+depends_on: [ENG-005, EXP-005, EXP-006, EXP-007, EXP-008]
 hardware: GB10
 phase: 3
 ---

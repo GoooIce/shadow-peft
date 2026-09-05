@@ -30,6 +30,10 @@
 - **联合校准（Joint Calibration）** — 激活量化 scale 的校准前向挂上 shadow 联跑；若在无注入分布上校准，注入修正会落在校准范围外被截断。
 - **原生影子量化（Native Shadow Quantization）** — 影子权重在训练期间即处于部署精度格式（nvfp8 / nvfp4 两级缩放格点）的形态：权重全程在格点上，存训一致（部署即所见），无主权重与 STE。
 - **QUASAR 重建（QUASAR Reconstruction）** — 无 shadow 的 NVFP4 量化学生训练：保留 latent 高精度权重，以 AdamW 二阶矩作在线显著性，在每次前向搜索 E2M1 码分配并加权拟合 E4M3 块 scale，再用 STE 更新 latent 权重；它属于 QAD 对照臂，不改变“基座永远冻结”的 shadow 训练语义。
+- **Mage QUASAR QAD** — Mage Flow 的第一阶段 NVFP4 修复：以 BF16 Mage 为教师训练 MMDiT Linear 的 latent 权重，并在独立质量门通过后冻结为 ES 的 master 权重。它不同于只用均匀显著性选择 clip 的静态 QUASAR-grid 初始化。
+- **Mage NVFP4 两阶段修复（two-stage healing）** — 先执行 Mage QUASAR QAD，再以冻结的已修复 master 权重执行 ES clip refinement；阶段间设自动质量门和人工视觉门，前一阶段未放行时不得启动后一阶段。_避免：QUASAR 校准、ES 校准。_
+- **在线教师轨迹蒸馏（online teacher trajectory distillation）** — Mage QUASAR QAD 在四个去噪位置让 BF16 教师与 NVFP4 学生接收相同的学生当前 latent、prompt 和 timestep，并以教师 MMDiT 输出监督学生，直接约束滚动生成中累积的量化偏差。
+- **已修复 master（healed master）** — 通过 QUASAR 自动质量门与人工视觉门的 latent MMDiT 权重快照；它是后续 ES clip refinement 唯一允许使用的重建源，区别于原始 BF16 master 和静态 QUASAR-grid master。
 - **裁剪基因组（clip genome）** — 把参与 NVFP4 重建的各层、各分组裁剪阈值按稳定布局展平后的搜索向量；布局负责在向量切片与具名权重分组之间往返，使候选可重放、可哈希比较。
 - **演化策略搜索中心（ES search center）** — 演化策略当前搜索分布的中心点；在无约束 latent 空间中接受成对噪声估计的更新，再映射为有界裁剪基因组。配置、中心和 generation 游标共同构成可续跑的搜索状态。
 - **奖励校准（reward calibration）** — 在冻结提示词池和评分器上预先确定各质量轴的方向、中心与尺度，把异量纲分数变成可聚合、跨 episode 可比的标准化奖励规则。
