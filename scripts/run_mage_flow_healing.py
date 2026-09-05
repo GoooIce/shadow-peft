@@ -111,6 +111,12 @@ def parse_args():
     train.add_argument("--campaign", required=True, type=Path)
     train.add_argument("--resume", action="store_true")
     train.add_argument("--stop-after", type=int)
+    train.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=500,
+        help="Periodic saves in cumulative optimizer steps; best/stage/stop also save",
+    )
     for command in (
         "checkpoint-gate",
         "human-dev",
@@ -181,6 +187,7 @@ def main() -> None:
             args.campaign,
             resume=args.resume,
             stop_after=args.stop_after,
+            checkpoint_interval=args.checkpoint_interval,
         )
         print(json.dumps(report))
         if report["status"] == "failed":

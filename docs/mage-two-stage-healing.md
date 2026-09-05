@@ -42,12 +42,14 @@ latent、conditioning、timestep，输出 MSE 每步反传后释放图，不反�
 最早检查点。正式阶段连续 128 steps 没有刷新全局最佳损失则提前停止。失败是终止状态，
 不能用 `--resume` 越过失败门。正常暂停可用 `--stop-after N`，同配置追加 `--resume` 续训。
 
-每次提交训练 step 原子保存 `latest.pt`。最佳检查点另存 `best-N.pt`，含 latent、完整
+默认累计每 500 次优化器更新原子保存 `latest.pt`（`--checkpoint-interval 500`）；刷新最佳、
+阶段结束、提前停止和 `--stop-after` 主动暂停也保存。保存间隔是运行参数，不改变训练配置或验证频率。最佳检查点另存 `best-N.pt`，含 latent、完整
 transformer state、optimizer/二阶矩、Torch/Python/CUDA RNG、packed NVFP4、显著性 clip genome、
 layout、配置、实现/模型/数据身份和内容哈希。先提交新最佳，再提交 latest，最后删除不再被
 引用的旧最佳。`campaign.json` 和每阶段 `report.json` 提供状态，不宣称训练产物已可部署。
 
-注意：每步保存全部 master 和 optimizer 的 I/O 成本较高；本实现优先保证精确续训。训练和
+`last_checkpoint_step` 标记最近落盘步数，实时进度可能领先它。意外中断后从最近检查点精确
+恢复，该检查点之后的更新需要重做；正常暂停先保存。训练和
 packed 产物可在单元测试验证，原生 kernel 和图片质量必须在 GB10 实测后才有证据。
 
 ## 一次性自动门与人工门

@@ -90,13 +90,17 @@ def run_mage_qad(
     *,
     resume: bool = False,
     stop_after: int | None = None,
+    checkpoint_interval: int = 500,
 ) -> dict:
     """Run smoke -> 32 preflight -> 256 pilot -> <=1024 formal steps.
 
-    Every committed step is resumable. Failed stages are terminal. A voluntary
-    stop returns a paused report; it cannot be used to unlock evaluation gates.
+    Periodic, best, stage-end and voluntary-stop checkpoints are resumable.
+    Failed stages are terminal. A voluntary stop returns a paused report;
+    it cannot be used to unlock evaluation gates.
     Checkpoint choice depends only on finite state and minimum qad_val MSE.
     """
+    if type(checkpoint_interval) is not int or checkpoint_interval < 1:
+        raise ValueError("checkpoint interval must be a positive integer")
     validate_qad_manifest(rows, manifest)
     if not all(implementation.get(k) for k in ("model", "code")):
         raise ValueError("model and implementation identities are required")
@@ -148,6 +152,8 @@ def run_mage_qad(
         "status": "running",
         "identity": identity,
         "stage": stages[min(progress["stage_index"], 3)][0],
+        "checkpoint_interval": checkpoint_interval,
+        "last_checkpoint_step": progress["step"],
     }
     atomic_json(report_path, report)
     invocation_started = time.time()
@@ -323,23 +329,28 @@ def run_mage_qad(
                     progress["stage_step"] = 0
                     progress["stage_initial_loss"] = val_loss
                     progress["stage_best_step"] = progress["step"]
-            publish("saving_checkpoint", training_loss=training_loss)
-            if improved:
-                save_checkpoint(
-                    out / progress["best_checkpoint"], controller, optimizer, identity, progress
-                )
-            save_checkpoint(latest_path, controller, optimizer, identity, progress)
-            # Old best files are obsolete only after latest commits the new selection.
-            for old in out.glob("best-*.pt"):
-                if old.name != progress["best_checkpoint"]:
-                    old.unlink()
+            pausing = stop_after is not None and invocation_steps >= stop_after
+            if (
+                improved
+                or at_end
+                or early_stop
+                or pausing
+                or progress["step"] % checkpoint_interval == 0
+            ):
+                publish("saving_checkpoint", training_loss=training_loss)
+                if improved:
+                    save_checkpoint(
+                        out / progress["best_checkpoint"], controller, optimizer, identity, progress
+                    )
+                save_checkpoint(latest_path, controller, optimizer, identity, progress)
+                report["last_checkpoint_step"] = progress["step"]
+                # Old best files are obsolete only after latest commits the new selection.
+                for old in out.glob("best-*.pt"):
+                    if old.name != progress["best_checkpoint"]:
+                        old.unlink()
             report.update(progress=progress)
             atomic_json(report_path, report)
-            if (
-                stop_after is not None
-                and invocation_steps >= stop_after
-                and progress["stage_index"] < 4
-            ):
+            if pausing and progress["stage_index"] < 4:
                 report["status"] = "paused"
                 atomic_json(report_path, report)
                 return report

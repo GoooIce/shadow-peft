@@ -337,9 +337,22 @@ def test_staged_campaign_resume_matches_uninterrupted_training(tmp_path):
     assert a["sha256"] == b["sha256"]
 
 
-def test_campaign_selects_earliest_best_and_early_stops_after_128_formal_steps(tmp_path):
+@pytest.mark.parametrize("interval", [500, 100])
+def test_campaign_selects_earliest_best_and_early_stops_after_128_formal_steps(
+    tmp_path, monkeypatch, interval
+):
+    import shadow_lab.mage_qad_campaign as campaign
     from shadow_lab.mage_qad_campaign import MageQADConfig, run_mage_qad
     from shadow_lab.mage_qad_data import build_qad_pool
+
+    saved_steps = []
+    original_save = campaign.save_checkpoint
+
+    def tracked_save(path, controller, optimizer, identity, progress):
+        saved_steps.append((path.name, progress["step"]))
+        return original_save(path, controller, optimizer, identity, progress)
+
+    monkeypatch.setattr(campaign, "save_checkpoint", tracked_save)
 
     class FlatDenoiser(nn.Module):
         def __init__(self, weight):
@@ -375,6 +388,7 @@ def test_campaign_selects_earliest_best_and_early_stops_after_128_formal_steps(t
         {"model": "test", "code": "test"},
         config,
         tmp_path,
+        checkpoint_interval=interval,
     )
     assert report["status"] == "selected", report.get("error")
     assert report["progress"]["best_step"] == 1
@@ -382,6 +396,12 @@ def test_campaign_selects_earliest_best_and_early_stops_after_128_formal_steps(t
     assert report["progress"]["stages"][-1]["early_stop"]
     assert report["selected_checkpoint"] == "best-1.pt"
     assert not report["es_authorized"]
+    expected = [1, 33, 289, 417]
+    if interval == 100:
+        expected = sorted(expected + [100, 200, 300, 400])
+    assert [step for name, step in saved_steps if name == "latest.pt"] == expected
+    assert [step for name, step in saved_steps if name.startswith("best-")] == [1]
+    assert report["last_checkpoint_step"] == 417
 
 
 def test_rare_qad_stratum_is_represented_in_both_train_and_validation():
