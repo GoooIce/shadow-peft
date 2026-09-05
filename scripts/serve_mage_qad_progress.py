@@ -18,6 +18,12 @@ PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="vi
 async function poll(){try{const r=await fetch('/status.json'),s=await r.json(),l=s.live||{},p=s.progress||{},m=s.last_step||{};const done=l.completed_optimizer_steps??p.step??0;const state=s.status||s.monitor_status||'准备中';$('state').textContent=({running:'运行中',failed:'已停止：检查失败',selected:'已选定最佳检查点',awaiting_human:'等待人工评审',monitor_error:'监控连接异常'}[state]||state);$('phase').textContent=phaseNames[l.phase]||s.monitor_phase||'加载模型与验证身份';$('steps').textContent=`${done} / 1313`;$('stage').textContent=stages[l.stage||s.stage]||'准备';$('memory').textContent=l.cuda_peak_gib?`${l.cuda_peak_gib.toFixed(1)} GiB`:'—';$('bar').style.width=`${done/1313*100}%`;$('detail').textContent=s.error||((l.phase==='qad_val')?`本次验证 ${l.completed||0} / ${l.total||128} 条`:'全部 174 层参与训练；阶段门通过后自动继续。');const parts=[];if(m.metrics){parts.push(`最近更新：第 ${m.step} 步\n图像训练 MSE：${m.metrics.image_mse.toFixed(6)}\n文本训练 MSE：${m.metrics.text_mse?.toExponential(4)??'—'}\n总训练损失：${m.metrics.objective.toFixed(6)}\n有限梯度 / 显著性覆盖：${m.gradient_layers} / ${m.saliency_layers} 层`)}if(p.best_loss!=null)parts.push(`最佳图像验证 MSE：${p.best_loss.toFixed(6)}（第 ${p.best_step} 步）`);if(s.text_supervision)parts.push(`固定文本系数：${s.text_supervision.coefficient.toExponential(5)}`);$('metrics').textContent=parts.join('\n\n')||'首次更新后显示。';$('updated').textContent=`页面更新：${new Date(s.now*1000).toLocaleTimeString()} · 训练状态：${l.updated_at?new Date(l.updated_at*1000).toLocaleTimeString():'等待首条记录'} · 每 10 秒刷新`}catch(e){$('updated').textContent='正在重新连接状态服务…'}setTimeout(poll,10000)}poll();</script></html>"""
 
 
+def effective_status(campaign, monitor):
+    if monitor.get("status") in {"failed", "monitor_error", "awaiting_human"}:
+        return monitor["status"]
+    return campaign.get("status") or monitor.get("status")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign", type=Path, required=True)
@@ -39,7 +45,7 @@ def main():
                 payload = json.dumps(
                     dict(
                         now=time.time(),
-                        status=campaign.get("status"),
+                    status=effective_status(campaign, monitor),
                         stage=campaign.get("stage"),
                         error=campaign.get("error") or monitor.get("error"),
                         monitor_status=monitor.get("status"),
