@@ -60,9 +60,18 @@ Web：`http://192.168.1.177:8778`。训练时仅展示进度；两组完成并�
 
 - dc4a 图像组 PID 699971：`~/runs/mage-flow/exp008-text-pilot-image-20260905/`
 - gooo 辅助组 PID 531725：`~/runs/mage-flow/exp008-text-pilot-auxiliary-20260905/`
-- dc4a Web PID 719628：`~/runs/mage-flow/exp008-text-pilot-web-20260905/`
+- dc4a Web 当前 PID 756370（更新收集器后重启）：`~/runs/mage-flow/exp008-text-pilot-web-20260905/`
 - 日志位于各机 `~/logs/exp008-text-pilot-{image,auxiliary,web}-20260905.log`。
 
 全部进程以 setsid 启动。Web 收集器每 30 秒读取两组状态，完成后直连同步辅助组图片，
 生成配对分析并开放盲投。训练不会因浏览器关闭或对话结束而停止；Web 不自动启动正式训练。
 每组保留 `report.json`、最终 latent/saliency `final.pt` 及基线/最终 PNG。
+
+收集器额外核实真实训练 PID，进程死亡且无完成报告时停止等待；数据、代码或协议冲突
+归为对照无效，不作为网络重连无限重试。Web 根目录绑定数据 SHA-256 与实验来源，
+展示提示词必须与两组报告的数据身份一致。图片直连传输后核对 MD5；完成产物固定
+SHA-256，服务重启先校验原产物，不能覆盖已有投票对应的图片。
+
+本地完整测试 424 passed、18 skipped；收集器后续可靠性修复新增 4 项测试通过。
+独立 Web 测试目录验证了自动保存、刷新恢复、8 题锁定和主动揭盲；测试票未写入真实服务。
+浏览器验证已按用户指令切换至 ego-browser，规则记录在 `agent.md`。

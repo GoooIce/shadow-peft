@@ -19,8 +19,22 @@ from shadow_lab.mage_qad_campaign import atomic_json
 from shadow_lab.mage_qad_text_pilot import compare_pilot_reports
 
 
-def handler_class(ballots, html):
+def bind_experiment(root, identity):
+    path = root / "experiment.json"
+    if path.is_file():
+        if json.loads(path.read_text()) != identity:
+            raise ValueError("ballot root belongs to a different experiment")
+    else:
+        if (root / "verdict.json").exists():
+            raise ValueError("cannot adopt an unbound completed ballot")
+        atomic_json(path, identity)
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+def handler_class(ballots, html, readiness=None):
     def ready():
+        if readiness is not None:
+            return readiness.is_set()
         path = ballots.root / "verdict.json"
         return path.is_file() and json.loads(path.read_text())["status"] == "completed"
 
@@ -98,28 +112,73 @@ def handler_class(ballots, html):
     return Handler
 
 
-def collect(root, image_directory, auxiliary_host, auxiliary_directory):
+def collect(
+    root,
+    image_directory,
+    auxiliary_host,
+    auxiliary_directory,
+    identity,
+    experiment_hash,
+    readiness,
+    image_pid,
+    auxiliary_pid,
+):
+    committed = root / "verdict.json"
+    if committed.is_file():
+        try:
+            verdict = json.loads(committed.read_text())
+            if verdict.get("experiment_sha256") != experiment_hash:
+                raise ValueError("completed ballot identity mismatch")
+            for relative, digest in json.loads((root / "artifact-sha256.json").read_text()).items():
+                if hashlib.sha256((root / relative).read_bytes()).hexdigest() != digest:
+                    raise ValueError("completed ballot artifact changed")
+            if verdict["status"] == "completed":
+                readiness.set()
+        except (ValueError, OSError, KeyError) as error:
+            atomic_json(root / "progress.json", dict(phase="invalid", updated_at=time.time()))
+            atomic_json(root / "collector-error.json", dict(error=str(error)))
+        return
     while True:
         try:
             reports = {}
+            stat_path = Path(f"/proc/{image_pid}/stat")
+            image_alive = (
+                stat_path.is_file() and stat_path.read_text().split(") ", 1)[1].split()[0] != "Z"
+            )
             local = image_directory / "report.json"
             if local.is_file():
                 reports["image"] = json.loads(local.read_text())
+            elif not image_alive:
+                atomic_json(root / "progress.json", dict(phase="failed", updated_at=time.time()))
+                return
+            remote_code = (
+                "import json; from pathlib import Path; "
+                f"p=Path('/proc/{auxiliary_pid}/stat'); "
+                "alive=p.is_file() and p.read_text().split(') ',1)[1].split()[0]!='Z'; "
+                f"r=Path({str(auxiliary_directory / 'report.json')!r}); "
+                "print(json.dumps(dict(alive=alive,report=json.loads(r.read_text()))))"
+            )
             remote = subprocess.run(
                 [
                     "ssh",
                     "-o",
                     "ConnectTimeout=10",
                     auxiliary_host,
-                    "cat",
-                    str(auxiliary_directory / "report.json"),
+                    "python3 -c " + shlex.quote(remote_code),
                 ],
                 check=True,
                 capture_output=True,
                 text=True,
                 timeout=20,
             )
-            reports["auxiliary"] = json.loads(remote.stdout)
+            remote_state = json.loads(remote.stdout)
+            reports["auxiliary"] = remote_state["report"]
+            for arm, report in reports.items():
+                if report["data_sha256"] != identity["data_sha256"]:
+                    raise ValueError("displayed prompts differ from experiment data")
+                alive = image_alive if arm == "image" else remote_state["alive"]
+                if not alive and report["status"] not in {"completed", "failed"}:
+                    report.update(status="failed", phase="failed")
             progress = dict(
                 updated_at=time.time(),
                 phase="running",
@@ -138,6 +197,8 @@ def collect(root, image_directory, auxiliary_host, auxiliary_directory):
             )
             if any(r["status"] == "failed" for r in reports.values()):
                 progress["phase"] = "failed"
+                atomic_json(root / "progress.json", progress)
+                return
             if len(reports) == 2 and all(r["status"] == "completed" for r in reports.values()):
                 for arm in reports:
                     (root / arm / "images").mkdir(parents=True, exist_ok=True)
@@ -196,11 +257,31 @@ def collect(root, image_directory, auxiliary_host, auxiliary_directory):
                         if not (root / arm / "images/validation" / f"{index:02d}.png").is_file():
                             raise ValueError("missing final image")
                 verdict = compare_pilot_reports(reports["image"], reports["auxiliary"])
+                verdict["experiment_sha256"] = experiment_hash
                 progress["phase"] = "ready" if verdict["status"] == "completed" else "invalid"
+                artifact_paths = [
+                    f for arm in reports for f in (root / arm).rglob("*") if f.is_file()
+                ]
+                atomic_json(
+                    root / "artifact-sha256.json",
+                    {
+                        str(f.relative_to(root)): hashlib.sha256(f.read_bytes()).hexdigest()
+                        for f in artifact_paths
+                    },
+                )
                 atomic_json(root / "verdict.json", verdict)
                 atomic_json(root / "progress.json", progress)
+                if verdict["status"] == "completed":
+                    readiness.set()
                 return
             atomic_json(root / "progress.json", progress)
+        except ValueError as error:
+            atomic_json(root / "collector-error.json", dict(error=str(error)))
+            atomic_json(
+                root / "progress.json",
+                dict(phase="invalid", updated_at=time.time(), error_type=type(error).__name__),
+            )
+            return
         except Exception as error:
             atomic_json(
                 root / "progress.json",
@@ -216,16 +297,38 @@ def main():
     parser.add_argument("--image-directory", type=Path, required=True)
     parser.add_argument("--auxiliary-host", default="gooo")
     parser.add_argument("--auxiliary-directory", type=Path, required=True)
+    parser.add_argument("--image-pid", type=int, required=True)
+    parser.add_argument("--auxiliary-pid", type=int, required=True)
     parser.add_argument("--port", type=int, default=8778)
     args = parser.parse_args()
+    identity = dict(
+        data_sha256=hashlib.sha256(args.data.read_bytes()).hexdigest(),
+        image_directory=str(args.image_directory),
+        auxiliary_host=args.auxiliary_host,
+        auxiliary_directory=str(args.auxiliary_directory),
+    )
+    experiment_hash = bind_experiment(args.root, identity)
     ballots = PilotBallots(args.root, json.loads(args.data.read_text()))
+    readiness = threading.Event()
     html = Path(__file__).resolve().parents[1] / "assets/web/mage-text-pilot.html"
     threading.Thread(
         target=collect,
-        args=(args.root, args.image_directory, args.auxiliary_host, args.auxiliary_directory),
+        args=(
+            args.root,
+            args.image_directory,
+            args.auxiliary_host,
+            args.auxiliary_directory,
+            identity,
+            experiment_hash,
+            readiness,
+            args.image_pid,
+            args.auxiliary_pid,
+        ),
         daemon=True,
     ).start()
-    ThreadingHTTPServer(("0.0.0.0", args.port), handler_class(ballots, html)).serve_forever()
+    ThreadingHTTPServer(
+        ("0.0.0.0", args.port), handler_class(ballots, html, readiness)
+    ).serve_forever()
 
 
 if __name__ == "__main__":
