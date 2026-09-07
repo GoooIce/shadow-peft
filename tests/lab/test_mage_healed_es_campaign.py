@@ -483,3 +483,12 @@ def test_gradient_pairwise_stats_reports_cosine_sign_and_positive_fraction():
         gradient_pairwise_stats([a])
     with pytest.raises(ValueError):
         gradient_pairwise_stats([a, torch.zeros(4)])
+
+
+def test_create_accepts_a_prepared_directory_but_never_a_second_ledger(tmp_path):
+    master = make_master(tmp_path)
+    (tmp_path / "exp009" / "logs").mkdir(parents=True)  # the coordinator pre-creates logs/
+    campaign = new_campaign(tmp_path, master)
+    assert campaign.state["status"] == "gradient"
+    with pytest.raises(FileExistsError, match="ledger"):
+        new_campaign(tmp_path, master)

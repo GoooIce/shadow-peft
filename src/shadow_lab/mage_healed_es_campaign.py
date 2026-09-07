@@ -361,7 +361,9 @@ class ESCampaign:
     ) -> ESCampaign:
         protocol.bind(master)
         directory = Path(directory)
-        directory.mkdir(parents=True, exist_ok=False)
+        directory.mkdir(parents=True, exist_ok=True)
+        if (directory / "campaign.json").exists():
+            raise FileExistsError("campaign ledger already exists")
         workflow = HealingWorkflow.inherit(
             directory / "healing",
             source_ledger,
