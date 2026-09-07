@@ -22,10 +22,16 @@ def quality_gate(
     candidate_sha256: str,
     final: bool = False,
     trajectory_limits: dict[str, float] | None = None,
+    trajectory_tolerance: tuple[float, float] | None = None,
     axis_floors: dict[str, float] | None = None,
     comparison_scores: dict[str, dict[str, float]] | None = None,
 ) -> dict:
-    """Evaluate paired Reward plus independent axes; missing evidence fails closed."""
+    """Evaluate paired Reward plus independent axes; missing evidence fails closed.
+
+    ``trajectory_limits`` is the EXP-008 per-sample bound. ``trajectory_tolerance``
+    is the EXP-009 batch-mean band ``(baseline_mean, factor)``: the candidate's mean
+    teacher loss may not exceed ``baseline_mean * factor``.
+    """
     reasons = []
     try:
         if calibration.weights != {axis: 0.5 for axis in PRIMARY_REWARD_AXES}:
@@ -37,6 +43,19 @@ def quality_gate(
             raise ValueError("incomplete or duplicate paired samples")
         if evaluation["candidate_sha256"] != candidate_sha256:
             raise ValueError("candidate identity mismatch")
+        if trajectory_tolerance is not None:
+            baseline_mean, factor = trajectory_tolerance
+            losses = [row["teacher_loss"] for row in rows]
+            if (
+                not all(math.isfinite(loss) and loss >= 0 for loss in losses)
+                or not math.isfinite(baseline_mean)
+                or baseline_mean < 0
+                or not math.isfinite(factor)
+                or factor < 1
+            ):
+                raise ValueError("teacher trajectory tolerance requires finite non-negative losses")
+            if statistics.fmean(losses) > baseline_mean * factor:
+                reasons.append("teacher trajectory batch mean exceeds tolerance")
         if evaluation["failures"] != 0:
             reasons.append("generation failures")
         if (
@@ -164,6 +183,63 @@ class HealingWorkflow:
     def read(self) -> dict:
         return json.loads(self.path.read_text())
 
+    @classmethod
+    def inherit(
+        cls,
+        directory: Path,
+        source: dict,
+        *,
+        selected_sha256: str,
+        evaluation_sha256: str,
+        source_sha256: str,
+    ) -> HealingWorkflow:
+        """Start a new ES campaign ledger from a master whose two gates already passed.
+
+        Only the healed master's ``checkpoint_val`` gate and ``human_dev`` approval carry
+        over; every ES phase and every final holdout starts unclaimed in the new ledger.
+        """
+        if content_hash(source) != source_sha256:
+            raise ValueError("source healing ledger hash mismatch")
+        if source.get("identity") != {
+            "selected_sha256": selected_sha256,
+            "evaluation_sha256": evaluation_sha256,
+        }:
+            raise ValueError("source healing ledger belongs to another master or pool")
+        checkpoint_gate = source.get("gates", {}).get("checkpoint_val", {})
+        human_gate = source.get("gates", {}).get("human_dev", {})
+        approval = source.get("approvals", {}).get("human_dev", {})
+        if (
+            not checkpoint_gate.get("passed")
+            or checkpoint_gate.get("candidate_sha256") != selected_sha256
+        ):
+            raise ValueError("source checkpoint_val gate did not pass for this master")
+        if (
+            human_gate.get("status") != "approved"
+            or not approval.get("passed")
+            or not approval.get("approved")
+            or approval.get("candidate_sha256") != selected_sha256
+        ):
+            raise ValueError("source human_dev approval is missing for this master")
+        path = directory / "healing.json"
+        if path.exists():
+            raise FileExistsError("inherited healing ledger already exists")
+        atomic_json(
+            path,
+            {
+                "identity": {
+                    "selected_sha256": selected_sha256,
+                    "evaluation_sha256": evaluation_sha256,
+                },
+                "gates": {"checkpoint_val": checkpoint_gate, "human_dev": human_gate},
+                "approvals": {"human_dev": approval},
+                "es": {},
+                "success": False,
+                "deployable": False,
+                "inherited_from": {"healing_sha256": source_sha256},
+            },
+        )
+        return cls(directory, selected_sha256=selected_sha256, evaluation_sha256=evaluation_sha256)
+
     def once(self, split: str, candidate_sha256: str, evaluate) -> dict:
         prerequisites = {
             "checkpoint_val": None,
@@ -261,3 +337,14 @@ class HealingWorkflow:
         ).get("passed"):
             raise RuntimeError("automatic and explicit human_dev approval required before ES")
         return dict(self.identity, approval_sha256=content_hash(state["approvals"]["human_dev"]))
+
+    def record_es(self, phase: str, report: dict) -> None:
+        """Record one ES phase result exactly once; final gates consume ``confirmation``."""
+        self.es_permit()
+        state = self.read()
+        if phase in state["es"]:
+            raise RuntimeError(f"ES phase {phase!r} is already recorded")
+        if report.get("candidate_sha256") is None or type(report.get("passed")) is not bool:
+            raise ValueError("ES phase report needs a candidate identity and a boolean verdict")
+        state["es"][phase] = report
+        atomic_json(self.path, state)

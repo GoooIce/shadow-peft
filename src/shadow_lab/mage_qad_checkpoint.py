@@ -66,6 +66,29 @@ def atomic_save(value, path: Path) -> None:
             os.unlink(name)
 
 
+def link_checkpoint(source: Path, target: Path) -> None:
+    """Atomically make ``target`` a second name for the already committed ``source``.
+
+    A best/latest pair with identical content needs one serialization, not two: the
+    save window is the campaign's OOM-prone phase. ``target`` keeps pointing at a
+    complete checkpoint at every instant; a later ``atomic_save`` to ``target``
+    replaces only that name and leaves ``source`` untouched.
+    """
+    if not source.is_file():
+        raise FileNotFoundError(f"cannot link missing checkpoint {source}")
+    if source.resolve() == target.resolve():
+        raise ValueError("checkpoint link source and target are the same path")
+    fd, name = tempfile.mkstemp(dir=target.parent, prefix=".qad-link-")
+    os.close(fd)
+    os.unlink(name)
+    try:
+        os.link(source, name)
+        os.replace(name, target)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
 def save_checkpoint(
     path: Path,
     controller: QuasarNVFP4Controller,

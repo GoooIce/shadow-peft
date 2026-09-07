@@ -360,13 +360,20 @@ def test_campaign_selects_earliest_best_and_early_stops_after_128_formal_steps(
     from shadow_lab.mage_qad_data import build_qad_pool
 
     saved_steps = []
+    linked = []
     original_save = campaign.save_checkpoint
+    original_link = campaign.link_checkpoint
 
     def tracked_save(path, controller, optimizer, identity, progress):
         saved_steps.append((path.name, progress["step"]))
         return original_save(path, controller, optimizer, identity, progress)
 
+    def tracked_link(source, target):
+        original_link(source, target)
+        linked.append((source.name, target.name, source.stat().st_ino == target.stat().st_ino))
+
     monkeypatch.setattr(campaign, "save_checkpoint", tracked_save)
+    monkeypatch.setattr(campaign, "link_checkpoint", tracked_link)
 
     class FlatDenoiser(nn.Module):
         def __init__(self, weight):
@@ -410,12 +417,36 @@ def test_campaign_selects_earliest_best_and_early_stops_after_128_formal_steps(
     assert report["progress"]["stages"][-1]["early_stop"]
     assert report["selected_checkpoint"] == "best-1.pt"
     assert not report["es_authorized"]
-    expected = [1, 33, 289, 417]
+    # A best refresh serializes once and hard-links latest to it; every other
+    # scheduled save still writes latest.pt itself.
+    expected = [33, 289, 417]
     if interval == 100:
         expected = sorted(expected + [100, 200, 300, 400])
     assert [step for name, step in saved_steps if name == "latest.pt"] == expected
     assert [step for name, step in saved_steps if name.startswith("best-")] == [1]
+    assert linked == [("best-1.pt", "latest.pt", True)]
+    assert (tmp_path / "best-1.pt").stat().st_ino != (tmp_path / "latest.pt").stat().st_ino
     assert report["last_checkpoint_step"] == 417
+
+
+def test_link_checkpoint_shares_content_until_the_next_save_replaces_only_the_link(tmp_path):
+    from shadow_lab.mage_qad_checkpoint import atomic_save, link_checkpoint
+
+    best = tmp_path / "best-7.pt"
+    latest = tmp_path / "latest.pt"
+    atomic_save({"step": 7}, best)
+    atomic_save({"step": 6}, latest)
+    link_checkpoint(best, latest)
+    assert best.stat().st_ino == latest.stat().st_ino
+    assert torch.load(latest, weights_only=True) == {"step": 7}
+    atomic_save({"step": 8}, latest)
+    assert torch.load(best, weights_only=True) == {"step": 7}
+    assert torch.load(latest, weights_only=True) == {"step": 8}
+    assert best.stat().st_ino != latest.stat().st_ino
+    with pytest.raises(FileNotFoundError):
+        link_checkpoint(tmp_path / "missing.pt", latest)
+    with pytest.raises(ValueError):
+        link_checkpoint(best, best)
 
 
 def test_rare_qad_stratum_is_represented_in_both_train_and_validation():

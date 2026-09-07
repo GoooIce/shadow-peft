@@ -99,6 +99,94 @@ def test_holdout_is_consumed_before_callback_even_on_crash(tmp_path):
         workflow.once("auto_test", "final", crash)
 
 
+def test_trajectory_tolerance_is_a_batch_mean_band_not_a_per_sample_bound(tmp_path):
+    result, calibration = evidence(tmp_path, 8)
+    ids = [r["sample_id"] for r in result["rows"]]
+    # Half the samples regress by 8%, half improve by 4%: per-sample limits fail,
+    # the batch-mean band (baseline 1.0, factor 1.05) passes at mean 1.02.
+    for index, row in enumerate(result["rows"]):
+        row["teacher_loss"] = 1.08 if index % 2 else 0.96
+    assert quality_gate(
+        result, calibration, ids, candidate_sha256="qad", trajectory_tolerance=(1.0, 1.05)
+    )["passed"]
+    assert not quality_gate(
+        result,
+        calibration,
+        ids,
+        candidate_sha256="qad",
+        trajectory_limits={sid: 1.0 for sid in ids},
+    )["passed"]
+    tight = quality_gate(
+        result, calibration, ids, candidate_sha256="qad", trajectory_tolerance=(1.0, 1.01)
+    )
+    assert tight["reasons"] == ["teacher trajectory batch mean exceeds tolerance"]
+    result["rows"][0]["teacher_loss"] = float("nan")
+    assert not quality_gate(
+        result, calibration, ids, candidate_sha256="qad", trajectory_tolerance=(1.0, 1.05)
+    )["passed"]
+
+
+def test_inherited_ledger_carries_only_the_master_permits_and_verifies_source(tmp_path):
+    import copy as _copy
+
+    from shadow_lab.mage_healing import HealingWorkflow
+    from shadow_lab.mage_qad_checkpoint import content_hash
+
+    source = HealingWorkflow(tmp_path / "exp008", selected_sha256="qad", evaluation_sha256="pool")
+    source.once("checkpoint_val", "qad", lambda: dict(passed=True, candidate_sha256="qad"))
+    state = source.read()
+    with pytest.raises(ValueError, match="human_dev"):
+        HealingWorkflow.inherit(
+            tmp_path / "early",
+            state,
+            selected_sha256="qad",
+            evaluation_sha256="pool",
+            source_sha256=content_hash(state),
+        )
+    state["gates"]["human_dev"] = dict(passed=True, status="approved", candidate_sha256="qad")
+    state["approvals"]["human_dev"] = dict(
+        passed=True, approved=True, candidate_sha256="qad", maintainer="tester", wins=29
+    )
+    state["es"]["sigma"] = dict(passed=False, status="failed")
+    with pytest.raises(ValueError, match="hash"):
+        HealingWorkflow.inherit(
+            tmp_path / "bad-hash",
+            state,
+            selected_sha256="qad",
+            evaluation_sha256="pool",
+            source_sha256="0" * 64,
+        )
+    with pytest.raises(ValueError, match="another master"):
+        HealingWorkflow.inherit(
+            tmp_path / "bad-master",
+            state,
+            selected_sha256="other",
+            evaluation_sha256="pool",
+            source_sha256=content_hash(state),
+        )
+    inherited = HealingWorkflow.inherit(
+        tmp_path / "exp009",
+        _copy.deepcopy(state),
+        selected_sha256="qad",
+        evaluation_sha256="pool",
+        source_sha256=content_hash(state),
+    )
+    ledger = inherited.read()
+    assert ledger["es"] == {} and not ledger["deployable"] and not ledger["success"]
+    assert ledger["inherited_from"] == {"healing_sha256": content_hash(state)}
+    assert inherited.es_permit()["selected_sha256"] == "qad"
+    with pytest.raises(RuntimeError, match="confirmation"):
+        inherited.once("auto_test", "final", lambda: {})
+    with pytest.raises(FileExistsError):
+        HealingWorkflow.inherit(
+            tmp_path / "exp009",
+            state,
+            selected_sha256="qad",
+            evaluation_sha256="pool",
+            source_sha256=content_hash(state),
+        )
+
+
 def test_blind_gate_hides_arms_and_requires_24_wins_and_explicit_human(tmp_path):
     Image = pytest.importorskip("PIL.Image")
     from shadow_lab.mage_healing import HealingWorkflow

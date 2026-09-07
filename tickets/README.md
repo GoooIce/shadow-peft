@@ -28,8 +28,9 @@
 | [EXP-005](EXP-005-es-hyperparameter-calibration.md) | Experiment | Phase 2 sigma/alpha 校准 | done（门禁失败） | ENG-003, ENG-004 |
 | [EXP-006](EXP-006-es-cross-prompt-gradient-gate.md) | Experiment | Phase 2b 跨 prompt 梯度门禁 | done（门禁失败） | EXP-005 |
 | [EXP-007](EXP-007-es-cross-prompt-gradient-gate-20x.md) | Experiment | Phase 2c 跨 prompt 梯度门禁 20× 扩展 | done（人工视觉否决，不可部署） | EXP-006 |
-| [EXP-008](EXP-008-mage-nvfp4-two-stage-healing.md) | Engineering | Mage NVFP4 两阶段修复 | in-progress | ENG-003, ENG-004 |
-| [EXP-001](EXP-001-gb10-main-study.md) | Experiment | GB10 主实验与人工验收 | blocked | ENG-005, EXP-005, EXP-006, EXP-007, EXP-008 |
+| [EXP-008](EXP-008-mage-nvfp4-two-stage-healing.md) | Engineering | Mage NVFP4 两阶段修复 | done（QAD 双门通过；ES sigma 门失败，不可部署） | ENG-003, ENG-004 |
+| [EXP-009](EXP-009-healed-master-es-gradient-campaign.md) | Experiment | Phase 2e healed master 多批梯度 ES clip refinement | in-progress | EXP-008 |
+| [EXP-001](EXP-001-gb10-main-study.md) | Experiment | GB10 主实验与人工验收 | blocked | ENG-005, EXP-005, EXP-006, EXP-007, EXP-008, EXP-009 |
 | [EXP-002](EXP-002-qwen3-vl-nvfp4.md) | Experiment | Qwen3-VL NVFP4 扩展 | blocked | RES-002, EXP-001 |
 | [EXP-003](EXP-003-vae-nvfp4.md) | Experiment | VAE NVFP4 可行性与扩展 | blocked | RES-002, EXP-001 |
 | [EXP-004](EXP-004-ablations-and-report.md) | Experiment | 消融、泛化与报告 | blocked | EXP-001 |
@@ -39,3 +40,11 @@ Phase 2 与 Phase 2b 均已按预注册门禁结束且未冻结配置；EXP-007 
 完成梯度与选择阶段后被人工视觉否决，并在确认 6/8 时停止，不可部署。EXP-008 已完成
 triage，要求先以 BF16 Mage 教师执行完整 QUASAR QAD，通过自动与人工质量门后才能从 healed
 master 重做 ES；EXP-001 继续 blocked。ENG-005 仍等待真实人员 pilot。
+
+2026-09-07 EXP-008 收官：QAD 选定 `best-673`，`checkpoint_val` 与 `human_dev`（29/30）双门
+通过并产出 healed master 及 NVFP4 推理载荷；ES sigma 阶段在 candidate-00 三硬门全破，一次性
+门已消费，不可部署。2026-09-08 归因（`docs/experiments/exp008-es-sigma-attribution-20260908.md`）
+认定失败源于门的结构性不可通过、σ 取自代码默认值、N=8 人口远低于 EXP-007 实测出信号的
+N=80×24 批量级三者叠加；后继 ES 由 EXP-009（路线 A，2026-09-08 拍板并领取）以新冻结协议
+在 healed master 上重做：N=80×24 批、σ=0.003、批梯度一致性预注册停止规则、对中心施加的
+容差带门，最终门与续代均需维护者显式声明。

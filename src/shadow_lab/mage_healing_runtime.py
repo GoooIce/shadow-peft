@@ -46,12 +46,21 @@ class MageHealingRuntime:
         return {"arm": arm}
 
     def evaluate(
-        self, clips: torch.Tensor, samples, out: Path, *, candidate_sha256: str, arm: str = "qad"
+        self,
+        clips: torch.Tensor,
+        samples,
+        out: Path,
+        *,
+        candidate_sha256: str,
+        arm: str = "qad",
+        replay: bool = True,
     ) -> dict:
         """Two independent materializations/generations, with images saved each batch.
 
         BF16/static/RTN are used only as paired/blind baselines. Only the QAD arm
         can pass the native healing quality gate. Every refusal counts as failure.
+        ``replay=False`` is the single-pass exploration mode for ES candidates: it
+        records no replay evidence, so such a report can never pass ``quality_gate``.
         """
         out.mkdir(parents=True, exist_ok=False)
         report: dict = {
@@ -61,16 +70,17 @@ class MageHealingRuntime:
             "compute_capability": list(torch.cuda.get_device_capability()),
             "kernel_names": [],
             "sample_ids": [s.sample_id for s in samples],
+            "replay": replay,
         }
         first_rows = {}
-        for replay in (False, True):
+        for replaying in (False, True) if replay else (False,):
             packed = self.materialize(arm, clips)
-            report["replay_weight_sha256" if replay else "weight_sha256"] = content_hash(packed)
+            report["replay_weight_sha256" if replaying else "weight_sha256"] = content_hash(packed)
             for index, sample in enumerate(samples):
                 try:
                     trajectory = self.source({"prompt": sample.prompt, "seed": sample.seed})
                     loss = trajectory_loss(self.transformer, self.teacher, trajectory)
-                    profile = not replay and index == 0 and arm == "qad"
+                    profile = not replaying and index == 0 and arm == "qad"
                     if profile:
                         from torch.profiler import ProfilerActivity
 
@@ -91,10 +101,10 @@ class MageHealingRuntime:
                     buffer = io.BytesIO()
                     image.save(buffer, format="PNG")
                     payload = buffer.getvalue()
-                    path = out / f"{index:03d}{'-replay' if replay else ''}.png"
+                    path = out / f"{index:03d}{'-replay' if replaying else ''}.png"
                     path.write_bytes(payload)
                     row = score_reward_batch([RewardInput(payload, sample)], self.scorers)[0]
-                    if replay:
+                    if replaying:
                         first_rows[sample.sample_id].update(
                             replay_sha256=hashlib.sha256(payload).hexdigest(),
                             replay_scores=row["scores"],
@@ -105,7 +115,7 @@ class MageHealingRuntime:
                 except Exception as error:
                     report["failures"] += 1
                     report.setdefault("errors", []).append(
-                        {"sample_id": sample.sample_id, "replay": replay, "error": str(error)}
+                        {"sample_id": sample.sample_id, "replay": replaying, "error": str(error)}
                     )
                 report["rows"] = list(first_rows.values())
                 atomic_json(out / "evaluation.json", report)

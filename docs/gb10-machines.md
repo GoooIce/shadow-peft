@@ -5,6 +5,7 @@
 ## 主机与互联
 
 - `ssh goooinext` = dc4a(局域网 192.168.1.177);`ssh gooo`(局域网 192.168.1.197)。两台 GPU 空闲与否用 `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader`。
+- **双机大流量互联尽量走光纤直连**:用户明确要求优先用 SFP+ 光纤口直连两台 GB10,而不是经交换机的铜口(2026-09-07 实测 87GB 检查点 rsync 走 enP7s7 仅协商 2500Mb/s 铜口,约 280MB/s)。传大权重前先确认路径落在光纤口上,不在则提醒用户插线/配置。
 - **dc4a 可直接 `ssh gooo`**:双机间传模型/池/权重一律走直连 rsync(如 `ssh goooinext 'rsync -a ~/models/X/ gooo:models/X/'`),绝不经 Mac 中转。传完必对 md5(模型文件、数据池都验)。
 - 两台可同时跑各自训练 + 测试台(128GB 显存充裕);训练吞吐会互相无关,同机混跑只有轻微损耗。
 

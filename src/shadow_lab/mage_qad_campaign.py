@@ -16,7 +16,7 @@ from typing import TypedDict
 import torch
 
 from .mage_qad import trajectory_loss, trajectory_objective
-from .mage_qad_checkpoint import load_checkpoint, save_checkpoint
+from .mage_qad_checkpoint import link_checkpoint, load_checkpoint, save_checkpoint
 from .mage_qad_data import validate_qad_manifest
 
 
@@ -342,10 +342,11 @@ def run_mage_qad(
             ):
                 publish("saving_checkpoint", training_loss=training_loss)
                 if improved:
-                    save_checkpoint(
-                        out / progress["best_checkpoint"], controller, optimizer, identity, progress
-                    )
-                save_checkpoint(latest_path, controller, optimizer, identity, progress)
+                    best_path = out / progress["best_checkpoint"]
+                    save_checkpoint(best_path, controller, optimizer, identity, progress)
+                    link_checkpoint(best_path, latest_path)
+                else:
+                    save_checkpoint(latest_path, controller, optimizer, identity, progress)
                 report["last_checkpoint_step"] = progress["step"]
                 # Old best files are obsolete only after latest commits the new selection.
                 for old in out.glob("best-*.pt"):

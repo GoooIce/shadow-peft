@@ -1,0 +1,48 @@
+{
+  "monitor_directory": "/home/goooice/runs/mage-flow/exp009-es-monitor-20260908",
+  "repository": "/home/goooice/Code/shadow-peft",
+  "python": "/home/goooice/Code/Mage/mage_flow/.venv/bin/python",
+  "campaign": "/home/goooice/runs/mage-flow/exp009-es-20260908",
+  "source_campaign": "/home/goooice/runs/mage-flow/exp008-qad-20260905",
+  "protocol": "/home/goooice/Code/shadow-peft/configs/mage-healed-es/exp009.json",
+  "model": "/home/goooice/models/Mage-Flow-Turbo",
+  "evaluation_pool": "/home/goooice/data/mage-flow-eval/exp008-frozen-500/pool.jsonl",
+  "calibration": "/home/goooice/data/mage-flow-eval/exp008-frozen-500/bf16-reward-calibration.json",
+  "hps": "/home/goooice/models/HPSv2/HPS_v2.1_compressed.pt",
+  "clip": "/home/goooice/models/CLIP-ViT-H-14-laion2B-s32B-b79K/open_clip_model.safetensors",
+  "local_episodes": [
+    0,
+    2,
+    4,
+    6,
+    8,
+    10,
+    12,
+    14,
+    16,
+    18,
+    20,
+    22
+  ],
+  "remote_episodes": [
+    1,
+    3,
+    5,
+    7,
+    9,
+    11,
+    13,
+    15,
+    17,
+    19,
+    21,
+    23
+  ],
+  "remote": {
+    "host": "gooo",
+    "repository": "/home/goooice/Code/shadow-peft",
+    "python": "/home/goooice/Code/Mage/mage_flow/.venv/bin/python",
+    "campaign": "/home/goooice/runs/mage-flow/exp009-es-20260908"
+  },
+  "poll_seconds": 60
+}

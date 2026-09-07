@@ -2,7 +2,7 @@
 id: EXP-008
 type: engineering
 category: enhancement
-status: in-progress
+status: done（QAD 双门通过；ES sigma 门失败，不可部署）
 priority: P0
 depends_on: [ENG-003, ENG-004]
 blocks: [EXP-001]
@@ -86,28 +86,28 @@ ES 最终候选只解封一次 `auto_test` 60 条：平均 paired Reward delta �
 
 **Acceptance criteria:**
 
-- [ ] 独立的 Mage QAD 单元测试证明教师/学生接收相同 latent、conditioning、timestep，且
+- [x] 独立的 Mage QAD 单元测试证明教师/学生接收相同 latent、conditioning、timestep，且
       四个去噪位置均被覆盖。
-- [ ] 只有 174 个 MMDiT Linear latent 权重可训练；Qwen3-VL、VAE、norm、bias 和其他参数
+- [x] 只有 174 个 MMDiT Linear latent 权重可训练；Qwen3-VL、VAE、norm、bias 和其他参数
       保持冻结，训练前向使用 NVFP4 W4A4 权重与 activation fake quant。
-- [ ] `qad_train` 1,024 条与 `qad_val` 128 条唯一且互不重叠，并与现有 500 条评估池无
+- [x] `qad_train` 1,024 条与 `qad_val` 128 条唯一且互不重叠，并与现有 500 条评估池无
       prompt/sample/seed 泄漏；数据来源、分层与哈希写入 manifest。
-- [ ] 接口 smoke、32-step preflight、256-step pilot 和最多 1,024-step 正式训练具有独立
+- [x] 接口 smoke、32-step preflight、256-step pilot 和最多 1,024-step 正式训练具有独立
       输出与停止门；任一级失败都不能启动下一级。
-- [ ] checkpoint 可精确续训，且完整记录 latent、optimizer/二阶矩、packed NVFP4、初始
+- [x] checkpoint 可精确续训，且完整记录 latent、optimizer/二阶矩、packed NVFP4、初始
       clip genome、配置和实现身份；重复物化得到相同权重与图片哈希。
-- [ ] 选定 checkpoint 是训练状态有限、零失败且 `qad_val` 轨迹损失最低的 checkpoint，
+- [x] 选定 checkpoint 是训练状态有限、零失败且 `qad_val` 轨迹损失最低的 checkpoint，
       且没有读取 `checkpoint_val`、`auto_test`、`human_dev` 或 `human_test` 来选择训练步数。
-- [ ] `checkpoint_val` 自动门强制 Reward ≥ -1.0、HPS/CLIP 各 ≥ 80% paired BF16、零失败、
+- [x] `checkpoint_val` 自动门强制 Reward ≥ -1.0、HPS/CLIP 各 ≥ 80% paired BF16、零失败、
       精确重放与 GB10 原生 NVFP4 kernel；失败时流程停止且不生成 ES 启动许可。
-- [ ] `human_dev` 四路盲测隐藏候选身份并随机化顺序；只有零明显崩坏且 QAD 至少 24/30
+- [x] `human_dev` 四路盲测隐藏候选身份并随机化顺序；只有零明显崩坏且 QAD 至少 24/30
       优于静态 QUASAR-grid，并收到维护者明确批准，才生成 ES 启动许可。
-- [ ] ES 使用 healed master 和 saliency-aware clip genome；测试能检测并拒绝原始 BF16
+- [x] ES 使用 healed master 和 saliency-aware clip genome；测试能检测并拒绝原始 BF16
       master、旧 ES center、QAD 后继续更新 latent 权重及旧 sigma/alpha 的复用。
 - [ ] 新起点依次完成 N=8 sigma preflight 与 N=30 步长确认；扩大预算必须由后续冻结票据
-      明确授权，不能由本票自动启动。
+      明确授权，不能由本票自动启动。**未达成：sigma 阶段在 candidate-00 失败，一次性门已消费。**
 - [ ] 最终 `auto_test` 与 `human_test` 只解封一次；自动门、人工门全部通过前不得产出
-      deployable/success 判定。
+      deployable/success 判定。**未触及：ES 链不可达，`deployable=false`、`success=false`。**
 
 **Out of scope:**
 
@@ -143,3 +143,26 @@ ES 最终候选只解封一次 `auto_test` 60 条：平均 paired Reward delta �
 - Code review 起点：`00413c270e89d9966520a326994ab52b77b3396c`。
   **Standards**：硬规范问题 0，低优先级维护性建议 1（ES 状态读写可进一步集中到工作流对象）。
   **Spec**：阻断性发现 0；后续复核建议的排除 manifest 完整性校验已补充并经失败→通过测试验证。
+
+## 终局（2026-09-07 收官，2026-09-08 归因）
+
+- 正式训练在累计第 801 步触发 128 步早停；选定 `best-673`（`qad_val` 图像教师 MSE 0.21871），
+  选点未读取任何留出集。检查点 `best-673.pt` 与 `latest.pt`（801）在 dc4a 落盘。
+- `checkpoint_val` 自动门通过：CLIP 0.3768 / HPS 0.2622 对 BF16 0.3757 / 0.2794，paired Reward
+  −0.216，non_regressions 13，零失败，原生 NVFP4 kernel 与精确重放审计通过。
+- `human_dev` 四路盲测通过：维护者 goooice 投票 wins 29/30 ≥ 24，visibly_broken 0，`approved`；
+  ES 启动许可 `approval_sha256=6a3593a4…` 生成。
+- ES sigma 阶段（σ=0.03、α=0.0025456、seed=42，32 条 `es_train`）在 candidate-00 失败：
+  `clip_h14 batch mean regressed`、`hps_v2_1 batch mean regressed`、`teacher trajectory regression`
+  三硬门全破（CLIP 0.3574 / HPS 0.2561 对 BF16 0.3800 / 0.2787，reward −0.489，non_regr 6/32）。
+  一次性门已消费，ES 链不可达；ledger `deployable=false`、`success=false`。
+- 存活产物：41 GB 训练态检查点、`qad-lean-best-673.pt`（25.27 GiB，sha256 a4f4ff23…）、
+  `qad-nvfp4-best-673.pt`（2.276 GiB，sha256 437f1c79…，174 层 packed + 32.1M clip 基因组），
+  后者已在 GB10 原生 kernel 与 Mac MPS（bf16）双端生成验证。
+- 归因见 `docs/experiments/exp008-es-sigma-attribution-20260908.md`：失败由硬门结构性不可通过
+  （对镜像候选施加逐样本与批均值零容差）、σ=0.03 为代码默认值而非测量值（EXP-005 同维度校准为
+  0.003）、N=8 人口比 EXP-007 实测出跨 prompt 梯度信号的量级（N=80×24 批）低两个数量级三者叠加
+  造成，单纯调小 σ 不会改变结局。
+- 本票结论：Mage QUASAR QAD → healed master 这一半成立并有完整证据；从 healed master 出发的
+  ES clip refinement 在本票协议下失败。后继 ES 由 EXP009（路线 A，2026-09-08 拍板）以新冻结
+  协议另行立项，本票不再重开任何门。
