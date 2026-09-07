@@ -12,9 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shlex
-import signal
 import subprocess
 import sys
 import time
@@ -163,57 +161,96 @@ class Coordinator:
         index = ledger["generations"][-1]["index"]
         return f"{self.remote['campaign']}/generation-{index:02d}/gradient-episode-{episode:02d}"
 
-    def remote_signature(self, episode: int) -> str:
-        # Matches the exact worker command line (trailing flag disambiguates 1 vs 10).
-        return f"{SCRIPT} gradient --campaign {self.remote['campaign']} --episode {episode} --no-register"
-
-    def dispatch_remote(self, ledger: dict, episode: int) -> int:
-        remote = self.remote
-        episode_dir = self.remote_episode_dir(ledger, episode)
-        probe = self.ssh(
-            f"if [ -f {shlex.quote(episode_dir)}/episode.json ]; then echo done; "
-            f"elif pgrep -f {shlex.quote(self.remote_signature(episode))} >/dev/null; then echo running; "
-            f"elif [ -f {shlex.quote(episode_dir)}.claimed ]; then echo stale; else echo fresh; fi"
+    def signature(self, campaign: str, episode: int) -> str:
+        # pgrep regex for the exact worker command line. The bracketed first character
+        # keeps the probing shell, whose own command line contains this text, from
+        # matching itself; the trailing flag disambiguates episode 1 from 10.
+        return (
+            f"[s]cripts/run_mage_healed_es_campaign.py gradient --campaign {campaign} "
+            f"--episode {episode} --no-register"
         )
-        state = probe.stdout.strip()
-        if state in {"done", "running"}:
-            return 0
+
+    def probe_state(self, *, remote: bool, ledger: dict, episode: int) -> str:
+        """done | running | stale | fresh | unreachable for one worker slot."""
+        if remote:
+            episode_dir = self.remote_episode_dir(ledger, episode)
+            signature = self.signature(self.remote["campaign"], episode)
+            result = self.ssh(
+                f"if [ -f {shlex.quote(episode_dir)}/episode.json ]; then echo done; "
+                f"elif pgrep -f {shlex.quote(signature)} >/dev/null; then echo running; "
+                f"elif [ -f {shlex.quote(episode_dir)}.claimed ]; then echo stale; else echo fresh; fi"
+            )
+            if result.returncode:
+                return "unreachable"
+            return result.stdout.strip() or "unreachable"
+        episode_dir = self.generation_dir(ledger) / f"gradient-episode-{episode:02d}"
+        if (episode_dir / "episode.json").exists():
+            return "done"
+        probe = subprocess.run(
+            ["pgrep", "-f", self.signature(str(self.campaign), episode)], capture_output=True
+        )
+        if probe.returncode == 0:
+            return "running"
+        if episode_dir.with_name(f"{episode_dir.name}.claimed").exists():
+            return "stale"
+        return "fresh"
+
+    def dispatch(self, *, remote: bool, ledger: dict, episode: int) -> str:
+        """Start a worker unless one already finished or is running; return the state.
+
+        A running worker is adopted rather than restarted, so a coordinator restart
+        never clobbers an episode that is still being written.
+        """
+        state = self.probe_state(remote=remote, ledger=ledger, episode=episode)
+        if state in {"done", "running", "unreachable"}:
+            return state
         force = ["--force"] if state == "stale" else []
+        target = (
+            self.remote
+            if remote
+            else {
+                "python": self.plan["python"],
+                "campaign": str(self.campaign),
+                "repository": self.plan["repository"],
+            }
+        )
         args = [
-            remote["python"],
+            target["python"],
             "-u",
             SCRIPT,
             "gradient",
             "--campaign",
-            remote["campaign"],
+            target["campaign"],
             "--episode",
             str(episode),
             "--no-register",
             *force,
             *self.common_args(),
         ]
-        log = f"{remote['campaign']}/logs/gradient-episode-{episode:02d}.log"
-        command = (
-            f"cd {shlex.quote(remote['repository'])} && "
-            f"setsid nohup {shlex.join(args)} >> {shlex.quote(log)} 2>&1 < /dev/null & echo $!"
-        )
-        result = self.ssh(command)
-        if result.returncode or not result.stdout.strip().isdigit():
-            raise CampaignHalted(
-                f"remote dispatch failed: {result.stderr.strip()} {result.stdout.strip()}"
+        log = f"{target['campaign']}/logs/gradient-episode-{episode:02d}.log"
+        if remote:
+            command = (
+                f"cd {shlex.quote(target['repository'])} && "
+                f"mkdir -p {shlex.quote(target['campaign'])}/logs && "
+                f"setsid nohup {shlex.join(args)} >> {shlex.quote(log)} 2>&1 < /dev/null & echo $!"
             )
-        return int(result.stdout.strip())
-
-    def poll_remote(self, ledger: dict, episode: int) -> str:
-        episode_dir = self.remote_episode_dir(ledger, episode)
-        result = self.ssh(
-            f"if [ -f {shlex.quote(episode_dir)}/episode.json ]; then echo done; "
-            f"elif pgrep -f {shlex.quote(self.remote_signature(episode))} >/dev/null; then echo running; "
-            f"else echo dead; fi"
-        )
-        if result.returncode:
-            return "unreachable"
-        return result.stdout.strip() or "unreachable"
+            result = self.ssh(command)
+            if result.returncode or not result.stdout.strip().isdigit():
+                raise CampaignHalted(
+                    f"remote dispatch failed: {result.stderr.strip()} {result.stdout.strip()}"
+                )
+        else:
+            Path(log).parent.mkdir(parents=True, exist_ok=True)
+            with open(log, "a") as stream:
+                subprocess.Popen(
+                    args,
+                    cwd=target["repository"],
+                    stdout=stream,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+        return "running"
 
     def fetch_remote(self, ledger: dict, episode: int) -> None:
         host = self.remote["host"]
@@ -239,9 +276,16 @@ class Coordinator:
         if remote_manifest != local_manifest:
             raise CampaignHalted(f"episode {episode} artifact hashes differ after peer sync")
 
-    def kill_remote(self, episode: int | None) -> None:
-        if episode is not None:
-            self.ssh(f"pkill -f {shlex.quote(self.remote_signature(episode))} || true", timeout=60)
+    def kill_worker(self, *, remote: bool, episode: int | None) -> None:
+        if episode is None:
+            return
+        if remote:
+            signature = self.signature(self.remote["campaign"], episode)
+            self.ssh(f"pkill -f {shlex.quote(signature)} || true", timeout=60)
+        else:
+            subprocess.run(
+                ["pkill", "-f", self.signature(str(self.campaign), episode)], capture_output=True
+            )
 
     # -- phases ---------------------------------------------------------
 
@@ -269,102 +313,48 @@ class Coordinator:
         protocol = ledger["protocol"]
         generation = ledger["generations"][-1]
         registered = {int(k) for k in generation["gradient"]["episodes"]}
-        local_queue = [e for e in self.plan["local_episodes"] if e not in registered]
-        remote_queue = [e for e in self.plan["remote_episodes"] if e not in registered]
+        queues = {
+            "local": [e for e in self.plan["local_episodes"] if e not in registered],
+            "remote": [e for e in self.plan["remote_episodes"] if e not in registered],
+        }
         if set(self.plan["local_episodes"]) | set(self.plan["remote_episodes"]) != set(
             protocol["gradient_episodes"]
         ):
             raise CampaignHalted("episode assignment does not cover the frozen gradient episodes")
-        if remote_queue:
+        if queues["remote"]:
             self.sync_remote_campaign(ledger)
-        local_proc: subprocess.Popen | None = None
-        local_episode: int | None = None
-        remote_pid: int | None = None
-        remote_episode: int | None = None
-        generation_dir = self.generation_dir(ledger)
-        logs = self.campaign / "logs"
-        logs.mkdir(parents=True, exist_ok=True)
+        active: dict[str, int | None] = {"local": None, "remote": None}
         try:
-            while local_queue or remote_queue or local_proc or remote_episode is not None:
-                # Local slot.
-                if local_proc is None and local_queue:
-                    local_episode = local_queue.pop(0)
-                    episode_dir = generation_dir / f"gradient-episode-{local_episode:02d}"
-                    if (episode_dir / "episode.json").exists():
-                        self.register(local_episode)
-                        local_episode = None
-                    else:
-                        force = (
-                            ["--force"]
-                            if episode_dir.with_name(f"{episode_dir.name}.claimed").exists()
-                            else []
-                        )
-                        command = [
-                            self.plan["python"],
-                            "-u",
-                            SCRIPT,
-                            "gradient",
-                            "--campaign",
-                            str(self.campaign),
-                            "--episode",
-                            str(local_episode),
-                            "--no-register",
-                            *force,
-                            *self.common_args(),
-                        ]
-                        log = (logs / f"gradient-episode-{local_episode:02d}.log").open("a")
-                        local_proc = subprocess.Popen(
-                            command,
-                            cwd=self.plan["repository"],
-                            stdout=log,
-                            stderr=subprocess.STDOUT,
-                            start_new_session=True,
-                        )
-                        self.log(
-                            f"local gradient episode {local_episode} started pid {local_proc.pid}"
-                        )
-                        self.publish(
-                            local={
-                                "episode": local_episode,
-                                "pid": local_proc.pid,
-                                "state": "running",
-                            }
-                        )
-                elif local_proc is not None and local_proc.poll() is not None:
-                    code = local_proc.returncode
-                    local_proc = None
-                    if code:
-                        raise CampaignHalted(
-                            f"local gradient episode {local_episode} exited {code}"
-                        )
-                    assert local_episode is not None
-                    self.register(local_episode)
-                    self.publish(local={"episode": local_episode, "state": "registered"})
-                    local_episode = None
-                # Remote slot.
-                if remote_episode is None and remote_queue:
-                    remote_episode = remote_queue.pop(0)
-                    remote_pid = self.dispatch_remote(ledger, remote_episode)
-                    self.log(
-                        f"remote gradient episode {remote_episode} dispatched pid {remote_pid}"
-                    )
-                    self.publish(
-                        remote={"episode": remote_episode, "pid": remote_pid, "state": "running"}
-                    )
-                elif remote_episode is not None:
-                    state = self.poll_remote(ledger, remote_episode)
-                    if state == "done":
-                        self.fetch_remote(ledger, remote_episode)
-                        self.register(remote_episode)
-                        self.publish(remote={"episode": remote_episode, "state": "registered"})
-                        remote_episode = None
-                        remote_pid = None
-                    elif state == "dead":
-                        raise CampaignHalted(
-                            f"remote gradient episode {remote_episode} died; see remote log"
-                        )
-                    elif state == "unreachable":
-                        self.log("remote unreachable; retrying next poll")
+            while any(queues.values()) or any(e is not None for e in active.values()):
+                for slot in ("local", "remote"):
+                    remote = slot == "remote"
+                    if active[slot] is None and queues[slot]:
+                        episode = queues[slot][0]
+                        state = self.dispatch(remote=remote, ledger=ledger, episode=episode)
+                        if state == "unreachable":
+                            self.log(f"{slot} unreachable while dispatching episode {episode}")
+                            continue
+                        queues[slot].pop(0)
+                        active[slot] = episode
+                        self.log(f"{slot} gradient episode {episode} {state}")
+                        self.publish(**{slot: {"episode": episode, "state": state}})
+                    elif active[slot] is not None:
+                        episode = active[slot]
+                        assert episode is not None
+                        state = self.probe_state(remote=remote, ledger=ledger, episode=episode)
+                        if state == "done":
+                            if remote:
+                                self.fetch_remote(ledger, episode)
+                            self.register(episode)
+                            self.publish(**{slot: {"episode": episode, "state": "registered"}})
+                            active[slot] = None
+                        elif state in {"stale", "fresh"}:
+                            raise CampaignHalted(
+                                f"{slot} gradient episode {episode} exited without episode.json; "
+                                f"see logs/gradient-episode-{episode:02d}.log"
+                            )
+                        elif state == "unreachable":
+                            self.log(f"{slot} unreachable; retrying next poll")
                 ledger = self.ledger()
                 if ledger["status"] == "stopped":
                     raise CampaignHalted(
@@ -372,10 +362,11 @@ class Coordinator:
                     )
                 self.publish(phase="gradient")
                 time.sleep(self.plan.get("poll_seconds", 60))
-        except BaseException:
-            if local_proc is not None and local_proc.poll() is None:
-                os.killpg(local_proc.pid, signal.SIGTERM)
-            self.kill_remote(remote_episode)
+        except CampaignHalted:
+            # A pre-registered stop or a dead worker ends the campaign: stop the peer
+            # too. Any other failure leaves workers running for the next coordinator.
+            for slot, episode in active.items():
+                self.kill_worker(remote=slot == "remote", episode=episode)
             raise
 
     def centered_phase(self, phase: str) -> None:
