@@ -63,7 +63,11 @@ class ESCampaignProtocol:
     confirmation_episodes: tuple[int, ...] = tuple(range(32, 40))
     shaping: str = "zscore"
     clip_step_rms_max: float = 0.02
-    teacher_tolerance: float = 1.05
+    # Exploration candidates pay a systematic teacher cost at sigma=0.003 (about
+    # +10% measured on the healed master); their band is a catastrophe floor. The
+    # updated center moves ~1/15 of sigma and must stay in the tight band.
+    candidate_teacher_tolerance: float = 1.25
+    center_teacher_tolerance: float = 1.05
     bf16_floor: float = 0.8
     max_failed_candidates: int = 16
     consistency_checkpoints: tuple[tuple[int, float, float], ...] = (
@@ -139,8 +143,14 @@ class ESCampaignProtocol:
             <= min(len(self.selection_episodes), len(self.confirmation_episodes))
         ):
             raise ValueError("non-degrading batch rule does not fit the episode budgets")
-        if self.max_generations < 1 or self.teacher_tolerance < 1:
-            raise ValueError("max generations must be positive and tolerance at least 1")
+        if (
+            self.max_generations < 1
+            or self.center_teacher_tolerance < 1
+            or self.candidate_teacher_tolerance < self.center_teacher_tolerance
+        ):
+            raise ValueError(
+                "max generations must be positive; candidate band must be at least the center band"
+            )
         if not 0 < self.bf16_floor <= 1:
             raise ValueError("BF16 floor must be in (0, 1]")
         if not 0 <= self.max_failed_candidates < self.population_size:
@@ -523,7 +533,10 @@ class ESCampaign:
                 ids,
                 candidate_sha256=sha,
                 bf16_floor=protocol.bf16_floor,
-                trajectory_tolerance=(center_gate["teacher_mean"], protocol.teacher_tolerance),
+                trajectory_tolerance=(
+                    center_gate["teacher_mean"],
+                    protocol.candidate_teacher_tolerance,
+                ),
             )
             if audit:
                 audit_exact = replay_matches(evaluation)
@@ -822,7 +835,7 @@ class ESCampaign:
                 calibration,
                 ids,
                 candidate_sha256=sha,
-                trajectory_tolerance=(center_teacher, protocol.teacher_tolerance),
+                trajectory_tolerance=(center_teacher, protocol.center_teacher_tolerance),
                 comparison_scores=center_scores,
             )
             atomic_json(directory / f"alpha-{alpha_slug(record['alpha'])}-gate.json", gate)

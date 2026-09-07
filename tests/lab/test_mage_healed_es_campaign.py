@@ -492,3 +492,22 @@ def test_create_accepts_a_prepared_directory_but_never_a_second_ledger(tmp_path)
     assert campaign.state["status"] == "gradient"
     with pytest.raises(FileExistsError, match="ledger"):
         new_campaign(tmp_path, master)
+
+
+def test_candidate_band_is_a_catastrophe_floor_above_the_center_band(tmp_path):
+    master = make_master(tmp_path)
+    with pytest.raises(ValueError, match="candidate band"):
+        small_protocol(master, candidate_teacher_tolerance=1.0, center_teacher_tolerance=1.05)
+    campaign = new_campaign(tmp_path, master, small_protocol(master, max_failed_candidates=2))
+    runtime = FakeRuntime(effective_initial(master), torch.ones(16))
+    # +10% is the measured exploration cost at sigma=0.003 and must pass; +30% is
+    # EXP-008-class damage and must be penalized, not averaged into the gradient.
+    runtime.teacher_for_alpha = {"candidate-01": 1.10, "candidate-02": 1.30}
+    pool = samples()
+    run_gradient(campaign, master, runtime, pool, (0,))
+    record = campaign.state["generations"][0]["gradient"]["episodes"]["0"]
+    assert [c["gate"]["passed"] for c in record["candidates"]] == [True, True, False, True]
+    assert record["candidates"][2]["gate"]["reasons"] == [
+        "teacher trajectory batch mean exceeds tolerance"
+    ]
+    assert record["failure_count"] == 1

@@ -424,7 +424,7 @@ def main() -> None:
             ids,
             candidate_sha256=sha,
             final=True,
-            trajectory_tolerance=(healed_teacher, campaign.protocol.teacher_tolerance),
+            trajectory_tolerance=(healed_teacher, campaign.protocol.center_teacher_tolerance),
             comparison_scores={r["sample_id"]: r["scores"] for r in healed["rows"]},
         )
 
