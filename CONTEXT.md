@@ -50,6 +50,16 @@
 - **残差匹配噪声注入（residual-matched noise injection）** — 机制归因臂的噪声协议：每步对影子权重计算量化格点的舍入残差并在块内随机重排，前向/反向在加噪权重上进行、优化器步作用在干净主权重上——统计上匹配原生量化训练的隐式噪声，但不落格点（`shadow_lab.shadow_quant`）。
 - **影子独立生成（shadow-only generation）** — 推理模式 `shadow_only`：仅影子干 + 冻结的基座头副本出词，基座不参与。训练中的影子路 CE（`shadow_loss_weight`，默认 0.05）是其唯一监督来源；该权重即「恢复角色 vs 独立生成角色」的双角色权衡旋钮。
 
+## ES 统计推断与功效（RES-003）
+
+- **最小有用增益（Minimum Useful Gain, δ）** — 在看到任何正式结果数据之前冻结的实用增益下限；ES 下一轮取 0.25 reward-z（与 ENG-003 注册的「可容忍」HPS 退化 0.26σ 同尺度）。区间上界低于 δ ⇒「已排除实用增益」；低于 δ 但高于 0 的正效应仍属「证据不足」。
+- **episode 符号翻转零假设（episode sign-flip null）** — 对 k 个 episode 的配对增量在 episode 层随机赋 ±1 构造的零假设分布（2^k ≤ 预算时精确枚举）；共享 episode/噪声结构的正确重复单位，取代把 28/276 个 cosine 对或 32M 坐标当独立样本的 naive 口径。
+- **prompt 簇 bootstrap（prompt-cluster bootstrap）** — 以 prompt 为簇整簇重采样、簇内生成 seed/盲测重复全携带的区间算法（seed 20260904、10,000 次、95%，索引与 `image_eval.paired_bootstrap_mean_difference` 一致）；重放与重复判断共享簇，永不增加独立 prompt 数。
+- **联合选择/确认门（joint selection/confirmation gate）** — 注册的候选放行规则：mean(delta)>0 且 ≥6/8 episode 不退步且全部批硬门通过；零假设下 k=8 通过率 14.6%（k=16 为 3.9%）——胜场门不是显著性证明，确认阶段另加 α_conf=0.01 的符号翻转检验。
+- **顺序双检查点规则（sequential two-checkpoint rule）** — 梯度阶段的方向一致性停止门：(8, mean_cosine≥0.10, positive≥0.70) → (16, …)，首个失败即停；整套规则的模拟显示它实际是 ≈0.15 的方向效应量门（真 ρ=0.10 时 72.6% 被停），触发停止只支撑「未检测到跨批方向一致性」，不支撑「无梯度/无实用增益」。
+- **三措辞判定（three-wording verdict）** — 所有配对效应结论的冻结映射：可继续（区间下界>0 且点估计≥δ）/ 已排除实用增益（区间上界<δ）/ 证据不足（其余，只给区间）；实现于 `shadow_lab.es_inference.classify_outcome`。
+- **预算冻结表（budget freeze table）** — σ_ep/δ → `budget-supports-delta`（排除功效≥0.80）/ `interval-only`（≥0.50）/ `redesign-required` 的机械映射；EXP-012 的 σ 落地后按表取档，禁止看 test 后扩样。
+
 ## 分层恢复调度（exp6）
 
 - **贪心逐组层调度（greedy layer-group schedule）** — `train_shadow` 的 `layer_schedule`：`end2end`（现行端到端，逐位不变）之外的新训练形态——按层序把基座适配层切成组，前缀 no_grad 推进、组内带梯度重放，最后以端到端 polish 阶段（`polish_token_frac` 预算）收尾；贪心阶段只用隐态 MSE，KL/CE 只活在 polish。
