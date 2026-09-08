@@ -112,18 +112,33 @@ class Coordinator:
             raise CampaignHalted(f"{args[0]} exited {result.returncode}; see {logs / log_name}")
         return result
 
-    def ssh(self, command: str, *, timeout: int = 600) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", self.remote["host"], command],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+    def ssh(self, command: str, *, timeout: int = 300) -> subprocess.CompletedProcess:
+        # A slow or hung ssh must degrade to a status the caller can poll, never
+        # kill the coordinator: its workers would keep running unmanaged.
+        try:
+            return subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", self.remote["host"], command],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as error:
+            stdout = error.stdout if isinstance(error.stdout, str) else ""
+            stderr = error.stderr if isinstance(error.stderr, str) else ""
+            return subprocess.CompletedProcess(
+                error.cmd, 124, stdout=stdout, stderr=f"ssh timed out after {timeout}s: {stderr}"
+            )
 
     def rsync(self, source: str, target: str) -> None:
-        result = subprocess.run(
-            ["rsync", "-a", "--partial", source, target], capture_output=True, text=True
-        )
+        try:
+            result = subprocess.run(
+                ["rsync", "-a", "--partial", source, target],
+                capture_output=True,
+                text=True,
+                timeout=3600,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise CampaignHalted(f"rsync {source} -> {target} timed out") from error
         if result.returncode:
             raise CampaignHalted(f"rsync {source} -> {target} failed: {result.stderr.strip()}")
 
@@ -229,13 +244,20 @@ class Coordinator:
         ]
         log = f"{target['campaign']}/logs/gradient-episode-{episode:02d}.log"
         if remote:
+            # The subshell exits immediately and fully orphans the worker, so the
+            # ssh session cannot be held open by its standard streams.
             command = (
                 f"cd {shlex.quote(target['repository'])} && "
                 f"mkdir -p {shlex.quote(target['campaign'])}/logs && "
-                f"setsid nohup {shlex.join(args)} >> {shlex.quote(log)} 2>&1 < /dev/null & echo $!"
+                f"( setsid nohup {shlex.join(args)} >> {shlex.quote(log)} 2>&1 < /dev/null & ) ; "
+                f"echo dispatched"
             )
             result = self.ssh(command)
-            if result.returncode or not result.stdout.strip().isdigit():
+            if result.returncode == 124:
+                # Unknown whether the worker started; the next probe decides.
+                self.log(f"remote dispatch for episode {episode} timed out; polling")
+                return "running"
+            if result.returncode or "dispatched" not in result.stdout:
                 raise CampaignHalted(
                     f"remote dispatch failed: {result.stderr.strip()} {result.stdout.strip()}"
                 )
