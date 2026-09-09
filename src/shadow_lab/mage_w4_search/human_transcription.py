@@ -41,7 +41,9 @@ def _unique_pairs(pairs):
     return value
 
 
-def _read_artifact(path):
+def read_json_artifact(path):
+    """Return parsed JSON, raw-file SHA and size from the same byte snapshot."""
+
     def invalid_constant(value):
         raise ValueError(f"nonfinite JSON constant: {value}")
 
@@ -52,7 +54,7 @@ def _read_artifact(path):
 
 def read_json(path):
     """Read exact JSON, rejecting duplicate keys and nonfinite numeric constants."""
-    return _read_artifact(path)[0]
+    return read_json_artifact(path)[0]
 
 
 def _sha(value):
@@ -142,7 +144,7 @@ class ImportedHumanWork:
 
 def import_human_work(source_path, inventory_path) -> ImportedHumanWork:
     """Validate all inventory rows without correcting or inferring supplied text."""
-    source, source_sha, source_size = _read_artifact(source_path)
+    source, source_sha, source_size = read_json_artifact(source_path)
     required = {"schema", "purpose", "transcribed_by", "transcribed_at_utc", "rows"}
     if not isinstance(source, dict) or set(source) != required:
         raise ValueError("human transcription schema fields mismatch")
@@ -154,7 +156,7 @@ def import_human_work(source_path, inventory_path) -> ImportedHumanWork:
     if not isinstance(source["transcribed_by"], str) or not source["transcribed_by"].strip():
         raise ValueError("human annotator is required")
     _utc_timestamp(source["transcribed_at_utc"])
-    inventory, inventory_sha, _ = _read_artifact(inventory_path)
+    inventory, inventory_sha, _ = read_json_artifact(inventory_path)
     if inventory.get("purpose") != "ocr_selection":
         raise ValueError("only the complete OCR selection inventory is allowed")
     identities = [row["image_sha256"] for row in inventory["rows"]]
@@ -203,7 +205,7 @@ class _Evidence:
 
     def read(self, path):
         path = Path(path).resolve()
-        value, sha, size = _read_artifact(path)
+        value, sha, size = read_json_artifact(path)
         identity = {"sha256": sha, "size_bytes": size}
         if str(path) in self.files and self.files[str(path)] != identity:
             raise ValueError("evidence artifact changed during closeout")
@@ -304,7 +306,8 @@ def _closed_job(directory, snapshot, manifest, evidence, *, measured):
     return lease, request, stop, offset, uncertainty, closed_at - lease.started_at
 
 
-def _decode_observation(value):
+def decode_recognition_receipt(value):
+    """Decode a persisted recognition using the public OCR geometry/identity contract."""
     value = dict(value)
     value["config"] = decode_ocr_config(value["config"])
     value["raw_segments"] = tuple(
@@ -317,7 +320,8 @@ def _decode_observation(value):
     return RecognitionReceipt(**value)
 
 
-def _validate_child(child, observation, image_bytes, stop):
+def validate_recognizer_process(child, observation, image_bytes, stop):
+    """Bind raw image/config-only child execution to its supervised process group."""
     request = {
         "schema": REQUEST_SCHEMA,
         "action": "recognize",
@@ -547,7 +551,7 @@ def close_comparison(
         for index, row in enumerate(package["rows"]):
             if evidence.read(directory / f"ocr-observation-{index:04d}.json") != row:
                 raise ValueError("per-image raw artifact differs from combined observation")
-            observation = _decode_observation(row["observation"])
+            observation = decode_recognition_receipt(row["observation"])
             if (
                 observation.config.sha256 != config.sha256
                 or observation.image_sha256 != plan.image_sha256[index]
@@ -559,7 +563,7 @@ def close_comparison(
                 or started + observation.elapsed_seconds > stop["stopped_at"] + uncertainty
             ):
                 raise ValueError("recognition does not fall inside the worker lifetime")
-            _validate_child(
+            validate_recognizer_process(
                 row["child"], observation, local_images[observation.image_sha256][1], stop
             )
             observations.append(observation)

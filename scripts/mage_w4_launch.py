@@ -57,12 +57,30 @@ def remote(host, command, *, check=True):
     )
 
 
+def worker_command(kind, request):
+    """Choose a worker before reserving; complete scoring has an explicit entry."""
+    if kind == "evaluation":
+        if (
+            request.ticket_id != "05"
+            or request.evaluation_mode != "complete"
+            or request.purpose not in {"scale_calibration", "candidate_development"}
+            or not request.request_id.startswith("evaluation-")
+        ):
+            raise ValueError("evaluation worker requires a complete ticket 05 frozen request")
+        return [PYTHON, f"{REPO}/scripts/mage_w4_evaluate.py"]
+    if kind == "native":
+        return [PYTHON, f"{REPO}/scripts/mage_w4_native_probe.py"]
+    if kind == "ocr":
+        return [PYTHON, "-m", "shadow_lab.mage_w4_search.ocr_worker"]
+    raise ValueError("unknown worker kind")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", choices=("gooo", "goooinext"), required=True)
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--seconds", type=float, default=1800)
-    parser.add_argument("--worker-kind", choices=("native", "ocr"), default="native")
+    parser.add_argument("--worker-kind", choices=("native", "ocr", "evaluation"), default="native")
     parser.add_argument(
         "--evidence-root", type=Path, default=Path("runs-local/mage-direct-w4a4-20260909")
     )
@@ -83,6 +101,7 @@ def main():
         )
         (local / "prepared.json").write_text(json.dumps(value, indent=2) + "\n")
         request = read_request(value["request"])
+        worker = worker_command(args.worker_kind, request)
         if args.worker_kind == "ocr" and (
             request.ticket_id != "04"
             or request.purpose != "ocr_selection"
@@ -136,11 +155,6 @@ def main():
             ],
             check=True,
         )
-        worker = (
-            [PYTHON, f"{REPO}/scripts/mage_w4_native_probe.py"]
-            if args.worker_kind == "native"
-            else [PYTHON, "-m", "shadow_lab.mage_w4_search.ocr_worker"]
-        )
         command = [
             "env",
             f"PYTHONPATH={REPO}/src",
@@ -193,12 +207,17 @@ def main():
             (args.evidence_root / "budget-snapshot.json").write_text(
                 json.dumps(snapshot, indent=2) + "\n"
             )
+            transfer_options = ["--exclude", "*.pt"]
+            # Complete batches keep large per-image profiles on their GB10. The
+            # worker has verified every trace; reports retain original paths/SHA.
+            recorded_preparation = json.loads((local / "prepared.json").read_text())
+            if "evaluation_job" in recorded_preparation:
+                transfer_options += ["--exclude", "*.trace.json"]
             subprocess.run(
                 [
                     "rsync",
                     "-a",
-                    "--exclude",
-                    "*.pt",
+                    *transfer_options,
                     f"{args.host}:{remote_job}/",
                     str(local) + "/",
                 ],

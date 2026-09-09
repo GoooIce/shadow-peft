@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 
 from .contracts import DataManifest, RequestedSample, digest_json
+from .human_transcription import decode_recognition_receipt
 from .rewards import ScaleReceipt
 
 FORMAL_FIELDS = (
@@ -1022,7 +1023,7 @@ def validate_ocr_archive(value):
             or reference["sha256"] != recorded["artifact_sha256"]
         ):
             raise ValueError("OCR truth must be complete actual human image transcription")
-    observed = tuple(_recognition_from_dict(_artifact(ref)) for ref in value["observations"])
+    observed = tuple(decode_recognition_receipt(_artifact(ref)) for ref in value["observations"])
     costs = (
         ()
         if report["cost_basis"] == "fixture_recognition_seconds"
@@ -1312,33 +1313,12 @@ def _main():
     )
 
 
-def _recognition_from_dict(raw):
-    from .ocr import RawSegment, RecognitionReceipt, TextSegment
-    from .scorers import decode_ocr_config
-
-    return RecognitionReceipt(
-        **{
-            **raw,
-            "config": decode_ocr_config(raw["config"]),
-            "raw_segments": tuple(
-                RawSegment(**{**row, "box": tuple(row["box"])}) for row in raw["raw_segments"]
-            ),
-            "segments": tuple(
-                TextSegment(
-                    **{**row, "box": tuple(row["box"]), "raw_indices": tuple(row["raw_indices"])}
-                )
-                for row in raw["segments"]
-            ),
-        }
-    )
-
-
 def _verify_scored_ocr(batch, row, score):
     import json
 
     from .ocr import TargetInventory, match_text
 
-    recognition = _recognition_from_dict(score["recognition"])
+    recognition = decode_recognition_receipt(score["recognition"])
     sample = next(item for item in batch.request.samples if item.sample_id == row.sample_id)
     target = next(item for item in batch.manifest.records if item.prompt_id == sample.prompt_id)
     replay = match_text(

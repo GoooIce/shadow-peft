@@ -200,7 +200,7 @@ def _prompt_scores(batch: ScoredBatch) -> dict[str, dict[str, float]]:
     }
 
 
-def _fixed_generation_identity(request: CandidateRequest) -> str:
+def fixed_generation_identity(request: CandidateRequest) -> str:
     return digest_json(
         {
             "runtime": {
@@ -287,7 +287,7 @@ def calibrate_scales(plan: ScalePlan, baseline: ScoredBatch) -> ScaleReceipt:
         diagnostics,
         tuple(dict.fromkeys(reasons)),
         baseline.execution_kind,
-        _fixed_generation_identity(request),
+        fixed_generation_identity(request),
     )
 
 
@@ -496,7 +496,7 @@ def screen_candidates(
                 raise ValueError(
                     "scale calibration and screening scorer/execution identities differ"
                 )
-            if _fixed_generation_identity(item.request) != scales.fixed_generation_sha256:
+            if fixed_generation_identity(item.request) != scales.fixed_generation_sha256:
                 raise ValueError(
                     "screening differs from scale calibration fixed generation identity"
                 )
