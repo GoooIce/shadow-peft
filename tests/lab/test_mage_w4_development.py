@@ -114,6 +114,27 @@ def test_selection_is_deterministic_and_one_source_per_prompt():
     )
 
 
+@pytest.mark.parametrize("complete_text", [False, True])
+def test_retired_calibration_records_do_not_change_active_selection(complete_text):
+    manifest = fixture_manifest()
+    expected = select_development_samples(manifest, "scale_calibration", **SELECTION)
+    retired = PromptRecord(
+        "000-retired",
+        "Earlier retired calibration",
+        "retired-source",
+        "development",
+        ("scale_calibration",),
+        ("OLD",) if complete_text else (),
+        complete_text,
+        retired=True,
+    )
+    successor = replace(manifest, records=(retired, *manifest.records))
+    samples = select_development_samples(successor, "scale_calibration", **SELECTION)
+    assert len(samples) == 64
+    assert all(sample.prompt_id != retired.prompt_id for sample in samples)
+    assert samples == expected
+
+
 def test_registration_freezes_complete_q0_and_axis_source_counts_before_scores():
     manifest = fixture_manifest()
     samples = select_development_samples(manifest, "scale_calibration", **SELECTION)
@@ -301,7 +322,35 @@ def test_screen_retains_bad_candidate_and_refuses_missing_planned_result():
         close_screen_registration(plan, scales, batches[:1], refs)
 
 
-def complete_fixture_job(tmp_path):
+def test_scale_registration_json_roundtrip_preserves_replay_and_rejects_tampering(tmp_path):
+    import json
+
+    manifest, request, registration = scale_case()
+    batch = scores_for(request, manifest)
+    path = tmp_path / "registration.json"
+    path.write_text(json.dumps(registration))
+    stored = json.loads(path.read_text())
+    assert close_scale_registration(stored, batch) == close_scale_registration(registration, batch)
+    stored["selection"]["nontext_prompts"] = 26
+    with pytest.raises(ValueError, match="identity mismatch"):
+        close_scale_registration(stored, batch)
+
+
+def test_screen_registration_json_roundtrip_preserves_selection(tmp_path):
+    import json
+
+    scales, q0, candidates, manifest, registration = screen_case()
+    batches = [scores_for(row, manifest, clip_change=0.5) for row in candidates]
+    references = {"gooo": scores_for(q0, manifest)}
+    path = tmp_path / "screen-registration.json"
+    path.write_text(json.dumps(registration))
+    stored = json.loads(path.read_text())
+    actual = close_screen_registration(stored, scales, batches, references)
+    assert actual == close_screen_registration(registration, scales, batches, references)
+    assert actual.selected_candidate_id == "candidate-1"
+
+
+def complete_fixture_job(tmp_path, configure=None):
     """Exercise the actual complete worker with only its external models replaced."""
     import json
 
@@ -311,6 +360,8 @@ def complete_fixture_job(tmp_path):
     from shadow_lab.mage_w4_search.evaluation_worker import run_evaluation_job
 
     manifest, shared = fixture_job(tmp_path)
+    if configure is not None:
+        configure(manifest, shared)
     observed = []
     external = fixture_generator(shared, observed)
 

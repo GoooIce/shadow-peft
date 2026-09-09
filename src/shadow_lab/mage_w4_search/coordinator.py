@@ -393,7 +393,14 @@ class DevelopmentCoordinator:
             }
 
     def claim(
-        self, round_id: str, candidate_id: str, device_id: str, *, reserve_seconds: float
+        self,
+        round_id: str,
+        candidate_id: str,
+        device_id: str,
+        *,
+        reserve_seconds: float,
+        expected_request_digest: str | None = None,
+        require_unclaimed: bool = False,
     ) -> CandidateRequest:
         self._require_budget()
         with self._transaction() as db:
@@ -406,6 +413,13 @@ class DevelopmentCoordinator:
             if state["active_round"] != round_id or row["status"] not in {"pending", "running"}:
                 raise ValueError("candidate work is no longer claimable")
             item = _assignment(json.loads(row["planned"]))
+            if (
+                expected_request_digest is not None
+                and item.request.request_digest != expected_request_digest
+            ):
+                raise ValueError("prepared request differs from the registered candidate")
+            if require_unclaimed and row["lease_id"] is not None:
+                raise ValueError("candidate already has a lease; recover without relaunching")
             request = replace(item.request, lease_id=row["lease_id"])
             checked = preflight(
                 request,
@@ -422,6 +436,76 @@ class DevelopmentCoordinator:
                 (lease_id, candidate_id),
             )
             return replace(item.request, lease_id=lease_id)
+
+    def work_request(self, round_id: str, candidate_id: str) -> CandidateRequest:
+        """Read the original claim for transport recovery; never reserve or start work."""
+        with self._transaction() as db:
+            row = db.execute(
+                "SELECT planned, lease_id FROM work WHERE round_id=? AND candidate_id=?",
+                (round_id, candidate_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("unknown registered candidate")
+            request = _assignment(json.loads(row["planned"])).request
+            return replace(request, lease_id=row["lease_id"])
+
+    def reconcile_claim(
+        self, round_id: str, candidate_id: str, lease_id: str, expected_request_digest: str
+    ) -> CandidateRequest:
+        """Attach an original committed reservation after a lost RPC reply; never reserve or launch."""
+        with self._transaction() as db:
+            state = self._state(db)
+            row = db.execute(
+                "SELECT * FROM work WHERE round_id=? AND candidate_id=?", (round_id, candidate_id)
+            ).fetchone()
+            if (
+                row is None
+                or state["active_round"] != round_id
+                or row["status"] not in {"pending", "running"}
+            ):
+                raise ValueError("only an active uncompleted candidate can reconcile its claim")
+            item = _assignment(json.loads(row["planned"]))
+            if item.request.request_digest != expected_request_digest or row["lease_id"] not in {
+                None,
+                lease_id,
+            }:
+                raise ValueError("recovery differs from the original candidate request/lease")
+            lease = self.budget.assert_active(lease_id)
+            if (lease.request_id, lease.ticket_id, lease.device_id, lease.run_id) != (
+                item.request.request_id,
+                item.request.ticket_id,
+                item.request.device_id,
+                item.request.run_id,
+            ):
+                raise ValueError("recovery lease belongs to another original request")
+            request = replace(item.request, lease_id=lease_id)
+            checked = preflight(
+                request,
+                item.manifest,
+                expected_center_version=state["center_version"],
+                ledger=self.budget,
+            )
+            if checked.status != "authorized":
+                raise ValueError(f"original lease cannot be recovered: {checked.reasons}")
+            if row["lease_id"] is None:
+                db.execute(
+                    "UPDATE work SET status='running',lease_id=? WHERE candidate_id=?",
+                    (lease_id, candidate_id),
+                )
+                db.execute(
+                    "INSERT INTO events(kind,payload) VALUES ('claim_reconciled_without_launch',?)",
+                    (
+                        _json(
+                            {
+                                "round_id": round_id,
+                                "candidate_id": candidate_id,
+                                "lease_id": lease_id,
+                                "request_digest": expected_request_digest,
+                            }
+                        ),
+                    ),
+                )
+            return request
 
     def screen(self, round_id: str) -> dict:
         with self._transaction() as db:

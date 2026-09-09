@@ -138,6 +138,41 @@ def test_frozen_same_center_work_is_assigned_once_to_its_own_gb10(tmp_path):
         coordinator.screen("round-1")
 
 
+def test_launcher_claim_matches_prepared_request_before_reserving_and_cannot_relaunch(tmp_path):
+    coordinator, q0, _, budget, _ = setup(tmp_path)
+    planned, _ = assignment(coordinator, tmp_path, q0)
+    coordinator.begin_round("round-launch", (planned,))
+    with pytest.raises(ValueError, match="prepared request"):
+        coordinator.claim(
+            "round-launch",
+            "candidate",
+            "gooo",
+            reserve_seconds=10,
+            expected_request_digest="0" * 64,
+            require_unclaimed=True,
+        )
+    assert not budget.snapshot()["leases"]
+    request = coordinator.claim(
+        "round-launch",
+        "candidate",
+        "gooo",
+        reserve_seconds=10,
+        expected_request_digest=planned.request.request_digest,
+        require_unclaimed=True,
+    )
+    with pytest.raises(ValueError, match="recover"):
+        coordinator.claim(
+            "round-launch",
+            "candidate",
+            "gooo",
+            reserve_seconds=10,
+            expected_request_digest=request.request_digest,
+            require_unclaimed=True,
+        )
+    assert coordinator.work_request("round-launch", "candidate").lease_id == request.lease_id
+    assert len(budget.snapshot()["leases"]) == 1
+
+
 def reference(q0, planned, name="q0", values=(0.0, 0.0, 0.5), current=None):
     full = current or q0
     scored = screening_batch(

@@ -603,3 +603,81 @@ def test_prepare_cli_preserves_host_timing_without_changing_identity_or_leasing(
     assert not tuple(tmp_path.rglob("*.sqlite3"))
     assert not (job / "lease.json").exists()
     assert not (job / "grant.json").exists()
+
+
+def test_new_run_root_reuses_symlinked_q0_without_changing_fixed_runtime(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from test_mage_w4_native import _write, torch
+
+    import shadow_lab.mage_w4_search.evaluation_worker as worker
+    from shadow_lab.mage_w4_search.native import GenerationConfig
+    from shadow_lab.mage_w4_search.ocr import EngineIdentity, OCRConfig
+
+    original, successor = tmp_path / "original", tmp_path / "successor"
+    (original / "input").mkdir(parents=True)
+    successor.mkdir()
+    (successor / "input").symlink_to(original / "input", target_is_directory=True)
+    layer = {
+        "weight_packed": torch.full((16, 8), 0x21, dtype=torch.uint8),
+        "weight_scale": torch.ones((16, 1), dtype=torch.float8_e4m3fn),
+        "tensor_scale": torch.tensor(0.25, dtype=torch.float32),
+    }
+    packed = original / "input/qad-nvfp4-best-673.pt"
+    remainder = original / "input/qad-transformer-remainder-best-673.pt"
+    allowed = {
+        str(packed): _write(
+            packed,
+            {"schema_version": 1, "packed": {f"linear_{i}": layer for i in range(174)}},
+        ),
+        str(remainder): _write(remainder, {"bias": torch.zeros(16)}),
+    }
+    inventory = {"allowed_assets": allowed, "runtime": {"fixture": "1"}}
+    plan, manifest, _ = request_inputs()
+    for root in (original, successor):
+        (root / "inventory.json").write_text(json.dumps(inventory))
+        (root / "data-v1").mkdir()
+        selected_manifest = manifest
+        if root == successor:
+            selected_manifest = DataManifest(
+                manifest.records
+                + (
+                    PromptRecord(
+                        "new-scale",
+                        "A mountain valley",
+                        "new-source",
+                        "development",
+                        ("scale_calibration",),
+                    ),
+                )
+            )
+        (root / "data-v1/manifest.json").write_text(json.dumps(asdict(selected_manifest)))
+    config = OCRConfig(EngineIdentity("fixture", "1", (("weights", "e" * 64),)))
+    inputs = {
+        "generation": asdict(GenerationConfig(watermark_key=20260909)),
+        "visual_batch_size": 8,
+        **{
+            role: {"sha256": "e" * 64, "size_bytes": 1}
+            for role in ("clip_checkpoint", "hps_checkpoint", "ocr_lock", "ocr_calibration")
+        },
+    }
+    # Replace only installed-host/scorer discovery; actual packed fixture loading/hash stays real.
+    monkeypatch.setattr(
+        worker, "platform", SimpleNamespace(system=lambda: "Linux", machine=lambda: "aarch64")
+    )
+    monkeypatch.setattr(worker, "verify_scoring_inputs", lambda _: {"ocr_config": config})
+    monkeypatch.setattr(worker, "_installed_external_sources", lambda: {})
+    monkeypatch.setattr(worker, "_visual_versions", lambda: {"fixture": "1"})
+    monkeypatch.setattr(
+        worker.subprocess, "check_output", lambda *a, **kw: "fixture, NVIDIA GB10, fixture"
+    )
+    first = worker.prepare_on_gb10(original, "original-job", "gooo", plan, inputs)
+    second = worker.prepare_on_gb10(successor, "successor-job", "gooo", plan, inputs)
+    assert first["request"]["runtime_identity"] == second["request"]["runtime_identity"]
+    assert first["request"]["dependencies"] == second["request"]["dependencies"]
+    assert first["request"]["q0_digest"] == second["request"]["q0_digest"]
+    assert first["request"]["manifest_digest"] != second["request"]["manifest_digest"]
+    assert second["evaluation_job"]["shared"]["run_root"] == str(successor)
+    assert first["evaluation_job_sha256"] != second["evaluation_job_sha256"]
+    assert (original / "inventory.json").read_bytes() == (successor / "inventory.json").read_bytes()
+    assert not tuple(tmp_path.rglob("*.sqlite3"))

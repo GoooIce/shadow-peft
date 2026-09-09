@@ -88,7 +88,7 @@ def select_development_samples(
         (
             row
             for row in manifest.records
-            if row.pool == "development" and purpose in row.development_uses
+            if row.pool == "development" and purpose in row.development_uses and not row.retired
         ),
         key=lambda row: row.prompt_id,
     )
@@ -127,7 +127,7 @@ def _registered_time(value):
     return stamp
 
 
-def _complete_request(request, manifest):
+def _complete_development_request(request, manifest):
     without_paths = replace(
         request,
         lease_id=None,
@@ -136,11 +136,18 @@ def _complete_request(request, manifest):
     checked = preflight(without_paths, manifest, expected_center_version=request.center_version)
     if (
         checked.status != "ready_for_reservation"
-        or request.ticket_id != "05"
+        or request.ticket_id not in {"05", "06", "08"}
+        or (request.ticket_id != "05" and request.purpose != "candidate_development")
         or request.evaluation_mode != "complete"
         or request.lease_id is not None
     ):
+        raise ValueError("an unleased complete development request is required")
+
+
+def _complete_request(request, manifest):
+    if request.ticket_id != "05":
         raise ValueError("register an unleased complete ticket 05 development request")
+    _complete_development_request(request, manifest)
 
 
 def _seal(value):
@@ -262,7 +269,7 @@ def close_scale_registration(registration, baseline: ScoredBatch) -> ScaleReceip
         },
         registered_at_utc=plan.registered_at_utc,
     )
-    if replay != registration:
+    if digest_json(replay) != digest_json(registration):
         raise ValueError("scale registration does not replay from its request and manifest")
     return calibrate_scales(plan, baseline)
 
@@ -391,7 +398,7 @@ def close_screen_registration(registration, scales, candidates, references_by_de
         candidate_order=tuple(value["candidate_order"]),
         registered_at_utc=value["registered_at_utc"],
     )
-    if replay != registration:
+    if digest_json(replay) != digest_json(registration):
         raise ValueError("screen registration does not replay from the frozen inputs")
     references = {key: references_by_device[row.request.device_id] for key, row in by_id.items()}
     return screen_candidates(
@@ -424,13 +431,13 @@ def verify_evaluation_job(job_directory, expected_request, manifest, snapshot, *
     """
     from .budget import DeviceLease
     from .evaluation import GenerationBinding, load_scored_batch
-    from .evaluation_worker import prepare_evaluation_job
+    from .evaluation_worker import reconstruct_evaluation_job
     from .ocr import TargetInventory, match_text
     from .pilot import audit_occupancy, validate_native_sample_binding
 
     if execution_kind not in {"fixture", "gb10_measured"}:
         raise ValueError("explicit execution kind required")
-    _complete_request(expected_request, manifest)
+    _complete_development_request(expected_request, manifest)
     directory, evidence = Path(job_directory).resolve(), {}
     accounting = audit_occupancy(snapshot)
     lease = DeviceLease(**_source(directory / "lease.json", evidence))
@@ -457,13 +464,7 @@ def verify_evaluation_job(job_directory, expected_request, manifest, snapshot, *
         raise ValueError("complete evaluation grant differs from registered request or lease")
     prepared = _source(directory / "prepared.json", evidence)
     job = prepared["evaluation_job"]
-    replay = prepare_evaluation_job(
-        job["run_id"],
-        job["plan"],
-        manifest,
-        shared=job["shared"],
-        candidate_receipt=job["candidate_receipt"],
-    )
+    replay = reconstruct_evaluation_job(job, manifest)
     if (
         digest_json(replay) != digest_json(prepared)
         or request.request_id != "evaluation-" + digest_json(job)

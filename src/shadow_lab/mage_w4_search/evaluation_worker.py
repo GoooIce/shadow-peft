@@ -138,6 +138,31 @@ def _write_json(path, value):
         json.dump(value, stream, sort_keys=True, ensure_ascii=False, allow_nan=False)
 
 
+def reconstruct_evaluation_job(job, manifest):
+    """Replay the original schema's authenticated preparation without reading model files."""
+    if job["schema"] == "mage-w4-center-job/v1":
+        from .center_execution import decode_full_center, prepare_center_job
+
+        return prepare_center_job(
+            job["run_id"],
+            job["plan"],
+            manifest,
+            shared=job["shared"],
+            **{name: decode_full_center(value) for name, value in job["centers"].items()},
+            template=job["template"],
+            candidate_receipt=job["candidate_receipt"],
+        )
+    if job["schema"] != "mage-w4-evaluation-job/v1":
+        raise ValueError("unsupported complete evaluation job schema")
+    return prepare_evaluation_job(
+        job["run_id"],
+        job["plan"],
+        manifest,
+        shared=job["shared"],
+        candidate_receipt=job["candidate_receipt"],
+    )
+
+
 def _file_sha(path):
     sha = hashlib.sha256()
     with Path(path).open("rb") as stream:
@@ -219,12 +244,19 @@ def verify_scoring_inputs(inputs):
 def implementation_hashes():
     """Freeze the explicit runner and numerical/validation implementation sources."""
     repo = Path(__file__).resolve().parents[3]
-    paths = [repo / "scripts/mage_w4_evaluate.py", repo / "scripts/mage_w4_launch.py"]
+    paths = [
+        repo / "scripts/mage_w4_evaluate.py",
+        repo / "scripts/mage_w4_launch.py",
+        repo / "scripts/mage_w4_center.py",
+        repo / "scripts/mage_w4_coordinate.py",
+    ]
     paths += [
         Path(__file__).parent / name
         for name in (
             "__init__.py",
             "evaluation_worker.py",
+            "center_execution.py",
+            "budget_rpc.py",
             "evaluation.py",
             "native.py",
             "mutation.py",
@@ -359,8 +391,8 @@ def prepare_on_gb10(run_root, run_id, device_id, plan, inputs):
     generation = GenerationConfig(**inputs["generation"])
     if generation != GenerationConfig(watermark_key=20260909):
         raise ValueError("05 must preserve the proven native q0 generation configuration")
-    packed = root / "input/qad-nvfp4-best-673.pt"
-    remainder = root / "input/qad-transformer-remainder-best-673.pt"
+    packed = (root / "input/qad-nvfp4-best-673.pt").resolve(strict=True)
+    remainder = (root / "input/qad-transformer-remainder-best-673.pt").resolve(strict=True)
     assets = load_quantized_assets(packed, remainder, allowed_assets=inventory["allowed_assets"])
     dependencies = [
         ArtifactIdentity(role, inventory["allowed_assets"][str(path)], path.stat().st_size)
@@ -471,7 +503,8 @@ def prepare_on_gb10(run_root, run_id, device_id, plan, inputs):
     return prepare_evaluation_job(run_id, plan, manifest, shared=shared, candidate_receipt=receipt)
 
 
-def _verify_real_inputs(shared):
+def verify_evaluation_inputs(shared):
+    """Recheck authenticated implementation, fixed runtime and scoring inputs without models."""
     runtime, inputs, inventory = shared["runtime_identity"], shared["inputs"], shared["inventory"]
     if shared["implementation_sha256"] != implementation_hashes():
         raise ValueError("evaluation implementation changed after preparation")
@@ -497,17 +530,25 @@ def _generate_real(job, request, manifest, directory, stage):
 
     shared = job["shared"]
     root, inventory = Path(shared["run_root"]), shared["inventory"]
-    stage("quantized_asset_load")
-    assets = load_quantized_assets(
-        root / "input/qad-nvfp4-best-673.pt",
-        root / "input/qad-transformer-remainder-best-673.pt",
-        allowed_assets=inventory["allowed_assets"],
-    )
-    if assets.sha256 != request.q0_digest or assets.fixed_sha256 != shared["fixed_state_sha256"]:
-        raise ValueError("quantized q0/fixed state changed after preparation")
-    if job["candidate_receipt"] is not None:
-        stage("candidate_replay")
-        assets = replay_candidate(assets, job["candidate_receipt"])
+    if job["schema"] == "mage-w4-center-job/v1":
+        from .center_execution import load_execution_center
+
+        assets = load_execution_center(job, request, stage)
+    else:
+        stage("quantized_asset_load")
+        assets = load_quantized_assets(
+            root / "input/qad-nvfp4-best-673.pt",
+            root / "input/qad-transformer-remainder-best-673.pt",
+            allowed_assets=inventory["allowed_assets"],
+        )
+        if (
+            assets.sha256 != request.q0_digest
+            or assets.fixed_sha256 != shared["fixed_state_sha256"]
+        ):
+            raise ValueError("quantized q0/fixed state changed after preparation")
+        if job["candidate_receipt"] is not None:
+            stage("candidate_replay")
+            assets = replay_candidate(assets, job["candidate_receipt"])
     if assets.sha256 != request.candidate_digest:
         raise ValueError("quantized candidate differs from authorized request")
     generation = GenerationConfig(**shared["inputs"]["generation"])
@@ -587,13 +628,7 @@ def run_evaluation_job(
         prepared = read_json(job_directory / "prepared.json")
         job = prepared["evaluation_job"]
         shared = job["shared"]
-        reconstructed = prepare_evaluation_job(
-            job["run_id"],
-            job["plan"],
-            manifest,
-            shared=shared,
-            candidate_receipt=job["candidate_receipt"],
-        )
+        reconstructed = reconstruct_evaluation_job(job, manifest)
         if digest_json(reconstructed) != digest_json(prepared):
             raise ValueError("frozen evaluation job/prepared identity mismatch")
         lease = DeviceLease(**read_json(job_directory / "lease.json"))
@@ -606,7 +641,7 @@ def run_evaluation_job(
             or digest_json(asdict(replace(request, lease_id=None)))
             != digest_json(prepared["request"])
             or request.evaluation_mode != "complete"
-            or request.ticket_id != "05"
+            or request.ticket_id not in {"05", "06", "08"}
         ):
             raise ValueError("grant does not authorize this one complete evaluation job")
         result.update(
@@ -628,7 +663,7 @@ def run_evaluation_job(
 
         stage("evaluation_start")
         if measured:
-            scoring = _verify_real_inputs(shared)
+            scoring = verify_evaluation_inputs(shared)
             report = _generate_real(job, request, manifest, job_directory / "generation", stage)
         else:
             scoring = {"ocr_config": decode_ocr_config(shared["inputs"]["ocr_config"])}
@@ -652,7 +687,7 @@ def run_evaluation_job(
             manifest,
             report,
             binding=binding,
-            expected_center_version=0,
+            expected_center_version=request.center_version,
             image_root=job_directory,
             receipt_directory=job_directory / "scores",
             fixture_scorers=fixture_scorers,
