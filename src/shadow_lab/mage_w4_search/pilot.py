@@ -362,7 +362,7 @@ def audit_occupancy(snapshot):
     }
 
 
-def closeout_report(snapshot, *, components, evidence):
+def closeout_report(snapshot, *, components, evidence, runtime_dispositions=()):
     """Merge explicit component receipts; a component claim is not scientific qualification."""
     accounting = audit_occupancy(snapshot)
     leases = {row["lease_id"]: row for row in accounting["leases"]}
@@ -437,12 +437,16 @@ def closeout_report(snapshot, *, components, evidence):
         budget_used_seconds=accounting["used_seconds"],
         per_device_seconds=accounting["per_device_seconds"],
     )
-    if accounting["active_leases"] or accounting["deadline_overruns"]:
+    from .runtime_incidents import assess_runtime_incidents
+
+    incidents = assess_runtime_incidents(accounting, dispositions=runtime_dispositions)
+    if incidents["runtime_blocked"]:
         readiness["status"] = "runtime-blocked"
         readiness["missing"].append("closed-compliant-occupancy")
     return {
         "schema": "mage-pilot-closeout/v1",
         "accounting": accounting,
+        "runtime_incidents": incidents,
         "components": receipts,
         "duplicate_image_evidence": {key: value for key, value in images.items() if len(value) > 1},
         "duplicate_images_are_additional_generation_charges": False,
@@ -1228,6 +1232,13 @@ def render_closeout_html(report):
         f"<td><code>{html.escape(item['artifact']['sha256'][:16])}</code></td></tr>"
         for item in report["components"]
     )
+    incidents = report.get("runtime_incidents", {})
+    incident_summary = (
+        f"已核验的迟到结算：{len(incidents.get('resolved', []))} 项；"
+        f"未解决的运行异常：{len(incidents.get('unresolved', []))} 项。"
+        f"历史预留超时仍计费：{sum(row['seconds'] for row in accounting['deadline_overruns']):.6f} 秒。"
+        "运行异常处置不减少占用、不新增预算，也不补齐三轴或正式协议证据。"
+    )
     payload = html.escape(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False))
     return f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Mage W4A4 · 组件阶段证据快照</title><style>
@@ -1243,6 +1254,7 @@ h1{{font-size:2rem}}code,pre{{font-size:.85rem}}table{{width:100%;border-collaps
 <div class="card">首末占用墙钟跨度<br><b>{accounting["wall_seconds"] / 3600:.4f} 小时</b></div></div>
 <h2>已有组件证据</h2><table><thead><tr><th>票</th><th>设备</th><th>回执范围</th><th>原始状态</th><th>文件 SHA</th></tr></thead><tbody>{rows}</tbody></table>
 <p>组件计时为占用内的描述区间，未重复加到机时。相同图像仅标识复用/重放，不再额外计费。</p>
+<p>{html.escape(incident_summary)}</p>
 <h2>正式冻结缺口</h2><ul>{missing}</ul>
 <p>13 组各自的未完成状态、实际改码、失败与重复记录见完整 JSON。正式搜索、独立确认与一次终检的预算均须另行由证据冻结，不填默认数。</p>
 <details><summary>展开可重算的完整证据报告</summary><pre>{payload}</pre></details></html>"""
@@ -1275,6 +1287,7 @@ def _main():
         _artifact(budget_ref),
         components=manifest.get("components", []),
         evidence=manifest.get("evidence", {}),
+        runtime_dispositions=manifest.get("runtime_dispositions", []),
     )
     report["inputs"] = {"budget_snapshot": budget_ref, "evidence_manifest": evidence_ref}
     outputs = [args.output_json] + ([args.output_html] if args.output_html else [])
