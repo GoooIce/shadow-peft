@@ -2,6 +2,7 @@
 """Coordinator-side authenticated GB10 launch/recovery with one pilot ledger."""
 
 import argparse
+import hashlib
 import json
 import re
 import shlex
@@ -90,6 +91,18 @@ def remote(host, command, *, check=True):
 
 def worker_command(kind, request):
     """Choose a worker before reserving; complete scoring has an explicit entry."""
+    replay = request.request_id.startswith("evaluation-replay-")
+    if replay != (kind == "development-replay"):
+        raise ValueError("development replay requires its explicit worker entry")
+    if kind == "development-replay":
+        if (
+            request.ticket_id != "06"
+            or request.evaluation_mode != "complete"
+            or request.purpose != "candidate_development"
+            or request.effective_edits <= 0
+        ):
+            raise ValueError("development replay requires a complete ticket06 candidate")
+        return [PYTHON, f"{REPO}/scripts/mage_w4_replay.py", "run"]
     if kind == "evaluation":
         if (
             request.ticket_id not in {"05", "06", "08"}
@@ -106,6 +119,45 @@ def worker_command(kind, request):
     if kind == "ocr":
         return [PYTHON, "-m", "shadow_lab.mage_w4_search.ocr_worker"]
     raise ValueError("unknown worker kind")
+
+
+def replay_launch_metadata(
+    prepared,
+    manifest,
+    *,
+    receipt_text=None,
+    snapshot=None,
+    registration=None,
+    execution_kind="gb10_measured",
+):
+    """Authenticate replay metadata before occupancy; never interpret scores on this host."""
+    from shadow_lab.mage_w4_search.development_replay import (
+        authorize_replay_control,
+        replay_registration_binding,
+    )
+
+    request = read_request(prepared["request"])
+    if request.request_id.startswith("evaluation-replay-"):
+        if registration is not None or receipt_text is None or snapshot is None:
+            raise ValueError(
+                "replay launch needs its source verification and original ledger snapshot"
+            )
+        binding = authorize_replay_control(
+            prepared, manifest, json.loads(receipt_text), snapshot, execution_kind=execution_kind
+        )
+        binding["source_verification_file_sha256"] = hashlib.sha256(
+            receipt_text.encode()
+        ).hexdigest()
+        return {"development_replay": binding}
+    if receipt_text is not None:
+        raise ValueError("ordinary launch cannot consume a replay source verification")
+    if registration is None:
+        return {}
+    return {
+        "development_replay_registration": replay_registration_binding(
+            registration, manifest, request
+        )
+    }
 
 
 def authorize_existing_claim(ledger, request, manifest):
@@ -239,7 +291,15 @@ def main():
     parser.add_argument("--host", choices=("gooo", "goooinext"), required=True)
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--seconds", type=float, default=1800)
-    parser.add_argument("--worker-kind", choices=("native", "ocr", "evaluation"), default="native")
+    parser.add_argument(
+        "--worker-kind",
+        choices=("native", "ocr", "evaluation", "development-replay"),
+        default="native",
+    )
+    parser.add_argument(
+        "--replay-registration",
+        help="remote frozen replay prepared.json to bind before source launch",
+    )
     parser.add_argument("--remote-root", default=REMOTE_ROOT)
     parser.add_argument(
         "--evidence-root", type=Path, default=Path("runs-local/mage-direct-w4a4-20260909")
@@ -249,6 +309,15 @@ def main():
     parser.add_argument("--coordinator-host", choices=("gooo", "goooinext"), default="gooo")
     parser.add_argument("--round-id")
     args = parser.parse_args()
+    if args.replay_registration is not None and (
+        args.worker_kind != "evaluation"
+        or args.recover
+        or not PurePosixPath(args.replay_registration).is_absolute()
+        or ".." in PurePosixPath(args.replay_registration).parts
+    ):
+        parser.error(
+            "replay-registration is an absolute frozen source-launch input, never recovery"
+        )
     remote_root = PurePosixPath(args.remote_root)
     if (
         not remote_root.is_absolute()
@@ -286,6 +355,32 @@ def main():
         (local / "prepared.json").write_text(json.dumps(value, indent=2) + "\n")
         request = read_request(value["request"])
         worker = worker_command(args.worker_kind, request)
+        replay = args.worker_kind == "development-replay"
+        if replay and coordinator_config is not None:
+            raise ValueError("development replay cannot claim optimizer assignment")
+        registration = (
+            json.loads(remote(args.host, shlex.join(["cat", args.replay_registration])).stdout)
+            if args.replay_registration
+            else None
+        )
+        receipt_text = (
+            remote(
+                args.host, shlex.join(["cat", f"{remote_job}/replay-source-verification.json"])
+            ).stdout
+            if replay
+            else None
+        )
+        replay_metadata = replay_launch_metadata(
+            value,
+            manifest,
+            registration=registration,
+            receipt_text=receipt_text,
+            snapshot=ledger.snapshot(),
+        )
+        if receipt_text is not None:
+            (local / "replay-source-verification.json").write_text(receipt_text)
+        if registration is not None:
+            (local / "replay-registration.json").write_text(json.dumps(registration))
         if args.worker_kind == "ocr" and (
             request.ticket_id != "04"
             or request.purpose != "ocr_selection"
@@ -296,7 +391,12 @@ def main():
             request.ticket_id not in {"06", "08"} or request.effective_edits <= 0
         ):
             raise ValueError("coordinator claims only registered ticket 06/08 candidate work")
-        if request.ticket_id == "06" and request.effective_edits > 0 and coordinator_config is None:
+        if (
+            request.ticket_id == "06"
+            and request.effective_edits > 0
+            and coordinator_config is None
+            and not replay
+        ):
             raise ValueError("ticket 06 candidate requires its registered coordinator round")
         check = preflight(request, manifest, expected_center_version=request.center_version)
         if check.status != "ready_for_reservation" or request.device_id != args.host:
@@ -318,6 +418,7 @@ def main():
         request = replace(request, lease_id=lease.lease_id)
         try:
             lease, payload = authorize_existing_claim(ledger, request, manifest)
+            payload.update(replay_metadata)
         except ValueError:
             # No worker command has been sent; an authenticated launch was never attempted.
             ledger.release(

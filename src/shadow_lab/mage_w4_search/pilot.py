@@ -977,7 +977,6 @@ def validate_ocr_archive(value):
 
     lock = _artifact(value["lock"])
     report = _artifact(value["calibration"])
-    truths = [_artifact(ref) for ref in value["human_transcriptions"]]
     raw_plan = report["plan"]
     plan = CalibrationPlan(
         **{
@@ -1005,24 +1004,50 @@ def validate_ocr_archive(value):
         # feed the unchanged identity back into the typed replay.
         if device_digest not in {value["device_evidence"]["sha256"], digest_json(device)}:
             raise ValueError("OCR device evidence identity mismatch")
-    expected = {row["image_sha256"]: row for row in report["transcriptions"]}
-    if (
-        len(expected) != len(plan.image_sha256)
-        or len(truths) != len(expected)
-        or {row["image_sha256"] for row in truths} != set(expected)
-    ):
-        raise ValueError("complete actual human transcription artifacts are required")
-    for truth, reference in zip(truths, value["human_transcriptions"], strict=True):
-        recorded = expected[truth["image_sha256"]]
+    if "schema" in value or "human_source" in value:
+        from .human_transcription import import_human_work
+
+        source = value.get("human_source")
         if (
-            truth.get("source_kind") != "human_image_transcription"
-            or not truth.get("annotator_id")
-            or truth.get("complete") is not True
-            or truth.get("actual_segments") != recorded["actual_segments"]
-            or truth["annotator_id"] != recorded["annotator_id"]
-            or reference["sha256"] != recorded["artifact_sha256"]
+            value.get("schema") != "mage-w4-ocr-archive/v2"
+            or set(value)
+            != {"schema", "human_source", "lock", "calibration", "observations", "device_evidence"}
+            or not isinstance(source, dict)
+            or set(source) != {"format", "artifact", "inventory"}
+            or source["format"] != "complete-human-work/v1"
         ):
-            raise ValueError("OCR truth must be complete actual human image transcription")
+            raise ValueError("explicit complete human-work archive schema/format required")
+        for key in ("artifact", "inventory"):
+            _artifact(source[key])
+        work = import_human_work(source["artifact"]["path"], source["inventory"]["path"])
+        if (
+            work.artifact_sha256 != source["artifact"]["sha256"]
+            or work.artifact_size_bytes != source["artifact"]["size_bytes"]
+            or work.inventory_file_sha256 != source["inventory"]["sha256"]
+            or digest_json([asdict(row) for row in work.for_plan(plan)])
+            != digest_json(report["transcriptions"])
+        ):
+            raise ValueError("whole human-work identity or planned transcriptions differ")
+    else:
+        truths = [_artifact(ref) for ref in value["human_transcriptions"]]
+        expected = {row["image_sha256"]: row for row in report["transcriptions"]}
+        if (
+            len(expected) != len(plan.image_sha256)
+            or len(truths) != len(expected)
+            or {row["image_sha256"] for row in truths} != set(expected)
+        ):
+            raise ValueError("complete actual human transcription artifacts are required")
+        for truth, reference in zip(truths, value["human_transcriptions"], strict=True):
+            recorded = expected[truth["image_sha256"]]
+            if (
+                truth.get("source_kind") != "human_image_transcription"
+                or not truth.get("annotator_id")
+                or truth.get("complete") is not True
+                or truth.get("actual_segments") != recorded["actual_segments"]
+                or truth["annotator_id"] != recorded["annotator_id"]
+                or reference["sha256"] != recorded["artifact_sha256"]
+            ):
+                raise ValueError("OCR truth must be complete actual human image transcription")
     observed = tuple(decode_recognition_receipt(_artifact(ref)) for ref in value["observations"])
     costs = (
         ()

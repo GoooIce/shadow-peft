@@ -140,6 +140,10 @@ def _write_json(path, value):
 
 def reconstruct_evaluation_job(job, manifest):
     """Replay the original schema's authenticated preparation without reading model files."""
+    if job["schema"] == "mage-w4-development-replay-job/v1":
+        from .development_replay import reconstruct_replay_job
+
+        return reconstruct_replay_job(job, manifest)
     if job["schema"] == "mage-w4-center-job/v1":
         from .center_execution import decode_full_center, prepare_center_job
 
@@ -249,6 +253,7 @@ def implementation_hashes():
         repo / "scripts/mage_w4_launch.py",
         repo / "scripts/mage_w4_center.py",
         repo / "scripts/mage_w4_coordinate.py",
+        repo / "scripts/mage_w4_replay.py",
     ]
     paths += [
         Path(__file__).parent / name
@@ -267,6 +272,7 @@ def implementation_hashes():
             "ocr.py",
             "scorers.py",
             "development.py",
+            "development_replay.py",
             "human_transcription.py",
             "coordinator.py",
             "pilot.py",
@@ -530,7 +536,7 @@ def _generate_real(job, request, manifest, directory, stage):
 
     shared = job["shared"]
     root, inventory = Path(shared["run_root"]), shared["inventory"]
-    if job["schema"] == "mage-w4-center-job/v1":
+    if job["schema"] in {"mage-w4-center-job/v1", "mage-w4-development-replay-job/v1"}:
         from .center_execution import load_execution_center
 
         assets = load_execution_center(job, request, stage)
@@ -650,6 +656,17 @@ def run_evaluation_job(
             device_id=device_id,
             evaluation_job_sha256=digest_json(job),
         )
+        if job["schema"] == "mage-w4-development-replay-job/v1":
+            from .development_replay import verify_replay_worker
+
+            verify_replay_worker(
+                prepared,
+                manifest,
+                grant,
+                job_directory / "replay-source-verification.json",
+                execution_kind=result["execution_kind"],
+            )
+            result.update(execution_purpose="development_replay", eligible_for_center_update=False)
 
         def stage(name):
             now = time.time()

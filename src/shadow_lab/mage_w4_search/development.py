@@ -467,7 +467,7 @@ def verify_evaluation_job(job_directory, expected_request, manifest, snapshot, *
     replay = reconstruct_evaluation_job(job, manifest)
     if (
         digest_json(replay) != digest_json(prepared)
-        or request.request_id != "evaluation-" + digest_json(job)
+        or request.request_id != replay["request"]["request_id"]
         or CandidateRequest.from_dict(prepared["request"]).request_digest
         != expected_request.request_digest
     ):

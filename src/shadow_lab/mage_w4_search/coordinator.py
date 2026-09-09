@@ -256,6 +256,8 @@ class DevelopmentCoordinator:
         )
 
     def begin_round(self, round_id: str, assignments: tuple[CandidateAssignment, ...]) -> dict:
+        if any(item.request.request_id.startswith("evaluation-replay-") for item in assignments):
+            raise ValueError("development replay cannot enter an optimizer round")
         if (
             not round_id
             or not assignments
@@ -521,6 +523,11 @@ class DevelopmentCoordinator:
         current_reference: ScoredBatch,
         q0_reference: ScoredBatch,
     ) -> dict:
+        if any(
+            batch is not None and batch.request.request_id.startswith("evaluation-replay-")
+            for batch in (candidate, current_reference, q0_reference)
+        ):
+            raise ValueError("development replay cannot be submitted as an optimizer candidate")
         candidate_id = candidate.request.candidate_id
         submission_identity = digest_json(
             {

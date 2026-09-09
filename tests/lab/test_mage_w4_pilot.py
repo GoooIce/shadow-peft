@@ -564,6 +564,170 @@ def test_ocr_public_identity_archive_roundtrip_keeps_fixture_unqualified(tmp_pat
         validate_ocr_archive(changed_value)
 
 
+def complete_human_archive_fixture(tmp_path):
+    import hashlib
+    import json
+    from dataclasses import asdict
+
+    from test_mage_w4_ocr import config
+
+    from shadow_lab.mage_w4_search.human_transcription import import_human_work
+    from shadow_lab.mage_w4_search.ocr import (
+        CalibrationPlan,
+        RawSegment,
+        compare_ocr,
+        recognize,
+        scorer_lock_identity,
+    )
+    from shadow_lab.mage_w4_search.pilot import artifact_reference
+
+    def archive(name, value):
+        path = tmp_path / name
+        path.write_text(json.dumps(value, ensure_ascii=False, indent=4) + "\n")
+        return artifact_reference(path)
+
+    images = tuple(f"whole-human-work-fixture-{i}".encode() for i in range(5))
+    image_ids = tuple(hashlib.sha256(image).hexdigest() for image in images)
+    inventory = archive(
+        "all-images.json",
+        {"purpose": "ocr_selection", "rows": [{"image_sha256": sha} for sha in image_ids]},
+    )
+    human = archive(
+        "whole-human.json",
+        {
+            "schema": "mage-ocr-human-transcription-entry/v1",
+            "purpose": "ocr_selection",
+            "transcribed_by": "synthetic-unit-test-author",
+            "transcribed_at_utc": "2026-01-01T00:00:00Z",
+            "rows": [
+                {
+                    "index": i,
+                    "image_sha256": sha,
+                    "complete": i != 3,
+                    "actual_segments": [f"Ab{i}!"],
+                }
+                for i, sha in enumerate(image_ids)
+            ],
+        },
+    )
+    selected = (0, 1, 2, 4)
+    configs = (config(), config("EasyOCR"))
+    plan = CalibrationPlan(
+        tuple(image_ids[i] for i in selected),
+        configs,
+        ("b" * 64,) * len(selected),
+        "2026-01-01T00:01:00Z",
+        0.25,
+    )
+    work = import_human_work(human["path"], inventory["path"])
+    observations = tuple(
+        recognize(
+            images[i],
+            engine,
+            lambda image, frozen, i=i: (RawSegment(f"Ab{i}!", (0, 0, 40, 10)),),
+        )
+        for engine in configs
+        for i in selected
+    )
+    report = compare_ocr(plan, work.for_plan(plan), observations, execution_kind="fixture")
+    value = {
+        "schema": "mage-w4-ocr-archive/v2",
+        "human_source": {
+            "format": "complete-human-work/v1",
+            "artifact": human,
+            "inventory": inventory,
+        },
+        "lock": archive("lock-identity.json", scorer_lock_identity(report)),
+        "calibration": archive("calibration.json", asdict(report)),
+        "observations": [
+            archive(f"observations-{i}.json", asdict(row)) for i, row in enumerate(observations)
+        ],
+        "device_evidence": None,
+    }
+    return value, report, archive
+
+
+def test_complete_human_archive_replays_original_file_identity_without_qualifying_fixture(tmp_path):
+    from shadow_lab.mage_w4_search.pilot import validate_ocr_archive
+
+    value, report, archive = complete_human_archive_fixture(tmp_path)
+    restored = validate_ocr_archive(value)
+    assert restored.sha256 == report.sha256
+    assert len(restored.transcriptions) == 4
+    assert {truth.artifact_sha256 for truth in restored.transcriptions} == {
+        value["human_source"]["artifact"]["sha256"]
+    }
+    assert restored.transcriptions[0].actual_segments == ("Ab0!",)
+    field = archive(
+        "formal-field.json",
+        {
+            "schema": "mage-formal-field/v1",
+            "field": "ocr_lock",
+            "value": value,
+            "basis": [value["calibration"]],
+            "rationale": "Whole-file public identity fixture; no measured OCR claim.",
+        },
+    )
+    readiness = formal_readiness(
+        {"ocr_lock": field}, budget_used_seconds=0, per_device_seconds={"gooo": 0, "goooinext": 0}
+    )
+    assert "ocr_lock" in readiness["missing"]
+    assert readiness["formal_execution_authorized"] is False
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "no_explicit_schema",
+        "unknown_source_format",
+        "mixed_source_formats",
+        "partial_inventory",
+        "reordered_inventory",
+        "incomplete_selected_image",
+        "human_after_registration",
+        "changed_author_text",
+        "same_text_different_raw_file",
+    ],
+)
+def test_complete_human_archive_rejects_incomplete_or_reidentified_originals(tmp_path, change):
+    import json
+    from pathlib import Path
+
+    from shadow_lab.mage_w4_search.pilot import artifact_reference, validate_ocr_archive
+
+    value, _, archive = complete_human_archive_fixture(tmp_path)
+    source = value["human_source"]
+    if change == "no_explicit_schema":
+        value.pop("schema")
+    elif change == "unknown_source_format":
+        source["format"] = "guess-from-fields"
+    elif change == "mixed_source_formats":
+        value["human_transcriptions"] = []
+    elif change in {"partial_inventory", "reordered_inventory"}:
+        inventory = json.loads(Path(source["inventory"]["path"]).read_text())
+        if change == "partial_inventory":
+            inventory["rows"].pop(3)  # Even an excluded row belongs to the complete inventory.
+        else:
+            inventory["rows"].reverse()
+        source["inventory"] = archive("changed-inventory.json", inventory)
+    else:
+        human = json.loads(Path(source["artifact"]["path"]).read_text())
+        if change == "incomplete_selected_image":
+            human["rows"][0]["complete"] = False
+        elif change == "human_after_registration":
+            human["transcribed_at_utc"] = "2026-01-01T00:02:00Z"
+        elif change == "changed_author_text":
+            human["rows"][0]["actual_segments"] = ["AB0!"]
+        if change == "same_text_different_raw_file":
+            path = tmp_path / "reformatted-human.json"
+            path.write_text(json.dumps(human, separators=(",", ":")))
+            source["artifact"] = artifact_reference(path)
+        else:
+            source["artifact"] = archive("changed-human.json", human)
+    with pytest.raises(ValueError):
+        validate_ocr_archive(value)
+
+
 def test_native_generate_sample_hash_is_not_complete_request_hash(tmp_path):
     from dataclasses import replace
 
