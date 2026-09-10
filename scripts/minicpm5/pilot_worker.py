@@ -26,8 +26,38 @@ def _modules(self):
     out = {}
     for name, module in model.named_modules():
         if hasattr(module, "alpha") and hasattr(module, "weight_scale"):
-            out[name] = module
+            out[name] = module            # NVFP4 kernel modules
+        elif (hasattr(module, "weight_scale")
+              and getattr(getattr(module, "weight", None), "dtype", None) is not None
+              and str(module.weight.dtype) == "torch.int8"):
+            out[name] = module            # W8A8 int8 kernel modules
     return out
+
+
+def _payload_view(tensor: "torch.Tensor"):
+    """Payload-order ``[out, in]`` zero-copy view of an int8 kernel weight.
+
+    The live weight (and any faithful clone of it) is ``[in, out]`` -- a
+    transposed view of payload-layout storage.  ``.t()`` returns a view, but
+    any ``reshape(-1)``/``flatten`` on either side materialises a **copy** and
+    the write silently never reaches the engine (the trap the 2026-09-10
+    probes documented).  Element reads/writes through the 2D view always alias
+    the storage.
+    """
+    return tensor.t()
+
+
+def _read_code(view, flat_index: int, in_features: int) -> int:
+    row, col = divmod(int(flat_index), in_features)
+    return int(view[row, col])
+
+
+def _write_code(view, flat_index: int, in_features: int, code: int) -> bool:
+    row, col = divmod(int(flat_index), in_features)
+    if int(view[row, col]) == int(code):
+        return False
+    view[row, col] = int(code)
+    return True
 
 
 def _data(obj):
@@ -67,10 +97,14 @@ def search_load(self, path, cache_key, device="cpu", clone=True):
 def search_patch(self, cache_key, edits, verify=True):
     """Apply ``{module: [[flat_index, new_code], ...]}`` to cached weights.
 
-    ``flat_index`` is the row-major nibble index inside the fused engine weight
-    (``row * in_features + column``); nibble order follows compressed-tensors
-    (even index = low nibble).
+    ``flat_index`` is the row-major index inside the fused engine weight in
+    **payload order** (``row * in_features + column`` over ``[out_fused, in]``);
+    on the NVFP4 kernel layout nibble order follows compressed-tensors (even
+    index = low nibble), on the int8 layout codes are single signed bytes
+    written through the transposed 2D view (never a reshape -- that copies).
     """
+    import torch
+
     cache = self._search_cache[cache_key]
     tensors = cache["tensors"]
     start = time.perf_counter()
@@ -78,8 +112,15 @@ def search_patch(self, cache_key, edits, verify=True):
     changed = 0
     for module, items in edits.items():
         tensor = tensors[f"{module}.weight"]
+        if tensor.dtype == torch.int8:
+            view = _payload_view(tensor)
+            in_features = int(tensor.shape[0])
+            touched[module] = (view, in_features)
+            for flat_index, new_code in items:
+                changed += _write_code(view, flat_index, in_features, new_code)
+            continue
         flat = _weight_bytes(tensor)
-        touched[module] = flat
+        touched[module] = (flat, None)
         for flat_index, new_code in items:
             position = int(flat_index) // 2
             shift = 4 * (int(flat_index) % 2)
@@ -92,11 +133,16 @@ def search_patch(self, cache_key, edits, verify=True):
     readback = {}
     if verify:
         for module, items in edits.items():
-            flat = touched[module]
-            readback[module] = [
-                int((int(flat[int(index) // 2]) >> (4 * (int(index) % 2))) & 0x0F)
-                for index, _code in items
-            ]
+            source, in_features = touched[module]
+            if in_features is None:
+                readback[module] = [
+                    int((int(source[int(index) // 2]) >> (4 * (int(index) % 2))) & 0x0F)
+                    for index, _code in items
+                ]
+            else:
+                readback[module] = [
+                    _read_code(source, index, in_features) for index, _code in items
+                ]
     return {
         "modules": len(edits),
         "bytes_written": changed,
@@ -113,6 +159,8 @@ def search_readback(self, cache_key, queries, source="cache"):
     running model -- the two must agree, and only the second one is what the
     kernel dump sees.
     """
+    import torch
+
     if source == "engine":
         modules = _modules(self)
         tensors = {f"{module}.weight": modules[module].weight for module in queries}
@@ -121,16 +169,28 @@ def search_readback(self, cache_key, queries, source="cache"):
         tensors = cache["tensors"]
     out = {}
     for module, indices in queries.items():
-        flat = _weight_bytes(tensors[f"{module}.weight"])
-        out[module] = [
-            int((int(flat[int(index) // 2]) >> (4 * (int(index) % 2))) & 0x0F)
-            for index in indices
-        ]
+        tensor = tensors[f"{module}.weight"]
+        if tensor.dtype == torch.int8:
+            view = _payload_view(tensor)
+            in_features = int(tensor.shape[0])
+            out[module] = [_read_code(view, index, in_features) for index in indices]
+        else:
+            flat = _weight_bytes(tensor)
+            out[module] = [
+                int((int(flat[int(index) // 2]) >> (4 * (int(index) % 2))) & 0x0F)
+                for index in indices
+            ]
     return out
 
 
 def search_hash(self, cache_key, modules=None):
-    """sha256 of the cached ``weight`` tensor per module (cheap drift detector)."""
+    """sha256 of the cached ``weight`` tensor per module (cheap drift detector).
+
+    int8 weights hash over the payload-order view made contiguous, matching
+    the kernel-format export byte convention.
+    """
+    import torch
+
     cache = self._search_cache[cache_key]
     tensors = cache["tensors"]
     names = modules or sorted({key.rsplit(".", 1)[0] for key in tensors})
@@ -140,7 +200,10 @@ def search_hash(self, cache_key, modules=None):
         if tensor is None:
             out[name] = None
             continue
-        payload = tensor.detach().cpu().contiguous().numpy().tobytes()
+        if tensor.dtype == torch.int8:
+            payload = _payload_view(tensor).contiguous().numpy().tobytes()
+        else:
+            payload = tensor.detach().cpu().contiguous().numpy().tobytes()
         out[name] = hashlib.sha256(payload).hexdigest()[:24]
     return out
 

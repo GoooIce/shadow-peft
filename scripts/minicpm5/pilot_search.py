@@ -143,11 +143,22 @@ class Runner:
         self.out.mkdir(parents=True, exist_ok=True)
         (self.out / "records").mkdir(exist_ok=True)
         self.reader = pl.PayloadReader(Path(args.model).expanduser())
-        self.layers = [
-            key[: -len(".weight_packed")]
-            for key in sorted(self.reader._keys)
-            if key.endswith(".weight_packed")
-        ]
+        if self.reader.kind == "int8":
+            pl.configure_grid("int8-uniform")
+        self.layers = (
+            [
+                key[: -len(".weight")]
+                for key in sorted(self.reader._keys)
+                if key.endswith(".weight")
+                and f"{key[: -len('.weight')]}.weight_scale" in self.reader._keys
+            ]
+            if self.reader.kind == "int8"
+            else [
+                key[: -len(".weight_packed")]
+                for key in sorted(self.reader._keys)
+                if key.endswith(".weight_packed")
+            ]
+        )
         self.groups = pl.build_groups(self.layers)
         self.masks, self.census = pl.group_census(self.groups, self.reader)
         self.shapes = {layer: self.reader.shape(layer) for layer in self.layers}
@@ -180,10 +191,16 @@ class Runner:
         import hashlib
 
         if layer not in self.base_hashes:
-            packed = self.reader._handle.get_tensor(f"{layer}.weight_packed")
-            self.base_hashes[layer] = hashlib.sha256(
-                packed.reshape(-1).numpy().tobytes()
-            ).hexdigest()[:24]
+            if self.reader.kind == "int8":
+                weight = self.reader._handle.get_tensor(f"{layer}.weight")
+                self.base_hashes[layer] = hashlib.sha256(
+                    weight.contiguous().numpy().tobytes()
+                ).hexdigest()[:24]
+            else:
+                packed = self.reader._handle.get_tensor(f"{layer}.weight_packed")
+                self.base_hashes[layer] = hashlib.sha256(
+                    packed.reshape(-1).numpy().tobytes()
+                ).hexdigest()[:24]
         return self.base_hashes[layer]
 
     def edits_for(self, group_index: int) -> int:
@@ -345,9 +362,9 @@ class Runner:
                 # bytes: a difference here is its own finding, not a 0<->8
                 # question, so it is counted separately from both calibres.
                 engine_cache_raw += 1
-            expected_value = float(pl.VALUE[expected])
-            if (float(pl.VALUE[actual]) != expected_value
-                    or float(pl.VALUE[cached]) != expected_value):
+            expected_value = pl.value_of(expected)
+            if (pl.value_of(actual) != expected_value
+                    or pl.value_of(cached) != expected_value):
                 mismatches.append({"layer": layer, "flat": int(flat),
                                    "expected": expected, "engine": int(actual),
                                    "cache": int(cached)})
@@ -1237,9 +1254,20 @@ class Runner:
                 # gate/up): patching each shard from a *fresh* file read would
                 # silently drop the previous shard's edits, so reuse the tensor
                 # already patched in this loop.
-                base_tensor = tensors[key] if key in tensors else handle.get_tensor(key)
-                flat = base_tensor.reshape(-1).clone()
+                base_tensor = tensors[key] if key in tensors else handle.get_tensor(key).clone()
                 in_features = self.shapes[layer][1]
+                if self.reader.kind == "int8":
+                    # kernel-format int8 weight is [in, out] contiguous; the
+                    # payload-order flat index indexes the *transposed* view.
+                    # Element writes through .t() alias the storage; a
+                    # reshape(-1) here would flatten in the wrong order.
+                    view = base_tensor.t()          # [out_fused, in], zero-copy
+                    for flat_index, code in center.codes[layer].items():
+                        row, col = divmod(flat_index, in_features)
+                        view[offset + row, col] = int(code)
+                    tensors[f"{module}.weight"] = base_tensor
+                    continue
+                flat = base_tensor.reshape(-1).clone()
                 for flat_index, code in center.codes[layer].items():
                     row, col = divmod(flat_index, in_features)
                     position = (offset + row) * in_features + col
@@ -1276,7 +1304,15 @@ class Runner:
         # ~70M non-canonical code-8 nibbles (equal to code 0 in value), and a
         # re-encode from canonical codes would rewrite them and make the
         # byte-level comparison against the engine dump fail spuriously.
+        # int8: codes are the bytes themselves; there is nothing to fold.
         for layer in touched:
+            if self.reader.kind == "int8":
+                weight = tensors[f"{layer}.weight"].clone()
+                flat = weight.reshape(-1)
+                for flat_index, code in center.codes[layer].items():
+                    flat[int(flat_index)] = int(code)
+                tensors[f"{layer}.weight"] = weight
+                continue
             packed = tensors[f"{layer}.weight_packed"].clone()
             flat = packed.reshape(-1)
             for flat_index, code in center.codes[layer].items():

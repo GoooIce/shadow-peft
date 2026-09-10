@@ -38,7 +38,7 @@ GAMMA = 1.0
 BLOCK = 16
 
 # --------------------------------------------------------------------------- #
-# E2M1 grid
+# quantisation grid: NVFP4 E2M1 (default) or INT8 uniform (W8A8 line)
 # --------------------------------------------------------------------------- #
 
 E2M1_VALUES = (
@@ -51,10 +51,60 @@ CODE_RANK = {code: rank for rank, code in enumerate(ORDERED_CODES)} | {8: 7}
 VALUE = np.asarray(E2M1_VALUES, dtype=np.float64)
 MAX_VALUE = 6.0
 
+#: which grid this module is configured for; frozen per run and fed into the
+#: centre identity hash so two grids can never share a centre namespace
+GRID_KIND = "nvfp4-e2m1"
+
+GRIDS = ("nvfp4-e2m1", "int8-uniform")
+
+
+def configure_grid(kind: str) -> None:
+    """Rebind the grid globals for ``kind`` (idempotent).
+
+    ``int8-uniform``: codes are the signed int8 values themselves in
+    ``[-127, 127]``; the grid is uniform so rank moves ARE ``+/-1`` code steps,
+    there is no alias folding (``canonical_code`` is the identity) and the
+    value calibre collapses to exact code equality.
+    """
+    global GRID_KIND, ORDERED_CODES, CODE_RANK, VALUE, MAX_VALUE, RESIDUAL_COORDS
+    if kind not in GRIDS:
+        raise ValueError(f"unknown grid {kind!r}; expected one of {GRIDS}")
+    if kind == GRID_KIND:
+        return
+    if kind == "nvfp4-e2m1":
+        ORDERED_CODES = (15, 14, 13, 12, 11, 10, 9, 0, 1, 2, 3, 4, 5, 6, 7)
+        CODE_RANK = {code: rank for rank, code in enumerate(ORDERED_CODES)} | {8: 7}
+        VALUE = np.asarray(E2M1_VALUES, dtype=np.float64)
+        MAX_VALUE = 6.0
+        RESIDUAL_COORDS = "code-value/e2m1/fp32"
+    else:
+        ORDERED_CODES = tuple(range(-127, 128))
+        CODE_RANK = {code: rank for rank, code in enumerate(ORDERED_CODES)}
+        VALUE = None                       # int8 has no code->value table
+        MAX_VALUE = 127.0
+        RESIDUAL_COORDS = "code-value/int8/fp32"
+    GRID_KIND = kind
+
 
 def canonical_code(code: int) -> int:
-    """Fold negative zero onto code 0 (ticket 08: ``e2m1_encode`` can emit 8)."""
+    """Fold negative zero onto code 0 (ticket 08: ``e2m1_encode`` can emit 8).
+
+    Identity on the int8 grid (uniform codes have no aliases).
+    """
+    if GRID_KIND == "int8-uniform":
+        return int(code)
     return 0 if int(code) == 8 else int(code)
+
+
+def value_of(code: int) -> float:
+    """Numerical value of a canonical code in code-value units.
+
+    int8: the code itself (the per-channel scale cancels in every comparison
+    the search makes; residual book-keeping is in code units).
+    """
+    if GRID_KIND == "int8-uniform":
+        return float(canonical_code(code))
+    return float(VALUE[canonical_code(code)])
 
 
 def rank_of(code: int) -> int:
@@ -78,7 +128,7 @@ def step_code(code: int, sign: int) -> int:
 
 
 def gap(code_a: int, code_b: int) -> float:
-    return float(VALUE[canonical_code(code_b)] - VALUE[canonical_code(code_a)])
+    return value_of(code_b) - value_of(code_a)
 
 
 def project(value: float) -> tuple[int, bool]:
@@ -87,6 +137,10 @@ def project(value: float) -> tuple[int, bool]:
     ``in_range`` is False when the value falls beyond the grid endpoints, which
     ticket 08's source audit turns into a whole-step rejection.
     """
+    if GRID_KIND == "int8-uniform":
+        if value > MAX_VALUE or value < -MAX_VALUE:
+            return 0, False
+        return int(min(127, max(-127, round(value)))), True
     if value > MAX_VALUE or value < -MAX_VALUE:
         return 0, False
     mag = abs(value)
@@ -231,7 +285,15 @@ def engine_layout(
 
 
 class PayloadReader:
-    """Lazy nibble/block-scale reader for one compressed-tensors payload."""
+    """Lazy reader for one compressed-tensors payload.
+
+    Two payload kinds, auto-detected from the tensor keys:
+
+    * ``nvfp4``: ``weight_packed`` nibbles + block/global scales (E2M1 grid);
+    * ``int8``:  plain int8 ``weight`` + per-channel ``weight_scale``
+      (W8A8 line; codes are the signed int8 values, ``[out, in]`` row-major,
+      exactly the bytes the live engine's transposed parameter views).
+    """
 
     def __init__(self, payload: Path, fused_names: dict[str, str] | None = None):
         from safetensors import safe_open
@@ -243,6 +305,11 @@ class PayloadReader:
         self._codes: dict[str, np.ndarray] = {}
         self._scales: dict[str, np.ndarray] = {}
         self._raw: dict[str, np.ndarray] = {}
+        self.kind = (
+            "int8" if not any(k.endswith(".weight_packed") for k in self._keys)
+            and any(k.endswith(".weight_scale") for k in self._keys)
+            else "nvfp4"
+        )
 
     def close(self) -> None:
         self._handle.__exit__(None, None, None)
@@ -259,49 +326,80 @@ class PayloadReader:
         byte, otherwise code 8 (negative zero, numerically equal to code 0)
         gets rewritten to 0 and the byte-level hard gate reports a mismatch
         that is numerically empty.
+
+        int8: codes have no aliases, so this is just the code.
         """
+        if self.kind == "int8":
+            return int(self.codes(layer).reshape(-1)[int(flat)])
         if layer not in self._raw:
             self._raw[layer] = self._handle.get_tensor(f"{layer}.weight_packed").numpy().reshape(-1)
         byte = int(self._raw[layer][int(flat) // 2])
         return (byte >> (4 * (int(flat) % 2))) & 0x0F
 
     def has(self, name: str) -> bool:
+        if self.kind == "int8":
+            return f"{name}.weight" in self._keys and f"{name}.weight_scale" in self._keys
         return f"{name}.weight_packed" in self._keys
 
     def tensors(self) -> dict[str, np.ndarray]:
         """All non-quantised tensors (config-independent BF16 side)."""
         out = {}
+        skip = (".weight_packed", ".weight_scale", ".weight_global_scale", ".input_global_scale")
         for key in sorted(self._keys):
-            if key.endswith((".weight_packed", ".weight_scale", ".weight_global_scale", ".input_global_scale")):
+            if self.kind == "int8":
+                if key.endswith(skip):
+                    continue
+                base = key[: -len(".weight")] if key.endswith(".weight") else None
+                if base is not None and f"{base}.weight_scale" in self._keys:
+                    continue          # int8 linear weight: quantised side
+            elif key.endswith(skip):
                 continue
-            out[key] = self._handle.get_tensor(key).numpy()
+            tensor = self._handle.get_tensor(key)
+            if str(tensor.dtype) == "torch.bfloat16":
+                import torch
+
+                tensor = tensor.to(torch.float32)   # numpy has no bf16
+            out[key] = tensor.numpy()
         return out
 
     def codes(self, layer: str) -> np.ndarray:
-        """Canonical E2M1 codes, shape ``[out, in]`` (uint8)."""
+        """Canonical codes, shape ``[out, in]``.
+
+        nvfp4: canonical E2M1 codes (uint8, code 8 folded to 0).
+        int8:   the signed int8 codes themselves (int16 view, no aliases).
+        """
         if layer not in self._codes:
-            packed = self._handle.get_tensor(f"{layer}.weight_packed").numpy()
-            low = packed & 0x0F
-            high = packed >> 4
-            codes = np.empty((packed.shape[0], packed.shape[1] * 2), dtype=np.uint8)
-            codes[:, 0::2] = low
-            codes[:, 1::2] = high
-            codes[codes == 8] = 0
-            self._codes[layer] = codes
+            if self.kind == "int8":
+                weight = self._handle.get_tensor(f"{layer}.weight")
+                self._codes[layer] = weight.numpy().astype(np.int16)
+            else:
+                packed = self._handle.get_tensor(f"{layer}.weight_packed").numpy()
+                low = packed & 0x0F
+                high = packed >> 4
+                codes = np.empty((packed.shape[0], packed.shape[1] * 2), dtype=np.uint8)
+                codes[:, 0::2] = low
+                codes[:, 1::2] = high
+                codes[codes == 8] = 0
+                self._codes[layer] = codes
         return self._codes[layer]
 
     def block_scales(self, layer: str) -> np.ndarray:
         """E4M3 block scales as float32, shape ``[out, in//16]``."""
-        if layer not in self._scales:
+        if self._scales.get(layer) is None:
             scale = self._handle.get_tensor(f"{layer}.weight_scale").float().numpy()
             self._scales[layer] = scale
         return self._scales[layer]
 
     def global_scale(self, layer: str) -> float:
+        if self.kind == "int8":
+            return float("nan")          # per-channel only; no global scale
         stored = float(self._handle.get_tensor(f"{layer}.weight_global_scale").float().reshape(-1)[0])
         return 1.0 / stored if stored else float("nan")
 
     def shape(self, layer: str) -> tuple[int, int]:
+        if self.kind == "int8":
+            weight = self._handle.get_tensor(f"{layer}.weight")
+            return int(weight.shape[0]), int(weight.shape[1])
         packed = self._handle.get_tensor(f"{layer}.weight_packed")
         return int(packed.shape[0]), int(packed.shape[1] * 2)
 
@@ -358,6 +456,7 @@ class CentreState:
         lookup = base_hash_of if callable(base_hash_of) else base_hash_of.__getitem__
         digest = hashlib.sha256()
         digest.update(PROTOCOL.encode())
+        digest.update(f"grid={GRID_KIND}".encode())
         # empty layer buckets carry no delta; hashing them would make the same
         # centre hash differently before/after a state.json round-trip
         # (delta_map drops them, set_code can leave them behind)
@@ -375,6 +474,7 @@ class CentreState:
         return {
             "generation": self.generation,
             "protocol": PROTOCOL,
+            "grid": GRID_KIND,
             "residual_coordinates": RESIDUAL_COORDS,
             "clamp": CLAMP,
             "gamma": GAMMA,
@@ -384,6 +484,7 @@ class CentreState:
 
     @classmethod
     def from_dict(cls, blob: dict) -> "CentreState":
+        configure_grid(blob.get("grid", "nvfp4-e2m1"))
         state = cls(generation=int(blob.get("generation", 0)))
         for layer, bucket in (blob.get("codes") or {}).items():
             state.codes[layer] = {int(flat): canonical_code(code) for flat, code in bucket.items()}
@@ -432,7 +533,14 @@ def group_census(
     for group in groups:
         movable = zero = 0
         for layer in group.layers:
-            mask = reader.block_scales(layer) > block_min
+            if reader.kind == "int8":
+                # per-channel scales [out, 1] broadcast to virtual 16-code
+                # blocks so the BLOCK arithmetic downstream is unchanged
+                rows = reader.block_scales(layer).reshape(-1) > block_min
+                in_features = reader.shape(layer)[1]
+                mask = np.repeat(rows[:, None], in_features // BLOCK, axis=1)
+            else:
+                mask = reader.block_scales(layer) > block_min
             masks[layer] = mask
             movable += int(mask.sum()) * BLOCK
             zero += int((~mask).sum()) * BLOCK
@@ -620,7 +728,7 @@ def apply_step(
         residual = center.residual_at(layer, flat)
         u = alpha * gradient.get((layer, flat), 0.0) + gamma * residual
         ledger["u_abs_max"] = max(ledger["u_abs_max"], abs(u))
-        theta = float(VALUE[old]) + u
+        theta = value_of(old) + u
         new_code, in_range = project(theta)
         if not in_range:
             # source-semantics: a step rounded beyond the endpoint is rejected
@@ -629,7 +737,7 @@ def apply_step(
             delta_realised = 0.0
             new_code = old
         else:
-            delta_realised = float(VALUE[new_code] - VALUE[old])
+            delta_realised = value_of(new_code) - value_of(old)
             if new_code == old:
                 ledger["unmoved_below_projection"] += 1
             else:

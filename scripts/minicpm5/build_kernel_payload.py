@@ -66,6 +66,57 @@ def main() -> int:
     with safe_open(payload_dir / "model.safetensors", framework="pt", device="cpu") as handle:
         keys = list(handle.keys())
         prefixes = sorted({key.rsplit(".", 1)[0] for key in keys})
+        int8 = [prefix for prefix in prefixes
+                if f"{prefix}.weight_scale" in keys
+                and f"{prefix}.weight_packed" not in keys]
+        if int8:
+            # W8A8 int8 kernel format: fuse row-wise (q/k/v, gate/up), then
+            # transpose to the live [in, out] layout the triton kernel keeps
+            # (verified bitwise on 2026-09-10: live weight == payload.T).
+            # Scales upcast to the live fp32 [out, 1] per-channel form.
+            groups: dict[str, list[str]] = {}
+            for prefix in int8:
+                engine, _ = _engine_layer(prefix)
+                groups.setdefault(engine, []).append(prefix)
+            tensors: dict[str, torch.Tensor] = {}
+            rows = []
+            for engine, shards in sorted(groups.items()):
+                leaf = engine.split(".")[-1]
+                order = FUSED_ORDER.get(leaf)
+                if order:
+                    shards = sorted(
+                        shards, key=lambda name: order.index(name.split(".")[-1])
+                    )
+                weight_parts = [handle.get_tensor(f"{shard}.weight") for shard in shards]
+                scale_parts = [handle.get_tensor(f"{shard}.weight_scale").float()
+                               for shard in shards]
+                fused = torch.cat(weight_parts, dim=0)          # [out_fused, in]
+                live = fused.t().contiguous()                    # [in, out]
+                scale = torch.cat(scale_parts, dim=0).reshape(-1, 1).contiguous()
+                tensors[f"{engine}.weight"] = live
+                tensors[f"{engine}.weight_scale"] = scale
+                rows.append(
+                    {
+                        "engine_layer": engine,
+                        "shards": shards,
+                        "weight_shape": list(live.shape),
+                        "weight_scale_shape": list(scale.shape),
+                        "grid": "int8-uniform",
+                    }
+                )
+            save_file(tensors, str(out_path))
+            manifest = {
+                "payload": str(payload_dir),
+                "kind": "int8-w8a8",
+                "tensors": len(tensors),
+                "rows": rows,
+            }
+            if args.manifest:
+                Path(args.manifest).expanduser().write_text(
+                    json.dumps(manifest, indent=1, sort_keys=True) + "\n")
+            print(f"int8 kernel payload: {len(tensors)} tensors -> {out_path}")
+            return 0
+
         quant = [prefix for prefix in prefixes if f"{prefix}.weight_packed" in keys]
 
         groups: dict[str, list[str]] = {}
