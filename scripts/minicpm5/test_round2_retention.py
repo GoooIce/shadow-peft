@@ -309,6 +309,13 @@ def test_terminal_retention():
     check("swap gate passes when the gain survives", win["swap"]["gate_passes"] is True)
     check("claimable", win["claim"]["gain_claimable"] is True)
 
+    # production shape: confirm_arms returns dicts carrying "rows"
+    arm_dict = lambda rows: {"fitness": {}, "rows": rows}
+    prod = rl.terminal_retention({"frozen": {"q0": arm_dict(q0), "center": arm_dict(better)},
+                                  "plain": {"q0": arm_dict(q0), "center": arm_dict(better)}})
+    check("arm dicts with rows unwrap to the same verdict as raw rows",
+          prod["deliverable"] == "center" and prod["record"] == "gain_delivered_centre")
+
     tie = rl.terminal_retention({"frozen": {"q0": q0, "center": same},
                                  "plain": {"q0": q0, "center": same}})
     check("a tie is NOT a win: baseline delivered", tie["deliverable"] == "q0"

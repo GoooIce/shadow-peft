@@ -97,6 +97,14 @@ def score_block(rows: list[dict], key: str = "tf_correct") -> dict:
     }
 
 
+def _rows_of(arm):
+    """Arms arrive either as raw score rows (library callers, unit fixtures)
+    or as the runner's arm dicts (``confirm_arms``: {"fitness", "rows", ...})."""
+    if isinstance(arm, dict) and "rows" in arm:
+        return arm["rows"]
+    return arm
+
+
 def paired_mean(left_rows: list[dict], right_rows: list[dict], key: str = "tf_correct") -> dict:
     """Episode-level paired difference ``left - right`` (the frozen statistic)."""
     left = episode_accuracies(left_rows, key)
@@ -435,14 +443,15 @@ def terminal_retention(arms_by_variant: dict, headline: str = "frozen",
     for variant, arms in arms_by_variant.items():
         if "q0" not in arms or "center" not in arms:
             continue
-        paired = paired_mean(arms["center"], arms["q0"])
+        centre_rows, q0_rows = _rows_of(arms["center"]), _rows_of(arms["q0"])
+        paired = paired_mean(centre_rows, q0_rows)
         variants[variant] = {
-            "q0_acc": _block(arms["q0"])["acc"],
-            "center_acc": _block(arms["center"])["acc"],
+            "q0_acc": _block(q0_rows)["acc"],
+            "center_acc": _block(centre_rows)["acc"],
             "episode_paired": paired,
-            "item_paired": item_delta(arms["center"], arms["q0"]),
-            "q0_episodes": _block(arms["q0"])["episodes"],
-            "center_episodes": _block(arms["center"])["episodes"],
+            "item_paired": item_delta(centre_rows, q0_rows),
+            "q0_episodes": _block(q0_rows)["episodes"],
+            "center_episodes": _block(centre_rows)["episodes"],
             "gain_mean": paired["mean"],
             "gain_positive": bool(paired["mean"] is not None and paired["mean"] > 0.0),
             "gain_reaches_delta": bool(paired["mean"] is not None and paired["mean"] >= delta),

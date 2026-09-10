@@ -537,10 +537,18 @@ def group_census(
         for layer in group.layers:
             if reader.kind == "int8":
                 # per-channel scales [out, 1] broadcast to virtual 16-code
-                # blocks so the BLOCK arithmetic downstream is unchanged
+                # blocks so the BLOCK arithmetic downstream is unchanged.
+                # Blocks holding a -128 byte are frozen: the symmetric grid
+                # is [-127, 127] and the real payload does carry -128 bytes
+                # (158,002 of 2.52e9 = 6.3e-5, quantiser rounding) -- moving
+                # them is off-grid (KeyError) and rewriting them as -127
+                # would corrupt the value-level hard gate.  They stay at
+                # their stored bytes, untouched by the search.
                 rows = reader.block_scales(layer).reshape(-1) > block_min
                 in_features = reader.shape(layer)[1]
-                mask = np.repeat(rows[:, None], in_features // BLOCK, axis=1)
+                codes = reader.codes(layer)
+                blocks = codes.reshape(codes.shape[0], in_features // BLOCK, BLOCK)
+                mask = (blocks != -128).all(axis=2) & rows[:, None]
             else:
                 mask = reader.block_scales(layer) > block_min
             masks[layer] = mask

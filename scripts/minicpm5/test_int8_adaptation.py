@@ -175,6 +175,22 @@ def _export_int8_in_process(payload: Path, out: Path):
         save_file(tensors, str(out))
 
 
+def test_minus128_blocks_frozen():
+    """A -128 byte is off the symmetric grid; its 16-block must be immovable.
+
+    The real payload carries 158,002 of them (6.3e-5); a candidate edit at
+    such a coordinate crashed the campaign with KeyError: -128.
+    """
+    import numpy as np
+    codes = np.zeros((2, 16), dtype=np.int16)
+    codes[0, 3] = -128                      # row 0, block 0 poisoned
+    codes[1, 3] = -5                        # row 1, block 0 clean
+    blocks = codes.reshape(2, 1, 16)
+    mask = (blocks != -128).all(axis=2) & np.array([True, True])[:, None]
+    check("blocks holding -128 are excluded from the movable mask",
+          mask.tolist() == [[False], [True]], mask)
+
+
 def test_transposed_write_rule():
     """The trap: reshape(-1) on the transposed layout copies; .t() aliases."""
     payload_layout = torch.arange(12, dtype=torch.int8).reshape(3, 4)  # [out, in]
@@ -195,6 +211,7 @@ def test_transposed_write_rule():
 def main():
     test_int8_grid()
     test_reader_and_export()
+    test_minus128_blocks_frozen()
     test_transposed_write_rule()
     print("int8 adaptation: all checks passed")
 
