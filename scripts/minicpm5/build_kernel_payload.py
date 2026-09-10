@@ -99,7 +99,10 @@ def main() -> int:
                     {
                         "engine_layer": engine,
                         "shards": shards,
-                        "weight_shape": list(live.shape),
+                        # logical payload-order shape: verify_layout tiles row
+                        # offsets against weight_shape[0], which counts OUT rows
+                        "weight_shape": [int(fused.shape[0]), int(fused.shape[1])],
+                        "live_weight_shape": list(live.shape),
                         "weight_scale_shape": list(scale.shape),
                         "grid": "int8-uniform",
                     }
