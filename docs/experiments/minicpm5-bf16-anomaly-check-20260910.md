@@ -293,3 +293,146 @@ bf16 的 GEN 形貌：prose_with_num 207 (6.1%) / terse_num 3161 (93.9%) / empty
 | 脚本 | `scripts/minicpm5/anomaly_{join,analyze,gold_check,criterion,probe_build,probe}.py`（全部可重跑；`probe.py` 在 `gooo` 上按 §1.3 协议运行） |
 
 > 数据来源：`gooo:~/minicpm5-pool3/artifacts/{pool_v3_scaled.jsonl, pool_v3.jsonl, scores_{q0,bf16}_pool_v3.jsonl, scores_{q0,bf16}_delta.jsonl}`（join 输入）与本次探针输出。**未增加、未删改任何冻结池或分数文件。**
+
+---
+
+# 追加（19 票）：上一轮 ES 搜索是否把模型推向"不作答"？＋ 300 代 run 的仪表化
+
+- 上游：本票 §1–13（异常成因）、`minicpm5-formal-search-20260910`（14 票：中心 `payload_gen17`、confirm 判定 `practical-gain-excluded`）、`minicpm5-final-test-and-deploy-20260910`（15 票：final 池 −3.25 点）
+- 机器：`gooo`（GB10）。**本轮新增 3 次评分共 192 s GPU**（confirm / final / v3 dev 各一次同进程两臂），加上探针 289 s，本票累计 **481 s = 0.134 h**
+- 判据：**逐字用 19 票定义**——`no_answer = 第 1 个 gold 位 argmax == 130073 (<|im_end|>)`（新增字段 `tf_first_argmax`）
+- 判定（Part 1）：**否**。中心的未作答率**低于** q0（confirm 0.94% vs 1.22%；final 1.00% vs 0.83%；v3 dev 0.42% vs 0.63%），在两个受害档上也**不高于** q0（confirm `logic/hard` +0.2 个百分点、`ordering/hard` −0.8 个百分点）。**−3.89 点里只有 −0.46 点（11.8%）来自"不作答"**，其余 **−3.43 点（88.2%）是两个臂都作答的那些题上真答错**；final 池同构（−0.42 / −3.25 = 12.8%）。所以上一轮的负结果**不是**"搜索学会了闭嘴"，14/15 票的原始叙述（hard 档真答错更多）成立。
+- 判定（Part 2）：`score_taskset.py` + `pilot_search.py` 已打补丁、单测通过、**两台机器已同步**（md5 见 §17），未启动任何 run。
+
+## 14. Part 1 方法：为什么必须重评，以及重评的是什么
+
+上一轮 run 的逐题记录（`~/minicpm5-search/out/formal/records/`，921 个文件）只有 `tf_correct / tf_token_hits / tf_gold_logprob / tf_next_token / tf_next_is_im_end`——**没有首个 gold 位的 argmax**，所以"未作答"既无法从 `tf_token_hits`（分不出"没作答"与"起手就错"，见 §4）也无法从 `tf_next_token`（那是 gold **之后**的 token）还原。因此按本票 §1.3 的同一协议、只加一个字段，用**冻结的终检路径**（`pilot_search.py --confirm-only --resume state.json`，即 15 票跑 final 时用的那条命令）重评。三处改动之外的参数逐字不变（`--linear-backend cutlass`、`--quantization compressed-tensors`、prefix cache 关、`enable_thinking=False`、`Answer:` 前缀、`prompt_logprobs=1/max_tokens=1/temperature=0`）。
+
+**一致性自检（重评必须是"复算"而不是"新测量"）：**
+
+| 量 | 记录值（14/15 票） | 本次重评 | 一致 |
+| --- | ---: | ---: | --- |
+| confirm：q0 / 中心 item 准确率 | 0.5000 / 0.46111（配对 −3.889 点） | 0.5000 / 0.46111（−3.889） | ✓ |
+| final：q0 / 中心 | 0.5000 / 0.4675（mean −0.0325） | 0.5000 / 0.4675（−0.0325） | ✓ |
+| final：`logic/hard` / `ordering/hard` 中心 | 0.3500 / 0.2875 | **0.3500 / 0.2875** | ✓ |
+| v3 dev：中心 − q0 | −0.42 点（pools-v3 §5） | −0.42 点（0.4958 vs 0.5000） | ✓ |
+| v2 dev：中心 − q0 | —（14 票未记） | +1.67 点（0.5167 vs 0.5000） | — |
+
+> 顺带更正一处引用：任务书里"`logic/hard` 0.3375"——记录件里 **0.3375 是 `arith/hard`** 的中心值，`logic/hard` 是 **0.3500**（`final_secondary_analysis.json` 的 `per_stratum_item_acc` 与本次重评逐位一致）。本票所有逐 stratum 数字以记录件为准。
+
+## 15. Part 1 结果
+
+### 15.1 未作答率：中心 vs q0（精确口径，全部 5 个池/臂组合）
+
+| 池 | 臂 | item 准确率 | **未作答率** | arith | logic | modulo | ordering | pct |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| v2 dev（480） | q0 | 0.5000 | **1.25%**（6） | 0 | 1.04% | 0 | 5.21% | 0 |
+| v2 dev（480） | **中心 gen17** | 0.5167 | **1.46%**（7） | 0 | 3.12% | 1.04% | 3.12% | 0 |
+| v3 dev（480） | q0 | 0.5000 | **0.63%**（3） | 0 | 1.04% | 0 | 2.08% | 0 |
+| v3 dev（480） | 中心 gen17 | 0.4958 | **0.42%**（2） | 0 | 0 | 0 | 2.08% | 0 |
+| v2 confirm（7,200 / 900 ep） | q0 | 0.5000 | **1.22%**（88） | 0.07% | 2.29% | 0.21% | 3.54% | 0 |
+| v2 confirm | **中心 gen17** | 0.4611 | **0.94%**（68） | 0 | 2.15% | 0 | 2.57% | 0 |
+| v2 final（1,200 / 150 ep） | q0 | 0.5000 | **0.83%**（10） | — | — | — | — | — |
+| v2 final | **中心 gen17** | 0.4675 | **1.00%**（12） | — | — | — | — | — |
+
+两个**受害档**（逐 stratum，confirm / final，n=480 / 80）：
+
+| stratum | confirm q0 | confirm 中心 | final q0 | final 中心 |
+| --- | ---: | ---: | ---: | ---: |
+| `logic/hard` | 2.92%（14） | **3.12%（15）** | 3.75%（3） | **1.25%（1）** |
+| `ordering/hard` | 4.37%（21） | **3.54%（17）** | 3.75%（3） | **3.75%（3）** |
+
+**读法：中心在受害档上不但没有升高，多数格子里还低于 q0。**"搜索把模型推向不作答"这一假说**被否掉**。dev 池上的两处小幅上升（v2 dev logic 1.04%→3.12%）只对应 **1 题**（32 题/档，1 题 = 3.13 个百分点），**没有任何统计含义**。
+
+### 15.2 −3.89 点的分解（confirm 池，7,200 题；候选 = 中心 gen17，参考 = q0）
+
+| 单元 | 题数 | 说明 |
+| --- | ---: | --- |
+| a 两臂都对 | 2,561 | |
+| b 中心对 / q0 错 | 759 | 中心的"真实增益"方向 |
+| c 中心错 / q0 对 | 1,039 | 亏损方向，其中 **33 题是"不作答"**、**1,006 题是真答错** |
+| d 两臂都错 | 2,841 | |
+| **net gap** | **−280 题 = −3.89 点** | = (b − c)/n，与记录值逐位一致 |
+
+| 归因 | 题数 | 点数 | 占 3.89 点的份额 |
+| --- | ---: | ---: | ---: |
+| **"不作答"造成的净亏损** | **−33**（c 里的 33 题，反向 b 里的 0 题） | **−0.46** | **11.8%** |
+| **真答错造成的净亏损** | −247（= 1,006 − 759） | **−3.43** | **88.2%** |
+
+- 两个臂都作答的题占 **60.1%**（4,326/7,200）；在这个子集上配对差是 **−3.79 点**（vs 全体 −3.89）——**按本票写进 run300 的归因规则，这个负结果"在两臂都作答的子集上仍然成立"**，即它**不是**伪影主导的（规则会用 `artifact_dominated` 报伪影；此处 verdict = `no_gain`，`flagged=false`）。
+- 逐 family（confirm，净 gap / 其中"不作答"贡献 / 真答错贡献）：`logic` −14.03 / −1.18 / −12.85；`ordering` −5.63 / −1.11 / −4.52；`arith` −0.28 / 0 / −0.28；`modulo` −1.81 / 0 / −1.81；`pct` **+2.29** / 0 / +2.29（点）。
+- **final 池同构**（1,200 题）：net −3.25 点 = b 128 − c 167；c 里 **5 题是不作答（−0.42 点，12.8%）**、162 题真答错（毛 −13.5 点）；反向 b 里 q0 不作答 0 题；**净 −2.83 点（87.2%）是真答错**。两臂都作答占 60.3%，其配对差 −2.97 点（vs −3.25）。
+
+### 15.3 逐代趋势：搜索过程中"不作答"有没有被推动
+
+精确口径只有三个端点（上面的重评）。中间的 17 代只有 `tf_gold_logprob`，因此用一个**代理量**并如实报其质量：
+
+- **代理量标定**（用本票重评的 v2 dev 两臂 960 行、13 个真未作答）：以"gold 平均 logprob 越低越像未作答"计，**AUC = 0.8323**；但**没有可用的绝对阈值**——Youden 最优阈值（−0.96）的假阳率高达 40%（正类只有 13 个、极不平衡），所以**代理值只能用于比较世代之间的相对变化，不能当绝对未作答率**。
+- **阈值无关的世代趋势**（每代 50 个候选 × 480 题 = 24,000 行）：
+
+| 代 | 候选总体 mean gold logprob | frac(< −4) | frac(< −6) | 候选 proxy（逻辑族/排序族） |
+| ---: | ---: | ---: | ---: | --- |
+| gen00（中心 = q0） | −1.2526 | 6.25% | 2.08% | — |
+| gen00 候选 | −1.2262 | 6.00% | 1.71% | 0.27 / 0.61 |
+| gen08 | −1.2329 | 6.07% | 1.89% | 0.26 / 0.63 |
+| gen16 候选 | −1.2254 | 5.80% | 1.80% | 0.29 / 0.59 |
+
+  17 代的总体均值落在 **[−1.2543, −1.2168]**，`frac(<−4)` 在 **5.6%–6.2%**、`frac(<−6)` 在 **1.57%–1.89%**——**全程平，且尾部的重尾比例略低于 q0（2.08%）**。中心自己的 `gold_prob`（`history.jsonl`，逐代）也是平的：0.2858（gen0 = q0）→ 0.2970（gen16），重评的最终中心在 v2 dev 上是 0.3101（**高于** q0 的 0.2858）。
+- **结论：搜索期间没有任何"向不作答漂移"的迹象。**终点（真正要交付的物件）在精确口径下也不高于 q0。上一轮的失败是**真答错**，与 14/15 票"hard 档退化、easy 档改善"的描述一致，而不是本票在 v3 池上发现的那种格式伪影。
+
+### 15.4 对下一轮判断口径的含义
+
+1. **v3 池上"BF16 负 gap"的成因（§1–13）与上一轮 ES 的失败是两件不同的事**：前者是 prompt 后缀诱发的提前结束回合（BF16 专属，量级 10 点），后者是真答错（中心 vs q0，量级 3–4 点）。**不要**用前者去解释后者；也不要因为"上一轮的中心并没有不作答"就认为 §1–13 的风险可以被忽略——风险在于**任何**候选（尤其参照臂/锚点）都可能带这条轴，而不是"这次的中心带了"。
+2. 上一轮的中心在 **v3 dev 上 −0.42 点、v3 dev 的未作答率 0.42%**（q0 0.63%）——与 13 票用同一 payload 测到的 −0.42 点逐位一致，可以安全作为 v3 池上的"起点近邻"基线。
+
+## 16. Part 2 实现（300 代 run 的仪表化）
+
+**不改判据**：`tf_correct` 的定义、阈值、主轴、停止规则、聚合与中心步进全部逐字不变；新增的都是**记录与报告**。两个文件的改动：
+
+### 16.1 `score_taskset.py`
+
+| 改动 | 内容 |
+| --- | --- |
+| 新字段 | TF 行增加 `tf_first_argmax`（= 第一个 gold 位的 argmax，位点 `len(p_ids)`；实现上就是循环里已有的 `top1`） |
+| `is_no_answer(row)` | 逐字实现 19 票定义：`tf_first_argmax == 130073`；缺该字段时回退 `gen_n_tokens == 1`（GEN 臂第一个 token 即 stop token，§7.3 实测与 `<|im_end|>` 一一对应），两者都缺记 `False` |
+| `no_answer_summary(rows)` | 未作答率的 **overall / per_family / per_stratum / per_tier** + 缺字段行数；写进 `--summary` 的 `no_answer` 块并打日志行 |
+| `joint_decomposition(cand, ref)` | 2×2（a/b/c/d）+ `gap=(b−c)/n` + **把 c 拆成 `cand_loss_from_no_answer` 与 `cand_loss_from_wrong`**（§15.2 用的就是它） |
+| `attribution_verdict(cand, ref, margin=0.05)` | 机械归因：`gain_all`（全题）/ `gain_both`（两臂都作答子集）/ `no_answer_excess`；判定 `artifact_dominated`（有增益但两臂都作答子集上不成立）/ `flagged_no_answer_excess` / `gain_survives_both_answered` / `no_gain` / `no_common_items` |
+
+### 16.2 `pilot_search.py`
+
+| 位置 | 改动 |
+| --- | --- |
+| **启动时（新增）** | `Runner.q0_reference_measure(live)`：把引擎恢复到 q0、在**同一 dev 池**上评一次、**实测并落盘** `records/q0_reference.json`（分数 + 未作答率 + 行集），随后恢复调用前的中心补丁并**断言 `live` 一致**（不一致直接抛错）。之后每一代都与这份**本次运行实测**的基线比，而不是与记忆中的常数比。可用 `--skip-q0-reference` 关掉（关掉后归因不可用，会打日志说明） |
+| 每代中心 | `na=` 打进日志；`records/centre_genNN.json`（基线）与 `genNN.json` 的 `center_fitness` 旁挂 `no_answer` + `attribution` |
+| 每个候选 | `cand_*.json` 与 `genNN.json` 的 `candidates[]` 增加 `no_answer`（含逐 family）+ `attribution`；日志行加 `na=` |
+| **新闸门块** | `genNN.json."no_answer_gate"`：q0 基线、中心的未作答 + 逐桶超出量、**本代最优候选**（按 dev 准确率）的未作答 + 归因、候选群体分布（min/median/max）、以及 `flagged[]` |
+| 历史台账 | `history.jsonl` 每行新增 `centre_no_answer`、`centre_no_answer_per_family`、`centre_attribution`、`best_candidate_index`、`best_candidate_no_answer`、`no_answer_flagged` |
+| 终检 | `confirm_arms()` 每个臂加 `no_answer`，并额外产出 `arms["attribution_center_vs_q0"]`（中心 vs q0 的归因判定），落盘 + 日志 |
+| 汇总 | `summary.json` 增加 `q0_reference`（分数 + 未作答率）与 `no_answer_margin` |
+| 新参数 | `--no-answer-margin`（默认 **0.05**）、`--skip-q0-reference` |
+
+**归因规则（机械，写进台账）**：
+1. 声称的增益用 `gain_all`（全共同题）；**必须同时报 `gain_both`**（两臂都作答子集）。
+2. `gain_all > 0` 而 `gain_both ≤ 0` → **`artifact_dominated`**：增益不成立，是作答模式差异，必须按伪影上报。
+3. **任何** arm（中心、本代最优候选）的未作答率**整体**或**任一 family**超过 q0 基线 **> 0.05** → 该代 `flagged`（`no_answer_excess`），无论增益正负；日志打 `NO-ANSWER FLAG`。
+4. 未作答率与归因**不参与** fitness、聚合、中心步进与停止判定——它们是并行的健康度与解释性证据。
+
+### 16.3 单测与端到端验证
+
+- `scripts/minicpm5/test_no_answer_metric.py`（新增，纯 CPU、桩引擎）：5 组、约 35 条断言，**全部通过**（在 `gooo` 上用 `~/venvs/minicpm5-vllm` 跑）。覆盖：`</s>`(1) 不算未作答、TF 字段优先于 GEN 回退、缺字段返回 False；`no_answer_summary` 的四层聚合与缺字段计数；`joint_decomposition` 的算术（含 bail/wrong 拆分相加等于 c）；`attribution_verdict` 的四种判定 + `flagged`；`Runner` 胶水层（q0 参考测量恢复 `live`、写盘、两次 patch；闸门打 flag 与 JSON 可序列化；无基线时不崩）。
+- **端到端**：打补丁后的代码用**冻结的终检路径**实跑了三次（confirm / final / v3 dev），准确率与记录件逐位一致（§14 表），即补丁没有改动任何判据；同时产出了 §15 的精确未作答率。
+
+## 17. 交付与记账
+
+| 项 | 值 |
+| --- | --- |
+| `score_taskset.py` | **md5 `ca2b0a1519d4f0490bd6b7ddb1e23fd7`**（20,907 B） |
+| `pilot_search.py` | **md5 `387991e768211e48016a0d3fe7777b96`**（73,182 B） |
+| 安装位置 | `gooo:~/minicpm5-run300/scripts/minicpm5/` 与 `goooinext:~/minicpm5-run300/scripts/minicpm5/`，两台机器处 md5 一致（本地同值）；**`~/minicpm5-run300/` 其余文件未动、未启动任何 run** |
+| 改动前基线 | `score_taskset.py` `4e1eadbf978cac2d4114be13d2105440`、`pilot_search.py` `59c6713f977e513aeeff3e476fd8625a`（两台机器此前与 `main` 逐字节相同，已验证） |
+| q0 基线（启动时实测，v3 dev 池 = 两个 300 代 run 实际使用的池） | 总体 **0.63%**（3/480）；`logic` 1.04%、`ordering` 2.08%、`arith/modulo/pct` 0；逐 stratum 非零项：`logic/hard` 3.13%、`ordering/hard` 6.25%（这些数字是**小样本**（32 题/档）的筛查基线，不是精确常数——1 题 = 3.13 个百分点，因此 `--no-answer-margin 0.05` 在**总体**上很保守、在**单档**上大噪声） |
+| q0 基线（v2 dev，上一轮口径） | 总体 **1.25%**（6/480）；`logic` 1.04%、`ordering` 5.21% |
+| 本轮 GPU 机时 | confirm 93 s、final 52 s、v3 dev 47 s = **192 s**；本票累计 289 + 192 = **481 s = 0.134 h**（未设上限；两机无遗留进程，`goooinext` 只做文件同步、未起 GPU 作业） |
+
+**残余不确定（Part 1）**：逐代"未作答率"只有代理量（AUC 0.83，绝对阈值不可用），因此"搜索期间没有漂移"这句话的依据是**阈值无关的连续性统计量**（population mean gold logprob 与重尾比例平稳）+ 三个端点的精确测量，而不是逐代的精确未作答率。若要逐代精确值，需要对每代中心重评（17 次引擎载入 ≈ 15 min GPU），本票按"先用已有数据、必要时才重评"的纪律**未做**（结论已由端点 + 平稳的连续量支撑）。
