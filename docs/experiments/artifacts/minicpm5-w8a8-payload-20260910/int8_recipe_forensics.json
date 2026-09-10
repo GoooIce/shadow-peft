@@ -1,0 +1,100 @@
+{
+  "per_layer": [
+    {
+      "R1_fp32_scale_fp32_math": 0.06734744707743327,
+      "R2_stored_scale_fp32_math": 0.06472261746724446,
+      "R3_bf16_math_bf16_scale": 0.010205825169881185,
+      "R4_bf16_math_stored_scale": 1.4384587605794271e-05,
+      "R5_fp32_math_clamp127": 0.06734744707743327,
+      "R6_bf16_math_no_clamp": 0.010206381479899088,
+      "codes": 12582912,
+      "layer": "model.layers.0.mlp.down_proj",
+      "stored_scale_dtype": "torch.bfloat16"
+    },
+    {
+      "R1_fp32_scale_fp32_math": 0.07457216580708821,
+      "R2_stored_scale_fp32_math": 0.06883597373962402,
+      "R3_bf16_math_bf16_scale": 0.030565500259399414,
+      "R4_bf16_math_stored_scale": 9.091695149739583e-05,
+      "R5_fp32_math_clamp127": 0.07457216580708821,
+      "R6_bf16_math_no_clamp": 0.030566294987996418,
+      "codes": 12582912,
+      "layer": "model.layers.13.mlp.gate_proj",
+      "stored_scale_dtype": "torch.bfloat16"
+    },
+    {
+      "R1_fp32_scale_fp32_math": 0.07360355059305827,
+      "R2_stored_scale_fp32_math": 0.07109292348225911,
+      "R3_bf16_math_bf16_scale": 0.017371495564778645,
+      "R4_bf16_math_stored_scale": 9.218851725260417e-05,
+      "R5_fp32_math_clamp127": 0.07360355059305827,
+      "R6_bf16_math_no_clamp": 0.01737078030904134,
+      "codes": 12582912,
+      "layer": "model.layers.18.mlp.up_proj",
+      "stored_scale_dtype": "torch.bfloat16"
+    },
+    {
+      "R1_fp32_scale_fp32_math": 0.0755615234375,
+      "R2_stored_scale_fp32_math": 0.07069587707519531,
+      "R3_bf16_math_bf16_scale": 0.04170799255371094,
+      "R4_bf16_math_stored_scale": 0.0001506805419921875,
+      "R5_fp32_math_clamp127": 0.0755615234375,
+      "R6_bf16_math_no_clamp": 0.04170799255371094,
+      "codes": 524288,
+      "layer": "model.layers.22.self_attn.k_proj",
+      "stored_scale_dtype": "torch.bfloat16"
+    },
+    {
+      "R1_fp32_scale_fp32_math": 0.07153177261352539,
+      "R2_stored_scale_fp32_math": 0.06991744041442871,
+      "R3_bf16_math_bf16_scale": 0.01752161979675293,
+      "R4_bf16_math_stored_scale": 0.0001201629638671875,
+      "R5_fp32_math_clamp127": 0.07153177261352539,
+      "R6_bf16_math_no_clamp": 0.017522335052490234,
+      "codes": 4194304,
+      "layer": "model.layers.27.self_attn.o_proj",
+      "stored_scale_dtype": "torch.bfloat16"
+    },
+    {
+      "R1_fp32_scale_fp32_math": 0.07840442657470703,
+      "R2_stored_scale_fp32_math": 0.07162117958068848,
+      "R3_bf16_math_bf16_scale": 0.04520821571350098,
+      "R4_bf16_math_stored_scale": 0.00014162063598632812,
+      "R5_fp32_math_clamp127": 0.07840442657470703,
+      "R6_bf16_math_no_clamp": 0.0452113151550293,
+      "codes": 4194304,
+      "layer": "model.layers.31.self_attn.q_proj",
+      "stored_scale_dtype": "torch.bfloat16"
+    },
+    {
+      "R1_fp32_scale_fp32_math": 0.0422210693359375,
+      "R2_stored_scale_fp32_math": 0.03845977783203125,
+      "R3_bf16_math_bf16_scale": 0.022653579711914062,
+      "R4_bf16_math_stored_scale": 0.0001735687255859375,
+      "R5_fp32_math_clamp127": 0.0422210693359375,
+      "R6_bf16_math_no_clamp": 0.022663116455078125,
+      "codes": 524288,
+      "layer": "model.layers.36.self_attn.v_proj",
+      "stored_scale_dtype": "torch.bfloat16"
+    },
+    {
+      "R1_fp32_scale_fp32_math": 0.06464799245198567,
+      "R2_stored_scale_fp32_math": 0.06022230784098307,
+      "R3_bf16_math_bf16_scale": 0.0423425038655599,
+      "R4_bf16_math_stored_scale": 6.707509358723958e-05,
+      "R5_fp32_math_clamp127": 0.06464799245198567,
+      "R6_bf16_math_no_clamp": 0.042339722315470375,
+      "codes": 12582912,
+      "layer": "model.layers.41.mlp.down_proj",
+      "stored_scale_dtype": "torch.bfloat16"
+    }
+  ],
+  "weighted": {
+    "R1_fp32_scale_fp32_math": 0.07053842042621813,
+    "R2_stored_scale_fp32_math": 0.06665295048763878,
+    "R3_bf16_math_bf16_scale": 0.026121474148934346,
+    "R4_bf16_math_stored_scale": 7.691299706174617e-05,
+    "R5_fp32_math_clamp127": 0.07053842042621813,
+    "R6_bf16_math_no_clamp": 0.0261213737621642
+  }
+}

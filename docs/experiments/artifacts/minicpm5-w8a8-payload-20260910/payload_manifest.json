@@ -1,0 +1,120 @@
+{
+  "calibration": {
+    "file": "/home/goooice/minicpm5-payload/data/neutral/calib_wikitext103_train.jsonl",
+    "max_seq_length": 2048,
+    "num_samples": 512,
+    "sha256": "e0d7ad54b7055d5b902c42204310e28fe263a35215e469612283895846c65ece"
+  },
+  "capability": [
+    12,
+    1
+  ],
+  "files": [
+    {
+      "bytes": 110854,
+      "path": "README.md",
+      "sha256": "ba06ed321794e9e8f2321b53c18adc80712cceed4d14f504f5240b05738ccbbe"
+    },
+    {
+      "bytes": 9060,
+      "path": "chat_template.jinja",
+      "sha256": "cc945752db555d60949b16989df4ccfeb52a313d6b4b5c5229dd786e2e9fcf1c"
+    },
+    {
+      "bytes": 2047,
+      "path": "config.json",
+      "sha256": "55d84cfa642e25599842e4a311db60e0f3e3b3893723145746d0fde2166bde2d"
+    },
+    {
+      "bytes": 214,
+      "path": "generation_config.json",
+      "sha256": "af8a9630bdcd4ce40dd4f9e95c4ed8591ed8f1e797d17ca1a546796ea12c099c"
+    },
+    {
+      "bytes": 3053374152,
+      "path": "model.safetensors",
+      "sha256": "d639c7389fc4c72d467a295daf55d8855cc7cb558ea9701303d7c8d1766ae905"
+    },
+    {
+      "bytes": 208,
+      "path": "recipe.yaml",
+      "sha256": "b536141028b76cd611832fb1a474d95b87b8bffdaec784b6fd421c79817baf11"
+    },
+    {
+      "bytes": 9894271,
+      "path": "tokenizer.json",
+      "sha256": "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81"
+    },
+    {
+      "bytes": 435,
+      "path": "tokenizer_config.json",
+      "sha256": "b89503c3e5070c6b6d33daf2e20cb4a5c88537c1670d9b7e0cfb4506a61448a9"
+    }
+  ],
+  "format": "compressed-tensors/int-quantized",
+  "gpu": "NVIDIA GB10",
+  "host": "aitopatom-dc4a",
+  "ignore": [
+    "lm_head"
+  ],
+  "quantization_config": {
+    "config_groups": {
+      "group_0": {
+        "format": "int-quantized",
+        "input_activations": {
+          "actorder": null,
+          "block_structure": null,
+          "dynamic": true,
+          "group_size": null,
+          "num_bits": 8,
+          "observer": null,
+          "observer_kwargs": {},
+          "scale_dtype": null,
+          "strategy": "token",
+          "symmetric": true,
+          "type": "int",
+          "zp_dtype": null
+        },
+        "output_activations": null,
+        "targets": [
+          "Linear"
+        ],
+        "weights": {
+          "actorder": null,
+          "block_structure": null,
+          "dynamic": false,
+          "group_size": null,
+          "num_bits": 8,
+          "observer": "memoryless_minmax",
+          "observer_kwargs": {},
+          "scale_dtype": null,
+          "strategy": "channel",
+          "symmetric": true,
+          "type": "int",
+          "zp_dtype": null
+        }
+      }
+    },
+    "format": "int-quantized",
+    "global_compression_ratio": null,
+    "ignore": [
+      "lm_head"
+    ],
+    "kv_cache_scheme": null,
+    "quant_method": "compressed-tensors",
+    "quantization_status": "compressed",
+    "sparsity_config": {},
+    "transform_config": {},
+    "version": "0.18.0"
+  },
+  "scheme": "W8A8",
+  "source_model": "/home/goooice/models/MiniCPM5-2B",
+  "tool": {
+    "compressed_tensors": "0.18.0",
+    "llmcompressor": "0.13.0",
+    "torch": "2.13.0+cu130",
+    "transformers": "5.14.1"
+  },
+  "total_bytes": 3063391241,
+  "wall_clock_seconds": 62.3
+}

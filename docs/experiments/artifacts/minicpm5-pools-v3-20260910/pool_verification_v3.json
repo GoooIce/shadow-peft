@@ -1,0 +1,732 @@
+{
+  "checks": {
+    "confirm_arith/easy_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.8146067415730337
+        ],
+        "recomputed": [
+          0.5,
+          0.8146067415730337
+        ]
+      },
+      "ok": true
+    },
+    "confirm_arith/hard_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.4943820224719101
+        ],
+        "recomputed": [
+          0.5,
+          0.4943820224719101
+        ]
+      },
+      "ok": true
+    },
+    "confirm_arith/medium_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.7832397003745318
+        ],
+        "recomputed": [
+          0.5,
+          0.7832397003745318
+        ]
+      },
+      "ok": true
+    },
+    "confirm_logic/easy_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.6025280898876404
+        ],
+        "recomputed": [
+          0.5,
+          0.6025280898876404
+        ]
+      },
+      "ok": true
+    },
+    "confirm_logic/hard_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.1502808988764045
+        ],
+        "recomputed": [
+          0.5,
+          0.1502808988764045
+        ]
+      },
+      "ok": true
+    },
+    "confirm_logic/medium_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.5463483146067416
+        ],
+        "recomputed": [
+          0.5,
+          0.5463483146067416
+        ]
+      },
+      "ok": true
+    },
+    "confirm_modulo/easy_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.5594569288389513
+        ],
+        "recomputed": [
+          0.5,
+          0.5594569288389513
+        ]
+      },
+      "ok": true
+    },
+    "confirm_modulo/hard_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.5271535580524345
+        ],
+        "recomputed": [
+          0.5,
+          0.5271535580524345
+        ]
+      },
+      "ok": true
+    },
+    "confirm_modulo/medium_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.5735018726591761
+        ],
+        "recomputed": [
+          0.5,
+          0.5735018726591761
+        ]
+      },
+      "ok": true
+    },
+    "confirm_ordering/easy_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.6629213483146067
+        ],
+        "recomputed": [
+          0.5,
+          0.6629213483146067
+        ]
+      },
+      "ok": true
+    },
+    "confirm_ordering/hard_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.20224719101123595
+        ],
+        "recomputed": [
+          0.5,
+          0.20224719101123595
+        ]
+      },
+      "ok": true
+    },
+    "confirm_ordering/medium_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.5112359550561798
+        ],
+        "recomputed": [
+          0.5,
+          0.5112359550561798
+        ]
+      },
+      "ok": true
+    },
+    "confirm_pct/easy_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.797752808988764
+        ],
+        "recomputed": [
+          0.5,
+          0.797752808988764
+        ]
+      },
+      "ok": true
+    },
+    "confirm_pct/hard_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.6062734082397003
+        ],
+        "recomputed": [
+          0.5,
+          0.6062734082397003
+        ]
+      },
+      "ok": true
+    },
+    "confirm_pct/medium_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.9400749063670412
+        ],
+        "recomputed": [
+          0.5,
+          0.9400749063670412
+        ]
+      },
+      "ok": true
+    },
+    "dev_arith/easy_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.90625
+        ],
+        "recomputed": [
+          0.5,
+          0.90625
+        ]
+      },
+      "ok": true
+    },
+    "dev_arith/hard_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.4375
+        ],
+        "recomputed": [
+          0.5,
+          0.4375
+        ]
+      },
+      "ok": true
+    },
+    "dev_arith/medium_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.875
+        ],
+        "recomputed": [
+          0.5,
+          0.875
+        ]
+      },
+      "ok": true
+    },
+    "dev_logic/easy_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.5625
+        ],
+        "recomputed": [
+          0.5,
+          0.5625
+        ]
+      },
+      "ok": true
+    },
+    "dev_logic/hard_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.15625
+        ],
+        "recomputed": [
+          0.5,
+          0.15625
+        ]
+      },
+      "ok": true
+    },
+    "dev_logic/medium_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.65625
+        ],
+        "recomputed": [
+          0.5,
+          0.65625
+        ]
+      },
+      "ok": true
+    },
+    "dev_modulo/easy_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.5625
+        ],
+        "recomputed": [
+          0.5,
+          0.5625
+        ]
+      },
+      "ok": true
+    },
+    "dev_modulo/hard_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.5
+        ],
+        "recomputed": [
+          0.5,
+          0.5
+        ]
+      },
+      "ok": true
+    },
+    "dev_modulo/medium_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.53125
+        ],
+        "recomputed": [
+          0.5,
+          0.53125
+        ]
+      },
+      "ok": true
+    },
+    "dev_ordering/easy_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.625
+        ],
+        "recomputed": [
+          0.5,
+          0.625
+        ]
+      },
+      "ok": true
+    },
+    "dev_ordering/hard_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.3125
+        ],
+        "recomputed": [
+          0.5,
+          0.3125
+        ]
+      },
+      "ok": true
+    },
+    "dev_ordering/medium_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.4375
+        ],
+        "recomputed": [
+          0.5,
+          0.4375
+        ]
+      },
+      "ok": true
+    },
+    "dev_pct/easy_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.84375
+        ],
+        "recomputed": [
+          0.5,
+          0.84375
+        ]
+      },
+      "ok": true
+    },
+    "dev_pct/hard_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.71875
+        ],
+        "recomputed": [
+          0.5,
+          0.71875
+        ]
+      },
+      "ok": true
+    },
+    "dev_pct/medium_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.90625
+        ],
+        "recomputed": [
+          0.5,
+          0.90625
+        ]
+      },
+      "ok": true
+    },
+    "disjoint_episodes_confirm_final": {
+      "detail": 0,
+      "ok": true
+    },
+    "disjoint_episodes_dev_confirm": {
+      "detail": 0,
+      "ok": true
+    },
+    "disjoint_episodes_dev_final": {
+      "detail": 0,
+      "ok": true
+    },
+    "disjoint_ids_confirm_final": {
+      "detail": 0,
+      "ok": true
+    },
+    "disjoint_ids_dev_confirm": {
+      "detail": 0,
+      "ok": true
+    },
+    "disjoint_ids_dev_final": {
+      "detail": 0,
+      "ok": true
+    },
+    "episode_4ok_4bad_confirm": {
+      "detail": {
+        "4": 4005
+      },
+      "ok": true
+    },
+    "episode_4ok_4bad_dev": {
+      "detail": {
+        "4": 60
+      },
+      "ok": true
+    },
+    "episode_4ok_4bad_final": {
+      "detail": {
+        "4": 675
+      },
+      "ok": true
+    },
+    "final_arith/easy_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.8305555555555556
+        ],
+        "recomputed": [
+          0.5,
+          0.8305555555555556
+        ]
+      },
+      "ok": true
+    },
+    "final_arith/hard_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.5083333333333333
+        ],
+        "recomputed": [
+          0.5,
+          0.5083333333333333
+        ]
+      },
+      "ok": true
+    },
+    "final_arith/medium_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.7916666666666666
+        ],
+        "recomputed": [
+          0.5,
+          0.7916666666666666
+        ]
+      },
+      "ok": true
+    },
+    "final_logic/easy_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.6055555555555555
+        ],
+        "recomputed": [
+          0.5,
+          0.6055555555555555
+        ]
+      },
+      "ok": true
+    },
+    "final_logic/hard_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.11666666666666667
+        ],
+        "recomputed": [
+          0.5,
+          0.11666666666666667
+        ]
+      },
+      "ok": true
+    },
+    "final_logic/medium_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.5861111111111111
+        ],
+        "recomputed": [
+          0.5,
+          0.5861111111111111
+        ]
+      },
+      "ok": true
+    },
+    "final_modulo/easy_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.5611111111111111
+        ],
+        "recomputed": [
+          0.5,
+          0.5611111111111111
+        ]
+      },
+      "ok": true
+    },
+    "final_modulo/hard_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.5333333333333333
+        ],
+        "recomputed": [
+          0.5,
+          0.5333333333333333
+        ]
+      },
+      "ok": true
+    },
+    "final_modulo/medium_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.5805555555555556
+        ],
+        "recomputed": [
+          0.5,
+          0.5805555555555556
+        ]
+      },
+      "ok": true
+    },
+    "final_ordering/easy_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.6944444444444444
+        ],
+        "recomputed": [
+          0.5,
+          0.6944444444444444
+        ]
+      },
+      "ok": true
+    },
+    "final_ordering/hard_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.225
+        ],
+        "recomputed": [
+          0.5,
+          0.225
+        ]
+      },
+      "ok": true
+    },
+    "final_ordering/medium_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.5277777777777778
+        ],
+        "recomputed": [
+          0.5,
+          0.5277777777777778
+        ]
+      },
+      "ok": true
+    },
+    "final_pct/easy_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.8027777777777778
+        ],
+        "recomputed": [
+          0.5,
+          0.8027777777777778
+        ]
+      },
+      "ok": true
+    },
+    "final_pct/hard_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.625
+        ],
+        "recomputed": [
+          0.5,
+          0.625
+        ]
+      },
+      "ok": true
+    },
+    "final_pct/medium_manifest_acc_consistent": {
+      "detail": {
+        "manifest": [
+          0.5,
+          0.925
+        ],
+        "recomputed": [
+          0.5,
+          0.925
+        ]
+      },
+      "ok": true
+    },
+    "n_items_confirm": {
+      "detail": 32040,
+      "ok": true
+    },
+    "n_items_dev": {
+      "detail": 480,
+      "ok": true
+    },
+    "n_items_final": {
+      "detail": 5400,
+      "ok": true
+    },
+    "no_decontam_hit_confirm": {
+      "detail": [],
+      "ok": true
+    },
+    "no_decontam_hit_dev": {
+      "detail": [],
+      "ok": true
+    },
+    "no_decontam_hit_final": {
+      "detail": [],
+      "ok": true
+    },
+    "no_rl2609_layer_hit_in_frozen_pools": {
+      "detail": [],
+      "ok": true
+    },
+    "q0_balance_0p5_confirm": {
+      "detail": {
+        "max": 0.5,
+        "min": 0.5,
+        "n_strata": 15
+      },
+      "ok": true
+    },
+    "q0_balance_0p5_dev": {
+      "detail": {
+        "max": 0.5,
+        "min": 0.5,
+        "n_strata": 15
+      },
+      "ok": true
+    },
+    "q0_balance_0p5_final": {
+      "detail": {
+        "max": 0.5,
+        "min": 0.5,
+        "n_strata": 15
+      },
+      "ok": true
+    },
+    "scored_both_arms_confirm": {
+      "detail": null,
+      "ok": true
+    },
+    "scored_both_arms_dev": {
+      "detail": null,
+      "ok": true
+    },
+    "scored_both_arms_final": {
+      "detail": null,
+      "ok": true
+    },
+    "sha256_confirm": {
+      "detail": "edc190e6ff11cc386a8c6b90ff561f76ff060bdc5173c591e6c0a687fe2184f2",
+      "ok": true
+    },
+    "sha256_dev": {
+      "detail": "e7a7d29a0b5cb90a2c1d77b579832c8b36e1b6f19e0e647df66f53104d7610fb",
+      "ok": true
+    },
+    "sha256_final": {
+      "detail": "eaa6c6f05fc601f467e6481ec0b36d28e2f85a8e12583f9e9c1d0d41af8c2f00",
+      "ok": true
+    },
+    "unique_ids_confirm": {
+      "detail": null,
+      "ok": true
+    },
+    "unique_ids_dev": {
+      "detail": null,
+      "ok": true
+    },
+    "unique_ids_final": {
+      "detail": null,
+      "ok": true
+    },
+    "zero_question_overlap_with_prev_confirm": {
+      "detail": [],
+      "ok": true
+    },
+    "zero_question_overlap_with_prev_dev": {
+      "detail": [],
+      "ok": true
+    },
+    "zero_question_overlap_with_prev_final": {
+      "detail": [],
+      "ok": true
+    }
+  },
+  "ok": true
+}

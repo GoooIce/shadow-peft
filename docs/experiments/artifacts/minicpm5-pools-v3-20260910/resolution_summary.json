@@ -1,0 +1,101 @@
+{
+  "statistic": "episode 级配对差（每 episode 8 题，8 题一簇）",
+  "pair_used_for_sigma": "q0-cand_search",
+  "sigma_episode_acc": 0.18470133549417916,
+  "sigma_episode_acc_v2_reference": 0.2274,
+  "sigma_episode_gold_prob": 0.10029012818787676,
+  "ds_dacc_gold_prob": 0.7527184257827844,
+  "n_ep_for_delta_gold_prob": 349,
+  "n_ep_for_delta_acc": 670,
+  "gold_prob_sample_saving": 1.9197707736389684,
+  "pools": {
+    "dev": {
+      "n_episodes": 60,
+      "n_items": 480,
+      "delta_min_episode_level": 0.06680335093525912,
+      "delta_min_episode_level_at_v2_sigma": 0.08224673612691158,
+      "delta_min_item_level_naive": 0.0695618407426083,
+      "delta_min_item_level_clustercorrected": 0.06680335093525912,
+      "delta_min_gold_prob_accuracy_points": 0.048189658790497254,
+      "delta_min_ratio_gold_prob_over_acc": 1.3862590566512245,
+      "interval_half_width_95": 0.04673502738135108,
+      "items_needed_for_delta_0p02": 5360,
+      "delta_min_item_level_naive_q0bf16_profile": 0.06155807373574635,
+      "delta_min_item_level_clustercorrected_q0bf16_profile": 0.08261064831892677
+    },
+    "confirm": {
+      "n_episodes": 4005,
+      "n_items": 32040,
+      "delta_min_episode_level": 0.008176597367612688,
+      "delta_min_episode_level_at_v2_sigma": 0.010066837017828288,
+      "delta_min_item_level_naive": 0.00851423103690596,
+      "delta_min_item_level_clustercorrected": 0.008176597367612688,
+      "delta_min_gold_prob_accuracy_points": 0.005898318448043059,
+      "delta_min_ratio_gold_prob_over_acc": 1.386259056651225,
+      "interval_half_width_95": 0.005720274454974537,
+      "items_needed_for_delta_0p02": 5360,
+      "delta_min_item_level_naive_q0bf16_profile": 0.0075345858645744735,
+      "delta_min_item_level_clustercorrected_q0bf16_profile": 0.010111379146772646
+    },
+    "final": {
+      "n_episodes": 675,
+      "n_items": 5400,
+      "delta_min_episode_level": 0.019916911175468472,
+      "delta_min_episode_level_at_v2_sigma": 0.02452123905430161,
+      "delta_min_item_level_naive": 0.020739333938731546,
+      "delta_min_item_level_clustercorrected": 0.019916911175468472,
+      "delta_min_gold_prob_accuracy_points": 0.01436738038240962,
+      "delta_min_ratio_gold_prob_over_acc": 1.3862590566512247,
+      "interval_half_width_95": 0.013933693087335334,
+      "items_needed_for_delta_0p02": 5360,
+      "delta_min_item_level_naive_q0bf16_profile": 0.018353071658276435,
+      "delta_min_item_level_clustercorrected_q0bf16_profile": 0.02462973670752653
+    }
+  },
+  "min_episode_sigma_available": null,
+  "sigma_item_dev_near_neighbour": 0.5439056290693574,
+  "item_level": {
+    "pair": "q0-bf16",
+    "rho": 0.11449783041575233,
+    "sigma_item": 0.48132399117251373,
+    "naive_optimism_factor": 0.7451590683333604
+  },
+  "per_stratum_sigma_modelled_q0bf16": {
+    "arith/easy": 0.21597861494605183,
+    "arith/hard": 0.1872125274189802,
+    "arith/medium": 0.2502910675474856,
+    "logic/easy": 0.2475318430730816,
+    "logic/hard": 0.25049940602862975,
+    "logic/medium": 0.2816531341471336,
+    "modulo/easy": 0.19216689804248707,
+    "modulo/hard": 0.2327097251568411,
+    "modulo/medium": 0.18768936230315536,
+    "ordering/easy": 0.2575361031561759,
+    "ordering/hard": 0.19475306705362688,
+    "ordering/medium": 0.25706647964143636,
+    "pct/easy": 0.2927711511275699,
+    "pct/hard": 0.22336789312865607,
+    "pct/medium": 0.23709725001026483
+  },
+  "per_family_sigma_modelled_q0bf16": {
+    "arith": 0.20735511001334553,
+    "logic": 0.2616717272506994,
+    "modulo": 0.20504844223438592,
+    "ordering": 0.22564184107893084,
+    "pct": 0.24459798460122198
+  },
+  "per_family_measured_dev_sigma": {
+    "arith": 0.2418372242967479,
+    "logic": 0.16503103664327978,
+    "modulo": 0.15590239111558088,
+    "ordering": 0.17921510973005472,
+    "pct": 0.10206207261596575
+  },
+  "per_family_verdict": {
+    "feasible_at_dev_size": false,
+    "delta_min_per_family_at_dev_size": 0.14937683381601355,
+    "delta_min_per_family_at_confirm_size": 0.018283427538627807,
+    "episodes_per_family_in_confirm": 801,
+    "recommendation": "逐 family 门**不能**挂在 dev 上（12 ep/family → 只能分辨 ~13–15 点，而观察到的损伤是 3–7 点）；可行路径有三条：(1) **在确认池上做逐 family 判定**（本池 confirm 给每 family 801 episode → δ≈1.8 点，达标 δ=0.02）；(2) **跨代累积**：每代 dev 给每 family 12 episode，累积到 670 episode 需要 ~56 代（用 gold_prob ≈ 28 代），适合『家族疑似偏移』时再启用；(3) **定向探针**：只在某 family 被标记可疑时，对该 family 单独开一次 670-episode 探针（5,360 题，≈1.5 min GPU），其它 family 不动。**不建议**把 dev 从 480 题放大——它是每候选成本，会乘以候选数×代数。"
+  }
+}

@@ -1,0 +1,514 @@
+{
+  "backends": {
+    "cutlass": {
+      "error_lines": [
+        "(APIServer pid=290987)     raise RuntimeError(",
+        "(APIServer pid=290987) RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}",
+        "(EngineCore pid=291140) ERROR 09-10 21:38:06 [core.py:1374] RuntimeError: dispatch_scaled_mm, /workspace/csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_helper.hpp:34, Int8 not supported on SM121. Use FP8 quantization instead, or run on older arch (SM < 100)."
+      ],
+      "folds": {
+        "fold1_witness_served_a_request": false,
+        "fold2_hard_error": [
+          "(APIServer pid=290987)     raise RuntimeError("
+        ]
+      },
+      "ready": false,
+      "startup_selected_lines": [
+        "Selected CutlassInt8ScaledMMLinearKernel for CompressedTensorsW8A8Int8"
+      ],
+      "witness": null
+    },
+    "marlin": {
+      "error_lines": [
+        "(APIServer pid=291975)     raise RuntimeError(",
+        "(APIServer pid=291975) RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}",
+        "(EngineCore pid=292090) ERROR 09-10 21:40:43 [core.py:1374] RuntimeError: dispatch_scaled_mm, /workspace/csrc/libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_helper.hpp:34, Int8 not supported on SM121. Use FP8 quantization instead, or run on older arch (SM < 100)."
+      ],
+      "folds": {
+        "fold1_witness_served_a_request": false,
+        "fold2_hard_error": [
+          "(APIServer pid=291975)     raise RuntimeError("
+        ]
+      },
+      "ready": false,
+      "startup_selected_lines": [
+        "Selected CutlassInt8ScaledMMLinearKernel for CompressedTensorsW8A8Int8"
+      ],
+      "witness": null
+    },
+    "triton": {
+      "error_lines": [],
+      "folds": {
+        "fold1_witness_served_a_request": true,
+        "fold2_hard_error": [],
+        "fold2_selected_line": [
+          "Selected TritonInt8ScaledMMLinearKernel for CompressedTensorsW8A8Int8"
+        ],
+        "fold3_dequant_calls": 0,
+        "fold3_int8_candidate_calls": 924,
+        "fold3_int8_candidate_dur_share": 0.7216,
+        "fold4_int8_tensor_core_ptx_files": 1
+      },
+      "ready": true,
+      "startup_selected_lines": [
+        "Selected TritonInt8ScaledMMLinearKernel for CompressedTensorsW8A8Int8"
+      ],
+      "witness": {
+        "request": "POST /v1/completions (1600-token prompt, 16 new tokens)",
+        "text_head": "",
+        "usage": {
+          "completion_tokens": 1,
+          "completion_tokens_details": null,
+          "prompt_tokens": 1602,
+          "prompt_tokens_details": null,
+          "total_tokens": 1603
+        }
+      }
+    }
+  },
+  "model": "/home/goooice/minicpm5-payload/out/MiniCPM5-2B-INT8-W8A8",
+  "static_matrix": {
+    "legal_linear_backends": [
+      "auto",
+      "cutlass",
+      "flashinfer_cutlass",
+      "flashinfer_cutedsl",
+      "flashinfer_trtllm",
+      "flashinfer_cudnn",
+      "flashinfer_b12x",
+      "b12x",
+      "marlin",
+      "humming",
+      "triton",
+      "deep_gemm",
+      "torch",
+      "aiter",
+      "machete",
+      "fbgemm",
+      "conch",
+      "exllama",
+      "emulation",
+      "xpu",
+      "xpu_woq"
+    ],
+    "per_backend": {
+      "aiter": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel",
+          "TritonInt8ScaledMMLinearKernel",
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "auto": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel",
+          "TritonInt8ScaledMMLinearKernel",
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "b12x": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel",
+          "TritonInt8ScaledMMLinearKernel",
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "conch": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel",
+          "TritonInt8ScaledMMLinearKernel",
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "cutlass": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "deep_gemm": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel",
+          "TritonInt8ScaledMMLinearKernel",
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "emulation": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel",
+          "TritonInt8ScaledMMLinearKernel",
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "exllama": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel",
+          "TritonInt8ScaledMMLinearKernel",
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "fbgemm": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel",
+          "TritonInt8ScaledMMLinearKernel",
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "flashinfer_b12x": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel",
+          "TritonInt8ScaledMMLinearKernel",
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "flashinfer_cudnn": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel",
+          "TritonInt8ScaledMMLinearKernel",
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "flashinfer_cutedsl": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel",
+          "TritonInt8ScaledMMLinearKernel",
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "flashinfer_cutlass": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel",
+          "TritonInt8ScaledMMLinearKernel",
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "flashinfer_trtllm": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel",
+          "TritonInt8ScaledMMLinearKernel",
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "humming": {
+        "int8_kernels": [
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "machete": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel",
+          "TritonInt8ScaledMMLinearKernel",
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "marlin": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel",
+          "TritonInt8ScaledMMLinearKernel",
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "torch": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel",
+          "TritonInt8ScaledMMLinearKernel",
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "triton": {
+        "int8_kernels": [
+          "TritonInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "xpu": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel",
+          "TritonInt8ScaledMMLinearKernel",
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      },
+      "xpu_woq": {
+        "int8_kernels": [
+          "CutlassInt8ScaledMMLinearKernel",
+          "TritonInt8ScaledMMLinearKernel",
+          "HummingInt8ScaledMMLinearKernel"
+        ],
+        "support": {
+          "CutlassInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "HummingInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ],
+          "TritonInt8ScaledMMLinearKernel": [
+            true,
+            null
+          ]
+        }
+      }
+    },
+    "possible_int8_kernels_cuda": [
+      "CutlassInt8ScaledMMLinearKernel",
+      "TritonInt8ScaledMMLinearKernel",
+      "HummingInt8ScaledMMLinearKernel"
+    ],
+    "vllm": "0.29.0"
+  }
+}
