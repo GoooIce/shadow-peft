@@ -393,6 +393,53 @@ def answer_span(tokenizer, prompt: str, answer: str):
     return p_ids[:k], full[k:], False
 
 
+# ------------------------------------------------- prompt 变体（harness swap，第 2 轮）
+
+PROMPT_VARIANTS = ("frozen", "plain")
+DEFAULT_PROMPT_VARIANT = "frozen"
+#: `frozen` = 冻结口径（chat template + 固定 'Answer:' 后缀）；`plain` = 自然 chat template，
+#: **不带**后缀。第 2 轮的 harness swap 臂（HarnessDev 的执行器替换）用后者：`Answer:` 后缀
+#: 已被证明会诱发 logic/hard、ordering/hard 上的"直接结束回合"模式，只在带后缀的臂上量到的
+#: 增益可能不迁移到部署形态。
+PROMPT_VARIANT_NOTES = {
+    "frozen": "chat template + frozen 'Answer:' suffix (the frozen primary form)",
+    "plain": "natural chat template, no 'Answer:' suffix (harness-swap form)",
+}
+
+
+def render_prompt_variant(tokenizer, item: dict, variant: str = DEFAULT_PROMPT_VARIANT,
+                          enable_thinking: bool = False) -> str:
+    """按变体渲染 prompt。**`frozen` 与 :func:`render_prompt` 逐字节相同。**
+
+    这是第 2 轮加入的唯一渲染入口改动，纯追加：既有调用方（`score_taskset.py`、
+    `pilot_search.py` 的冻结路径）继续走 :func:`render_prompt`，其输出不变。
+    """
+    variant = variant or DEFAULT_PROMPT_VARIANT
+    if variant not in PROMPT_VARIANTS:
+        raise ValueError(f"unknown prompt variant {variant!r}; want one of {PROMPT_VARIANTS}")
+    if variant == "frozen":
+        return render_prompt(tokenizer, item, enable_thinking=enable_thinking)
+    msgs = [{"role": "user", "content": item["question"] + "\n\n" + INSTRUCTION}]
+    return tokenizer.apply_chat_template(
+        msgs, tokenize=False, add_generation_prompt=True, enable_thinking=enable_thinking
+    )
+
+
+def render_span(tokenizer, item: dict, variant: str = DEFAULT_PROMPT_VARIANT,
+                enable_thinking: bool = False):
+    """渲染 + 切出 gold span：返回 ``(prompt, p_ids, g_ids, stable)``。
+
+    `frozen` 与 `score_taskset.build_requests` 的路径逐字一致（含 ' ' + answer 的 gold
+    文本）。`plain` 形态下 prompt 结尾不是 'Answer:'，`' ' + answer` 的首 token 可能与
+    prompt 末尾的换行 token 合并 —— 此时 `answer_span` 返回 ``stable=False`` 与截断到公共
+    前缀的 prompt。**调用方必须自己决定是否接受不稳定的条目**：冻结主轴仍按原样拒绝
+    （`pilot_search` 里 `raise`），swap 臂按"公共前缀 + 其余 gold"计分并在记录里报数。
+    """
+    prompt = render_prompt_variant(tokenizer, item, variant, enable_thinking)
+    p_ids, g_ids, stable = answer_span(tokenizer, prompt, GOLD_PREFIX + item["answer"])
+    return prompt, p_ids, g_ids, stable
+
+
 # ---------------------------------------------------------------- 题集自检
 
 def self_check(items) -> dict:

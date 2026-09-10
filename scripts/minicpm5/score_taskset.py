@@ -103,14 +103,20 @@ def score_tf(llm, SamplingParams, tokenizer, reqs, chunk=256, tag="", log=print)
                      tf_tokens_per_s=(n_tok / dt if dt else None))
 
 
-def score_gen(llm, SamplingParams, tokenizer, reqs, chunk=256, tag="", log=print):
+def score_gen(llm, SamplingParams, tokenizer, reqs, chunk=256, tag="", log=print,
+              max_tokens=24):
+    """GEN 辅助臂（贪心，双 eos 停止）。`max_tokens` 默认 24 = 冻结口径。
+
+    `max_tokens` 是第 2 轮加入的**纯追加**参数：默认值与冻结值相同，所有既有调用方
+    行为逐字不变；harness_audit.py 用它做截断模式的档位扫描。
+    """
     out = []
     t0 = time.time()
     n_out = 0
     for s in range(0, len(reqs), chunk):
         batch = reqs[s:s + chunk]
         prompts = [r["p_ids"] for r in batch]
-        sp = SamplingParams(max_tokens=24, temperature=0.0,
+        sp = SamplingParams(max_tokens=max_tokens, temperature=0.0,
                             stop_token_ids=[1, IM_END], ignore_eos=False)
         res = llm.generate(prompts, sp, use_tqdm=False)
         for r, o in zip(batch, res):

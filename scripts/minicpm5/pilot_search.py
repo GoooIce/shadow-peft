@@ -42,8 +42,10 @@ import numpy as np  # noqa: E402
 
 import pilot_lib as pl  # noqa: E402
 import pilot_worker as pw  # noqa: E402
+import retention_lib as rl  # noqa: E402
 
 IM_END = 130073
+PROMPT_VARIANT_DEFAULT = "frozen"
 
 
 def log(*parts) -> None:
@@ -105,6 +107,35 @@ def center_delta(center: pl.CentreState) -> dict[tuple[str, int], int]:
     }
 
 
+def swap_variant(variant: str) -> str:
+    """The other half of the harness swap (frozen <-> plain)."""
+    from taskset_lib import PROMPT_VARIANTS
+
+    others = [name for name in PROMPT_VARIANTS if name != variant]
+    return others[0] if others else variant
+
+
+def _prompt_variants() -> tuple:
+    from taskset_lib import PROMPT_VARIANTS
+
+    return PROMPT_VARIANTS
+
+
+def terminal_variants(args) -> list[str]:
+    """Prompt forms to measure on the sealed pool at the terminal step.
+
+    The headline (`--prompt-variant`, default the frozen form) always runs; the
+    swap form runs too unless `--no-terminal-swap`, because §3's pre-registered
+    rule ("a positive claim requires the gain not to vanish under the swap") is
+    only evaluable if both forms were measured on the same sealed pool in the
+    same process.
+    """
+    headline = getattr(args, "prompt_variant", PROMPT_VARIANT_DEFAULT)
+    if not getattr(args, "terminal_swap", False) or not getattr(args, "confirm", None):
+        return [headline]
+    return [headline, swap_variant(headline)]
+
+
 class Runner:
     def __init__(self, args):
         self.args = args
@@ -129,6 +160,15 @@ class Runner:
         self.seen_coordinates: set = set()
         # 19 票：q0 的"未作答率"基线（启动时实测一次，见 q0_reference()）
         self.q0_reference: dict | None = None
+        # 第 2 轮（retention）：反馈噪声带的证据与轨迹读数
+        self.noise_replicates: list[dict] = []        # 启动时空转重测的 score_block
+        self.slice_noise_replicates: list[dict] = []  # 同上，针对 feedback slice
+        self.centre_readings: list[dict] = []         # {"sha", "block", "tag"}，代内重复读数
+        self.slice_reading: dict | None = None        # 上一代中心的 slice 读数（slice 门用）
+        self.feedback_noise: dict | None = None
+        self.slice_noise: dict | None = None
+        self.retention_flags: dict | None = None
+        self.feedback_slice_reqs: list[dict] | None = None
 
     # -- base code access --------------------------------------------------- #
     def _base(self, layer: str) -> np.ndarray:
@@ -343,32 +383,56 @@ class Runner:
             return False
 
     # -- scoring ------------------------------------------------------------ #
+    def build_reqs(self, items: list[dict], variant: str, strict: bool = True) -> list[dict]:
+        """题集 -> 请求（按 prompt 变体渲染）。
+
+        `frozen` 变体与冻结路径逐字一致（`render_prompt` + `answer_span`），不稳定前缀
+        照旧 `raise`。swap 臂（`plain`）允许不稳定：`answer_span` 已把 prompt 截到公共
+        前缀，剩余 gold 仍是合法的续写；不稳定条数在记录里报数（`unstable_prefix`）。
+        """
+        from taskset_lib import render_span
+
+        reqs, unstable = [], 0
+        for item in items:
+            prompt, p_ids, g_ids, stable = render_span(self.tokenizer, item, variant=variant)
+            unstable += int(not stable)
+            reqs.append({"item": item, "prompt": prompt, "p_ids": p_ids, "g_ids": g_ids,
+                         "stable": bool(stable), "variant": variant})
+        if unstable and strict:
+            raise RuntimeError(f"unstable prompt prefix on variant {variant}: "
+                               f"{unstable}/{len(reqs)} items")
+        return reqs
+
     def prepare_requests(self):
-        from taskset_lib import GOLD_PREFIX, answer_span, render_prompt
         from transformers import AutoTokenizer
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.args.model)
         self.items = load_items(Path(self.args.taskset), self.args.limit)
-        reqs, unstable = [], 0
-        for item in self.items:
-            prompt = render_prompt(self.tokenizer, item, enable_thinking=False)
-            p_ids, g_ids, stable = answer_span(self.tokenizer, prompt, GOLD_PREFIX + item["answer"])
-            unstable += int(not stable)
-            reqs.append({"item": item, "prompt": prompt, "p_ids": p_ids, "g_ids": g_ids})
-        self.dev_reqs = reqs
-        log(f"dev items={len(reqs)} unstable_prefix={unstable}")
-        if unstable:
-            raise RuntimeError("unstable prompt prefix: gold span is not a suffix")
+        # 反馈通道（dev 池）永远是冻结形态：它是适应度与 retention 判据的通道，
+        # 换 prompt 形态的是终端 swap 臂，不是这里。
+        self.dev_reqs = self.build_reqs(self.items, PROMPT_VARIANT_DEFAULT, strict=True)
+        log(f"dev items={len(self.dev_reqs)} unstable_prefix=0 "
+            f"(variant={PROMPT_VARIANT_DEFAULT})")
         self.confirm_reqs = None
+        self.confirm_reqs_by_variant: dict[str, list[dict]] = {}
         if self.args.confirm:
             c_items = load_items(Path(self.args.confirm))
-            c_reqs = []
-            for item in c_items:
-                prompt = render_prompt(self.tokenizer, item, enable_thinking=False)
-                p_ids, g_ids, stable = answer_span(self.tokenizer, prompt, GOLD_PREFIX + item["answer"])
-                c_reqs.append({"item": item, "prompt": prompt, "p_ids": p_ids, "g_ids": g_ids})
-            self.confirm_reqs = c_reqs
-            log(f"confirm items={len(c_reqs)}")
+            self.confirm_reqs = self.build_reqs(c_items, PROMPT_VARIANT_DEFAULT, strict=True)
+            self.confirm_reqs_by_variant[PROMPT_VARIANT_DEFAULT] = self.confirm_reqs
+            log(f"confirm items={len(self.confirm_reqs)} (variant={PROMPT_VARIANT_DEFAULT})")
+            if self.args.terminal_swap:
+                for variant in terminal_variants(self.args):
+                    reqs = self.build_reqs(c_items, variant, strict=False)
+                    self.confirm_reqs_by_variant[variant] = reqs
+                    unstable = sum(1 for r in reqs if not r["stable"])
+                    log(f"confirm swap arm: variant={variant} unstable_prefix={unstable}"
+                        f"/{len(reqs)}")
+        self.feedback_slice_reqs = None
+        if self.args.feedback_slice:
+            s_items = load_items(Path(self.args.feedback_slice))
+            self.feedback_slice_reqs = self.build_reqs(s_items, PROMPT_VARIANT_DEFAULT, strict=True)
+            log(f"feedback slice items={len(self.feedback_slice_reqs)} "
+                f"(variant={PROMPT_VARIANT_DEFAULT}, monitoring channel)")
 
     def score(self, reqs: list[dict], tag: str) -> tuple[list[dict], dict]:
         from vllm import SamplingParams
@@ -380,6 +444,115 @@ class Runner:
         attach_episodes(rows, [r["item"] for r in reqs])
         timing["wall_seconds"] = round(time.perf_counter() - started, 3)
         return rows, timing
+
+    # -- 反馈噪声带与轨迹读数（第 2 轮 §4a）----------------------------------- #
+    def measure_feedback_noise(self, live: dict, state: pl.CentreState) -> dict | None:
+        """启动时空转重测：把**同一个中心**在完整管道上测 k 遍。
+
+        每一遍都走真实部署路径（patch -> KF refit -> flush prefix cache -> 评分），
+        所以这是 HarnessDev 口径的"同 commit 重评估噪声"在本运行、本精度下的实测值，
+        而不是记忆里的 ±4.75。k < 2 时不做，噪声带退回到量化下限（1/n）并如实标注。
+
+        只在 `--retention` / `--feedback-noise` / `--feedback-slice` 打开时执行：默认路径
+        一个字节都不加。
+        """
+        k = int(self.args.noop_rescores)
+        want_slice = self.feedback_slice_reqs is not None and bool(self.args.retention or
+                                                                  self.args.feedback_noise)
+        if k < 2:
+            log(f"no-op re-scores disabled (--noop-rescores {k}): the feedback band falls back "
+                f"to the quantisation floor")
+            return None
+        target = center_delta(state)
+        blocks, slice_blocks = [], []
+        for index in range(k):
+            patch = self.patch(live, target)          # 真实往返：同一个中心，重新 refit
+            rows, timing = self.score(self.dev_reqs, f"noop{index}")
+            block = rl.score_block(rows)
+            blocks.append(block)
+            pl.json_dump(self.out / "records" / f"noop_rescore_{index:02d}.json",
+                         {"index": index, "kind": "noop_rescore", "centre_sha256": None,
+                          "block": block, "patch": patch, "timing": timing, "rows": rows})
+            if want_slice:
+                s_rows, s_timing = self.score(self.feedback_slice_reqs, f"noop{index}-slice")
+                slice_blocks.append(rl.score_block(s_rows))
+                pl.json_dump(self.out / "records" / f"noop_rescore_slice_{index:02d}.json",
+                             {"index": index, "kind": "noop_rescore_slice", "block": slice_blocks[-1],
+                              "timing": s_timing, "rows": s_rows})
+            log(f"no-op re-score {index + 1}/{k}: centre acc={block['overall']['acc']:.4f} "
+                f"({timing['wall_seconds']}s)")
+        self.noise_replicates = blocks
+        self.slice_noise_replicates = slice_blocks
+        self.feedback_noise = rl.noise_band(blocks, self.dev_item_rows(),
+                                            scale=self.args.retention_band_scale,
+                                            term=self.args.retention_band_term)
+        if slice_blocks:
+            self.slice_noise = rl.noise_band(slice_blocks, self.slice_item_rows(),
+                                             scale=self.args.retention_band_scale,
+                                             term=self.args.retention_band_term)
+        self.retention_flags = {
+            "retention": bool(self.args.retention),
+            "retention_band_scale": self.args.retention_band_scale,
+            "retention_band_term": self.args.retention_band_term,
+            "noop_rescores": k,
+            "feedback_slice": self.args.feedback_slice,
+            "feedback_slice_gate": bool(self.args.feedback_slice_gate),
+            "band_rule": rl.FEEDBACK_BAND_NOTE,
+        }
+        pl.json_dump(self.out / "feedback_noise.json", {
+            "protocol": rl.PROTOCOL,
+            "feedback_channel": {"taskset": self.args.taskset, "band": self.feedback_noise},
+            "feedback_slice": ({"taskset": self.args.feedback_slice, "band": self.slice_noise}
+                               if slice_blocks else None),
+            "flags": self.retention_flags,
+        })
+        log("feedback noise band (dev): centre band="
+            f"{self.feedback_noise['centre']['band']:.5f} "
+            f"(harness_se={self.feedback_noise['centre']['harness_se']}, "
+            f"floor={self.feedback_noise['centre']['quantisation_floor']:.5f}, "
+            f"replicates={self.feedback_noise['replicates']}, "
+            f"deterministic={self.feedback_noise['harness']['deterministic']})")
+        log("feedback noise band per family: "
+            + str({k2: round(v["band"], 5) for k2, v in self.feedback_noise["per_family"].items()}))
+        return self.feedback_noise
+
+    def dev_item_rows(self) -> list[dict]:
+        """The dev pool's *items* as rows (no scoring): only the sampling term needs them."""
+        return [{"id": r["item"]["id"], "family": r["item"]["family"],
+                 "episode": r["item"].get("episode", r["item"]["id"])} for r in self.dev_reqs]
+
+    def slice_item_rows(self) -> list[dict]:
+        if not self.feedback_slice_reqs:
+            return []
+        return [{"id": r["item"]["id"], "family": r["item"]["family"],
+                 "episode": r["item"].get("episode", r["item"]["id"])}
+                for r in self.feedback_slice_reqs]
+
+    def observe_centre_reading(self, sha: str, rows: list[dict], tag: str) -> None:
+        """记一次"同一个中心的又一次读数"（代内重复：步前读数 vs 上代步后读数）。
+
+        §4a 允许噪声带来两类证据：启动时空转重测，或**跨代的重复读数**。这里累积后者；
+        :meth:`current_feedback_noise` 会在两者都可用时按 writeup 里的确定性规则择一。
+        """
+        if not (self.args.retention or self.args.feedback_noise):
+            return
+        self.centre_readings.append({"sha": sha, "block": rl.score_block(rows), "tag": tag})
+
+    def current_feedback_noise(self) -> dict:
+        """当前可用的反馈噪声带（启动重测优先，其次跨代重复读数）。"""
+        replicates, source = rl.band_replicates(self.noise_replicates, self.centre_readings)
+        band = rl.noise_band(replicates, self.dev_item_rows(),
+                             scale=self.args.retention_band_scale, source=source,
+                             term=self.args.retention_band_term)
+        return band
+
+    def current_slice_noise(self) -> dict | None:
+        if self.slice_noise:
+            return self.slice_noise
+        if not self.feedback_slice_reqs:
+            return None
+        return rl.noise_band([], self.slice_item_rows(), scale=self.args.retention_band_scale,
+                             source="none", term=self.args.retention_band_term)
 
     # -- 未作答健康度（19 票；只记录，不改判据）--------------------------------- #
     def no_answer(self, rows: list[dict]) -> dict:
@@ -582,6 +755,130 @@ class Runner:
             )
         return report
 
+    # -- §1 每代保留（定向修订循环，默认关）------------------------------------ #
+    def retention_check(self, state: pl.CentreState, generation: int, live: dict,
+                        centre_rows: list[dict], centre_sha: str, state_sha: str,
+                        ledger: dict, step_snapshot: dict | None, step_coordinates) -> tuple:
+        """把 HarnessDev 的"读失败 -> 定向修复 -> 复验"循环落成协议规则。
+
+        步骤：① 在**反馈通道**（dev 池）上重读刚刚应用了中心步的中心；② 相对**上一代
+        中心**的读数逐 family 分解；③ 任一家族跌幅超过本次运行自己测出的噪声带
+        （§4a，而不是记忆里的常数）→ 按票 09 §4 的残差规则把这一步**整步回滚**：坐标与
+        残差逐坐标恢复到位前值（未取的步不得借 `gamma*e` 在下一代返回），中心身份逐位
+        复原，并把逐 family 证据写成 `retention_rollback`。
+
+        返回 ``(retention_or_None, post_rows_or_None)``。`--retention` 关闭时完全不进
+        这个函数（没有任何额外评分）。
+        """
+        args = self.args
+        post_rows, post_timing = self.score(self.dev_reqs, f"centre-post-gen{generation}")
+        post_summary = pl.fitness_summary(post_rows)
+        band = self.current_feedback_noise()
+        decision = rl.retention_decision(centre_rows, post_rows, band)
+
+        slice_block = None
+        slice_gate = None
+        slice_rows = None
+        if self.feedback_slice_reqs is not None:
+            slice_rows, slice_timing = self.score(self.feedback_slice_reqs,
+                                                 f"centre-slice-gen{generation}")
+            slice_block = rl.score_block(slice_rows)
+            if self.slice_reading and self.slice_reading.get("sha") == centre_sha:
+                slice_gate = rl.retention_decision(self.slice_reading["rows"], slice_rows,
+                                                   self.current_slice_noise())
+                slice_gate["channel"] = "feedback_slice"
+            elif self.args.feedback_slice_gate:
+                slice_gate = {"channel": "feedback_slice", "skipped": True,
+                              "reason": ("no comparable slice reading of the previous centre "
+                                         "(first generation of this process); the slice gate is "
+                                         "not evaluated this generation"),
+                              "rollback": False, "breaches": []}
+
+        channels = {"feedback": decision}
+        if slice_gate:
+            channels["feedback_slice"] = slice_gate
+        breached = [name for name, block in channels.items()
+                    if block.get("rollback") and (name == "feedback" or args.feedback_slice_gate)]
+        rollback = bool(breached)
+
+        retention = {
+            "protocol": rl.PROTOCOL,
+            "kind": "retention_rollback" if rollback else "retention_keep",
+            "rule": rl.RETENTION_RULE_NOTE,
+            "generation": generation,
+            "rollback": rollback,
+            "breached_channels": breached,
+            "channels": channels,
+            "band": {"source": band.get("source"), "centre": band["centre"],
+                     "per_family": {f: band["per_family"][f] for f in decision["per_family"]}},
+            "post_fitness": post_summary,
+            "post_timing": post_timing,
+            "step": {"snapshot_layers": (len(step_snapshot["layers"]) if step_snapshot else 0),
+                     "step_coordinates": (len(step_coordinates) if step_coordinates else None),
+                     "step_ledger_moved": ledger.get("moved"),
+                     "step_ledger_touched": ledger.get("touched")},
+        }
+        if slice_block is not None:
+            retention["feedback_slice"] = {
+                "block": slice_block,
+                "timing": slice_timing,
+                "gate": slice_gate,
+                "role": ("wired into the retention decision (--feedback-slice-gate)"
+                         if args.feedback_slice_gate else
+                         "monitoring only (candidate selection and the acceptance gate are "
+                         "unchanged; the slice never enters selection)"),
+                "band": (self.current_slice_noise() if slice_gate else None),
+            }
+
+        if rollback:
+            restore = pl.restore_layers(state, step_snapshot)
+            if restore["residual_mismatches"]:
+                retention["restore"] = restore
+                pl.json_dump(self.out / "records" / f"retention_gen{generation:02d}.json", retention)
+                raise RuntimeError(
+                    f"retention rollback gen{generation} left {restore['residual_mismatches']} "
+                    f"residual mismatches -- the re-anchoring is not faithful; see "
+                    f"records/retention_gen{generation:02d}.json")
+            reanchor = pl.residual_reanchor(ledger, step_coordinates)
+            redeploy = self.patch(live, center_delta(state))
+            restored_sha = state.sha256(self._base_hash)
+            retention["restore"] = restore
+            retention["reanchor"] = reanchor
+            retention["redeploy"] = redeploy
+            retention["centre_sha256_after_step"] = state_sha
+            retention["centre_restored_sha256"] = restored_sha
+            retention["sha_restored_exactly"] = bool(restored_sha == centre_sha)
+            retention["residual_ledger_effective"] = "reverted (the step was not taken)"
+            retention["post_reading_discarded"] = True
+            log(f"gen{generation} RETENTION ROLLBACK ({'+'.join(breached)}): "
+                f"feedback breaches={[b['family'] for b in decision['breaches']]}"
+                + (f" slice breaches={[b['family'] for b in (slice_gate or {}).get('breaches', [])]}"
+                   if slice_gate else "")
+                + f" (worst {decision['worst_family']} {decision['worst_delta']:+.4f}); "
+                f"step reverted, residual re-anchored over {reanchor['coordinates']} "
+                f"coordinates, centre sha restored exactly="
+                f"{retention['sha_restored_exactly']}")
+            pl.json_dump(self.out / "records" / f"retention_gen{generation:02d}.json", retention)
+            if not retention["sha_restored_exactly"]:
+                raise RuntimeError(
+                    f"retention rollback gen{generation} did not restore the centre identity: "
+                    f"{restored_sha} != {centre_sha}; see "
+                    f"records/retention_gen{generation:02d}.json")
+            # slice 的"上一代读数"仍描述同一个中心（rollback 之后 sha 与步前相同），
+            # 因此 self.slice_reading 保持不变即可。
+            return retention, None
+
+        # no rollback: the post-step reading is a real reading of the new centre
+        self.observe_centre_reading(state_sha, post_rows, f"post-gen{generation}")
+        if slice_rows is not None:
+            self.slice_reading = {"sha": state_sha, "rows": slice_rows, "block": slice_block}
+        pl.json_dump(self.out / "records" / f"retention_gen{generation:02d}.json", retention)
+        log(f"gen{generation} retention keep: post-step centre acc="
+            f"{post_summary['acc']:.4f} (d={decision['centre_delta']:+.4f} vs previous, "
+            f"band {decision['centre_band']:.5f}); worst family "
+            f"{decision['worst_family']} {decision['worst_delta']:+.4f}")
+        return retention, post_rows
+
     def run_generation(self, state: pl.CentreState, generation: int, live: dict,
                        history: list, centre_sha: str) -> dict:
         args = self.args
@@ -601,6 +898,7 @@ class Runner:
         centre_episodes = pl.episode_scores(centre_rows)
         centre_na = self.no_answer(centre_rows)
         centre_attr = self.attribution(centre_rows)
+        self.observe_centre_reading(centre_sha, centre_rows, f"pre-gen{generation}")
         log(f"gen{generation} centre dev acc={centre_summary['acc']:.4f} "
             f"gold_prob={centre_summary['gold_prob']:.4f} "
             f"na={centre_na['overall']['rate']:.4f}")
@@ -678,10 +976,27 @@ class Runner:
             })
         aggregation = pl.aggregate(pairs_payload, realized_list, args.tau)
         gradient = aggregation.pop("gradient")
+        # 第 2 轮 §1：步前快照（只有 --retention 才取；快照覆盖 apply_step 会访问的全部坐标）
+        step_snapshot = None
+        step_coordinates = None
+        if args.retention:
+            step_coordinates = pl.step_coordinates(state, gradient)
+            step_snapshot = pl.snapshot_layers(state, step_coordinates)
         ledger = pl.apply_step(state, self.reader, gradient, args.alpha)
         state.generation = generation + 1
         deploy = self.patch(live, center_delta(state))
         state_sha = state.sha256(self._base_hash)
+
+        # --- §1 定向修订：读回反馈通道 -> 逐 family 分解 -> 越带则回滚 ----------
+        retention, centre_post_rows = self.retention_check(
+            state, generation, live, centre_rows, centre_sha, state_sha,
+            ledger, step_snapshot, step_coordinates,
+        )
+        if retention and retention["rollback"]:
+            state_sha = retention["centre_restored_sha256"]
+            deploy = retention["redeploy"]
+        centre_post = (pl.fitness_summary(centre_post_rows) if centre_post_rows
+                       else (retention or {}).get("post_fitness"))
 
         if args.verify_live:
             for candidate in population:
@@ -730,6 +1045,8 @@ class Runner:
                 "gradient_norm": float(np.linalg.norm(list(gradient.values()))) if gradient else 0.0,
             },
             "residual_ledger": ledger,
+            "retention": retention,
+            "centre_post_fitness": centre_post,
             "resolution": resolution,
             "live_readback": live_check,
             "confirm": confirm,
@@ -773,11 +1090,31 @@ class Runner:
                 "best_candidate_no_answer": no_answer_gate["best_candidate"]["no_answer"]["overall"]["rate"]
                 if no_answer_gate["best_candidate"] else None,
                 "no_answer_flagged": no_answer_gate["flagged"],
+                # 第 2 轮 §1/§4：保留裁决与中心轨迹读数（monitoring 通道）
+                "retention_rollback": bool(retention and retention["rollback"]),
+                "retention_breaches": ([{"family": b["family"], "delta": b["delta"],
+                                         "band": b["band"]} for b in
+                                        (retention["channels"]["feedback"]["breaches"]
+                                         if retention else [])]),
+                "retention_worst_family": (retention["channels"]["feedback"]["worst_family"]
+                                           if retention else None),
+                "retention_worst_delta": (retention["channels"]["feedback"]["worst_delta"]
+                                          if retention else None),
+                "retention_band_source": (retention["band"]["source"] if retention else None),
+                "retention_centre_band": (retention["channels"]["feedback"]["centre_band"]
+                                          if retention else None),
+                "centre_post_acc": (centre_post or {}).get("acc"),
+                "centre_post_gold_prob": (centre_post or {}).get("gold_prob"),
+                "feedback_slice_acc": ((retention or {}).get("feedback_slice", {}) or {})
+                .get("block", {}).get("overall", {}).get("acc"),
+                "feedback_slice_episodes": ((retention or {}).get("feedback_slice", {}) or {})
+                .get("block", {}).get("overall", {}).get("episodes"),
             }, ensure_ascii=False) + "\n")
         history.append(record)
         return record
 
-    def confirm_arms(self, live: dict, state: pl.CentreState, tags=("q0", "center")) -> dict:
+    def confirm_arms(self, live: dict, state: pl.CentreState, tags=("q0", "center"),
+                     variant: str = PROMPT_VARIANT_DEFAULT) -> dict:
         """Score the frozen confirm pool on q0 and on the resumed centre.
 
         Ticket 18 froze the terminal wording as an episode-level paired
@@ -786,16 +1123,27 @@ class Runner:
         verdict itself (classify_outcome with the frozen delta, the percentile
         bootstrap and the sign-flip null) is computed offline by
         ``confirm_gate.py --measure`` from the rows dumped here.
+
+        Round 2 (§3): the same two arms are additionally measured under the
+        harness-swap prompt form, so the terminal record can state whether a gain
+        survives the swap.  Opening the pool once per *process* is what the
+        multiplicity accounting counts (``--looks``); measuring extra arms on the
+        same items in the same process does not open it again.
         """
+        reqs = None
+        if variant != PROMPT_VARIANT_DEFAULT:
+            reqs = self.confirm_reqs_by_variant.get(variant)
+            if reqs is None:
+                raise RuntimeError(f"no requests prepared for prompt variant {variant!r}")
         arms = {}
         targets = {"q0": pl.CentreState(), "center": state}
         for name in tags:
             target = targets[name]
             self.patch(live, center_delta(target))
-            rows, timing = self.score(self.confirm_reqs, f"confirm-arms-{name}")
+            rows, timing = self.score(reqs or self.confirm_reqs, f"confirm-arms-{name}-{variant}")
             arms[name] = {"fitness": pl.fitness_summary(rows), "timing": timing,
                           "no_answer": self.no_answer(rows), "rows": rows}
-            log(f"confirm arm {name}: acc={arms[name]['fitness']['acc']:.4f} "
+            log(f"confirm arm {name} [{variant}]: acc={arms[name]['fitness']['acc']:.4f} "
                 f"episodes={arms[name]['fitness']['episodes']} "
                 f"na={arms[name]['no_answer']['overall']['rate']:.4f} "
                 f"({timing['wall_seconds']}s)")
@@ -805,11 +1153,60 @@ class Runner:
 
             arms["attribution_center_vs_q0"] = attribution_verdict(
                 arms["center"]["rows"], arms["q0"]["rows"], margin=self.args.no_answer_margin)
-            log("confirm attribution centre vs q0: "
+            log(f"confirm attribution centre vs q0 [{variant}]: "
                 + json.dumps({k: arms["attribution_center_vs_q0"][k] for k in
                               ("verdict", "gain_all", "gain_both", "no_answer_excess",
                                "n_both_answered")}, ensure_ascii=False))
+        arms["variant"] = variant
+        arms["unstable_prefix"] = sum(1 for r in (reqs or self.confirm_reqs)
+                                      if not r.get("stable", True))
         return arms
+
+    def confirm_arms_by_variant(self, live: dict, state: pl.CentreState) -> dict:
+        """§3: every arm (q0 and centre) under every terminal prompt form."""
+        variants = terminal_variants(self.args)
+        arms = {}
+        for variant in variants:
+            arms[variant] = self.confirm_arms(live, state, variant=variant)
+        return arms
+
+    def export_terminal_payload(self, state: pl.CentreState, deliverable: str) -> dict:
+        """§2: export the payload the terminal rule actually delivers.
+
+        ``deliverable == "center"`` exports the resumed centre; ``"q0"`` exports
+        the **unpatched** q0 payload (an empty centre), so "the deliverable is q0"
+        is a real artifact and not just a sentence in a record.
+        """
+        center = state if deliverable == "center" else pl.CentreState()
+        tag = "terminal_center" if deliverable == "center" else "terminal_q0"
+        started = time.perf_counter()
+        report = self.materialise_and_export(center, tag)
+        payload_dir = Path(report["payload_dir"])
+        digest = None
+        try:
+            import hashlib
+
+            handle = hashlib.sha256()
+            with (payload_dir / "model.safetensors").open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1 << 20), b""):
+                    handle.update(chunk)
+            digest = handle.hexdigest()
+        except OSError as error:  # pragma: no cover - disk-side guard
+            log(f"payload sha256 failed: {error}")
+        out = {
+            "deliverable": deliverable,
+            "payload_dir": str(payload_dir),
+            "model_safetensors_sha256": digest,
+            "model_safetensors_bytes": (payload_dir / "model.safetensors").stat().st_size
+            if (payload_dir / "model.safetensors").exists() else None,
+            "reference_check": {key: report[key] for key in report if key != "rows"},
+            "seconds": round(time.perf_counter() - started, 2),
+            "centre_generation": state.generation,
+        }
+        pl.json_dump(self.out / "terminal_payload.json", out)
+        log(f"terminal deliverable={deliverable} payload -> {payload_dir} "
+            f"sha256={digest}")
+        return out
 
     def export_center(self, center: pl.CentreState, out_path: Path) -> Path:
         """Offline kernel export of the centre (weight nibbles re-derived from codes).
@@ -989,6 +1386,48 @@ def main() -> int:
                              "artifact_dominated 时同样打 flag。只记录，不影响 fitness/停止")
     parser.add_argument("--skip-q0-reference", action="store_true",
                         help="跳过启动时的 q0 未作答基线测量（默认关闭；关掉后归因规则不可用）")
+    # ---- 第 2 轮：保留（retention）/ 反馈噪声带 / harness swap。默认关或纯追加 ----
+    parser.add_argument("--retention", action="store_true",
+                        help="第 2 轮 §1（默认关）：每代中心步之后再读一次反馈通道，逐 family "
+                             "分解；任一家族跌幅超过本次运行实测的噪声带就把该步整步回滚"
+                             "（残差按票 09 §4 重锚），该代记为 retention_rollback")
+    parser.add_argument("--retention-band-scale", type=float, default=1.0,
+                        help="噪声带的倍数（预注册值 1.0 = 逐字按实测带判定；改这个值属于"
+                             "偏离预注册规则，会写进台账）")
+    parser.add_argument("--retention-band-term", default="harness",
+                        choices=list(rl.BAND_TERMS),
+                        help="阈值挂在哪个实测标准误上（预注册值 harness = 同一中心在完整"
+                             "管道上重测的标准误；sampling = 本池 episode 级（簇校正）标准误；"
+                             "max = 两者较大者）。实测提醒：打分器逐位确定时 harness 项的 SE "
+                             "为 0、带 = 量化下限（1 题），而 dev 池上中心逐代逐 family 的自然"
+                             "摆动是 2–9 题 —— 用 harness 项会几乎每代回滚；改判据必须显式选 "
+                             "term 并记进台账，不要静默改数")
+    parser.add_argument("--noop-rescores", type=int, default=3,
+                        help="启动时对**同一个中心**在完整管道上重测的次数（噪声带来源；"
+                             "< 2 表示不测，带退回到量化下限 1/n）")
+    parser.add_argument("--feedback-noise", action="store_true",
+                        help="只测并记录噪声带，不启用 §1 回滚（诊断用）")
+    parser.add_argument("--feedback-slice",
+                        help="第 2 轮 §4b（默认关）：中心专用的反馈切片 jsonl，每代评一次，"
+                             "与 dev 池、封存池均不相交；默认只做监控，不进候选选择")
+    parser.add_argument("--feedback-slice-gate", action="store_true",
+                        help="把反馈切片接进**保留判定**（切片越带也触发回滚）；候选选择与"
+                             "验收门不变")
+    parser.add_argument("--prompt-variant", default=PROMPT_VARIANT_DEFAULT,
+                        choices=list(_prompt_variants()),
+                        help="终端头条形态（默认 frozen = 冻结的 'Answer:' 后缀形态）；"
+                             "另一个形态作为 harness swap 臂一并测量")
+    parser.add_argument("--terminal-swap", action=argparse.BooleanOptionalAction, default=True,
+                        help="第 2 轮 §3（默认开，仅终端 --confirm-only 路径）：q0 与中心在"
+                             "**两种 prompt 形态**下都测一遍封存池。代价：封存池每臂一次"
+                             "评分（v3 confirm 32,040 题 ≈99 s/臂），4 臂 ≈6-7 min + 载入；"
+                             "同一进程内多测几臂不算多次开箱（--looks 语义不变）")
+    parser.add_argument("--retention-terminal", action=argparse.BooleanOptionalAction, default=True,
+                        help="第 2 轮 §2（默认开，仅终端路径）：交付物 = 中心**当且仅当**它在"
+                             "封存池上严格优于 q0，否则交付物就是 q0，记录写 "
+                             "no_gain_delivered_baseline")
+    parser.add_argument("--terminal-export", action=argparse.BooleanOptionalAction, default=True,
+                        help="按 §2 的裁决导出交付载荷（中心或 q0）；关掉只写记录不落盘")
     parser.add_argument("--quantization", default="compressed-tensors")
     parser.add_argument("--linear-backend", default="cutlass")
     parser.add_argument("--max-model-len", type=int, default=1024)
@@ -1045,6 +1484,14 @@ def main() -> int:
             "no-answer attribution against q0 is unavailable")
         runner.q0_reference = None
 
+    # 第 2 轮 §4a：本次运行自己的反馈噪声带（只有打开 retention/噪声带/切片时才测）
+    if args.retention or args.feedback_noise or args.feedback_slice:
+        runner.measure_feedback_noise(live, state)
+    else:
+        log("feedback noise band not measured (--retention / --feedback-noise / "
+            "--feedback-slice are all off): a retention threshold would fall back to the "
+            "quantisation floor")
+
     if args.reference_check:
         check = runner.materialise_and_export(state, f"gen{state.generation:02d}")
         pl.json_dump(runner.out / "reference_check.json", check)
@@ -1085,15 +1532,50 @@ def main() -> int:
     if args.confirm_only:
         if runner.confirm_reqs is None:
             raise RuntimeError("--confirm-only requires --confirm")
-        arms = runner.confirm_arms(live, state)
-        pl.json_dump(runner.out / "records" / "confirm_arms.json", {
+        # §3：封存池上把 q0 与中心在**每一种** prompt 形态下都测一遍（同一进程 = 同一次开箱）
+        variants = terminal_variants(args)
+        log(f"terminal arms: variants={variants} (headline={args.prompt_variant}), "
+            f"both arms (q0, centre) measured per variant; this is ONE open of the pool "
+            f"regardless of how many arms are measured in this process")
+        arms_by_variant = runner.confirm_arms_by_variant(live, state)
+        headline = args.prompt_variant
+        # 向后兼容：`arms` 仍是头条形态的两臂（confirm_gate.py --measure 逐字不变）
+        payload = {
             "protocol": pl.PROTOCOL,
             "delta": args.tau,
             "center_sha256": center_sha,
             "center_generation": state.generation,
             "confirm_taskset": args.confirm,
-            "arms": arms,
-        })
+            "prompt_variant": headline,
+            "variants": variants,
+            "arms": arms_by_variant[headline],
+            "arms_by_variant": arms_by_variant,
+        }
+        # §2 交付物裁决（默认开）+ §3 swap 稳健性门
+        terminal = None
+        if args.retention_terminal:
+            terminal = rl.terminal_retention(arms_by_variant, headline=headline, delta=args.tau)
+            terminal["sealed_pool"] = {
+                "taskset": args.confirm,
+                "opens_in_this_process": 1,
+                "note": ("every variant's q0 and centre arms are measured on the same items in "
+                         "the same process: one open, several arms; confirm_gate.py --measure "
+                         "still consumes payload['arms'] (the headline variant) unchanged"),
+            }
+            if args.terminal_export and terminal.get("ok"):
+                terminal["payload"] = runner.export_terminal_payload(state, terminal["deliverable"])
+            pl.json_dump(runner.out / "terminal_retention.json", terminal)
+            pl.json_dump(runner.out / "prompt_swap.json", terminal["swap"])
+            payload["terminal_retention"] = terminal
+            log(f"terminal retention: deliverable={terminal['deliverable']} "
+                f"record={terminal['record']} "
+                f"headline gain={terminal['headline']['gain_mean']:+.4f} "
+                f"swap_gate={terminal['swap']['gate_passes']} "
+                f"claimable={terminal['claim']['gain_claimable']}")
+        else:
+            log("terminal retention DISABLED (--no-retention-terminal): the centre is exported "
+                "as the deliverable regardless of the sealed-pool comparison")
+        pl.json_dump(runner.out / "records" / "confirm_arms.json", payload)
         log("confirm arms written; compute the wording with "
             "confirm_gate.py --measure records/confirm_arms.json")
         return 0
@@ -1140,6 +1622,29 @@ def main() -> int:
                           "no_answer": runner.q0_reference["no_answer"]}
                          if runner.q0_reference else None),
         "no_answer_margin": args.no_answer_margin,
+        # 第 2 轮：反馈噪声带 + 保留配置（§4a 要求这个数写进 summary，而不是记忆里的常数）
+        "round2": {
+            "protocol": rl.PROTOCOL,
+            "feedback_noise": runner.feedback_noise,
+            "feedback_slice_noise": runner.slice_noise,
+            "flags": runner.retention_flags or {
+                "retention": bool(args.retention),
+                "retention_band_scale": args.retention_band_scale,
+                "feedback_slice": args.feedback_slice,
+                "feedback_slice_gate": bool(args.feedback_slice_gate),
+            },
+            "prompt_variant": args.prompt_variant,
+            "retention_rollbacks": [
+                {"generation": record["generation"],
+                 "breaches": [{"family": b["family"], "delta": b["delta"], "band": b["band"]}
+                              for b in record["retention"]["channels"]["feedback"]["breaches"]],
+                 "worst_family": record["retention"]["channels"]["feedback"]["worst_family"],
+                 "worst_delta": record["retention"]["channels"]["feedback"]["worst_delta"]}
+                for record in history
+                if record.get("retention", {}) and record["retention"].get("rollback")
+            ],
+            "centre_readings": len(runner.centre_readings),
+        },
         "state": state.to_dict(),
     })
     log(f"done in {elapsed}s; final centre sha256={center_sha}")
@@ -1297,6 +1802,11 @@ def enforce_stop_policy(args, runner: Runner, record: dict, history: list,
     ledger = record.get("residual_ledger") or {}
     aggregation = record.get("aggregation") or {}
     moved = int(ledger.get("moved", 0))
+    # 第 2 轮 §1：被回滚的整步等于"没有发生的更新"，与 moved == 0 同类记账
+    retention = record.get("retention") or {}
+    rolled_back = bool(retention.get("rollback"))
+    if rolled_back:
+        moved = 0
     support = int(aggregation.get("gradient_support", 0))
     qualified = int(aggregation.get("qualified_pairs", 0))
     rejected = int(ledger.get("rejected_beyond_grid", 0))
