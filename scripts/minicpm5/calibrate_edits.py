@@ -36,7 +36,7 @@ import pilot_lib as pl
 
 def _frobenius_sq(reader: pl.PayloadReader, layer: str) -> float:
     codes = reader.codes(layer).astype(np.int64)
-    values = pl.VALUE[codes]
+    values = np.asarray([pl.value_of(int(c)) for c in np.asarray(codes).reshape(-1)]).reshape(np.asarray(codes).shape)
     scale = reader.block_scales(layer).astype(np.float64)
     global_scale = reader.global_scale(layer)
     out, in_features = codes.shape
@@ -114,13 +114,13 @@ def main() -> int:
                 codes = reader.codes(layer).reshape(-1)
                 old, new = int(codes[flat]), edit["new_code"]
                 rank_move = abs(pl.rank_of(old) - pl.rank_of(new))
-                value_move = pl.VALUE[new] - pl.VALUE[old]
+                value_move = pl.value_of(new) - pl.value_of(old)
                 effective = float(reader.block_scales(layer).reshape(-1)[flat // pl.BLOCK]) * reader.global_scale(layer)
                 if rank_move == 1 and value_move != 0:
                     numerical += 1
                 elif value_move == 0:
                     equal_value += 1
-                if abs(pl.VALUE[old]) == pl.MAX_VALUE:
+                if abs(pl.value_of(old)) == pl.MAX_VALUE:
                     endpoint += 1
                 payload_bytes += 1
                 code_abs.append(abs(float(value_move)))

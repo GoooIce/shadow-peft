@@ -46,7 +46,8 @@ E2M1_VALUES = (
     0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
 )
 #: signed codes in numerical order; negative zero (8) shares zero's index
-ORDERED_CODES = (15, 14, 13, 12, 11, 10, 9, 0, 1, 2, 3, 4, 5, 6, 7)
+E2M1_ORDERED_CODES = (15, 14, 13, 12, 11, 10, 9, 0, 1, 2, 3, 4, 5, 6, 7)
+ORDERED_CODES = E2M1_ORDERED_CODES
 CODE_RANK = {code: rank for rank, code in enumerate(ORDERED_CODES)} | {8: 7}
 VALUE = np.asarray(E2M1_VALUES, dtype=np.float64)
 MAX_VALUE = 6.0
@@ -72,7 +73,8 @@ def configure_grid(kind: str) -> None:
     if kind == GRID_KIND:
         return
     if kind == "nvfp4-e2m1":
-        ORDERED_CODES = (15, 14, 13, 12, 11, 10, 9, 0, 1, 2, 3, 4, 5, 6, 7)
+        # the module-level definitions ARE the nvfp4 defaults; rebind to them
+        ORDERED_CODES = E2M1_ORDERED_CODES
         CODE_RANK = {code: rank for rank, code in enumerate(ORDERED_CODES)} | {8: 7}
         VALUE = np.asarray(E2M1_VALUES, dtype=np.float64)
         MAX_VALUE = 6.0
@@ -344,6 +346,8 @@ class PayloadReader:
     def tensors(self) -> dict[str, np.ndarray]:
         """All non-quantised tensors (config-independent BF16 side)."""
         out = {}
+        import torch
+
         skip = (".weight_packed", ".weight_scale", ".weight_global_scale", ".input_global_scale")
         for key in sorted(self._keys):
             if self.kind == "int8":
@@ -356,8 +360,6 @@ class PayloadReader:
                 continue
             tensor = self._handle.get_tensor(key)
             if str(tensor.dtype) == "torch.bfloat16":
-                import torch
-
                 tensor = tensor.to(torch.float32)   # numpy has no bf16
             out[key] = tensor.numpy()
         return out

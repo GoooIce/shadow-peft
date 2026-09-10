@@ -59,8 +59,11 @@ def test_int8_grid():
         check("state round-trip restores the grid",
               pl.CentreState.from_dict(json.loads(json.dumps(state.to_dict())))
               .codes == {"l0": {1: 9}})
-        check("grid feeds the identity hash",
-              "grid=int8-uniform" or state.sha256(lambda l: "b") is not None)
+        h_int8 = state.sha256(lambda l: "b")
+        pl.configure_grid("nvfp4-e2m1")
+        h_nvfp4_same_codes = state.sha256(lambda l: "b")
+        check("grid feeds the identity hash (same codes, different grids -> different ids)",
+              h_int8 != h_nvfp4_same_codes)
     finally:
         pl.configure_grid("nvfp4-e2m1")
     check("nvfp4 restored", pl.canonical_code(8) == 0 and pl.value_of(7) == 6.0)

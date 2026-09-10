@@ -179,16 +179,21 @@ def main() -> int:
 
     started = time.time()
     reader = pl.PayloadReader(Path(args.model).expanduser())
-    layers = [key[: -len(".weight_packed")] for key in sorted(reader._keys)
-              if key.endswith(".weight_packed")]
+    if reader.kind == "int8":
+        pl.configure_grid("int8-uniform")
+    suffix = ".weight" if reader.kind == "int8" else ".weight_packed"
+    layers = [key[: -len(suffix)] for key in sorted(reader._keys)
+              if key.endswith(suffix)
+              and (reader.kind != "int8"
+                   or f"{key[: -len('.weight')]}.weight_scale" in reader._keys)]
     groups = pl.build_groups(layers)
     masks, census = pl.group_census(groups, reader)
 
     def base_hash_of(layer: str) -> str:
         import hashlib
 
-        packed = reader._handle.get_tensor(f"{layer}.weight_packed")
-        return hashlib.sha256(packed.reshape(-1).numpy().tobytes()).hexdigest()[:24]
+        tensor = reader._handle.get_tensor(f"{layer}{suffix}")
+        return hashlib.sha256(tensor.contiguous().numpy().tobytes()).hexdigest()[:24]
 
     generations = load_generation(Path(args.records).expanduser(), args.seed, groups, masks)
     alphas = [float(item) for item in args.alphas.split(",")]
