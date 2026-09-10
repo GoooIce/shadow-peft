@@ -616,18 +616,36 @@ def probe_mirror_gate(ledger: dict) -> dict:
             partial += 1
     support = [(gen, value) for gen, value in _record_series(ledger, "gradient_support")
                if value is not None]
+    run_protocol = ((ledger.get("summary") or {}).get("protocol")
+                    or (ledger.get("state") or {}).get("protocol") or "")
+    ungated = "ungated" in run_protocol
+    if ungated:
+        pair_gate = _entry("mirror_pair_gate", "removed",
+                           "per-side non-inferiority gate -- removed by the QES-original "
+                           "preregistration (all pairs aggregate; dropped_pairs is empty "
+                           "by construction under this protocol)",
+                           fired=0, first=None, last=None,
+                           effect="mechanism absent by protocol; dropped_pairs seen as data: "
+                                  + (f"{len(with_drops)} generation(s) non-empty"
+                                     if with_drops else "always empty (as expected)"),
+                           evidence={"run_protocol": run_protocol,
+                                     "drop_generations": with_drops,
+                                     "dropped_total": sum(len(value)
+                                                          for _g, value in dropped)})
+    else:
+        pair_gate = _entry("mirror_pair_gate", _status(len(dropped), bool(with_drops)),
+                           "drop a mirror pair as a whole when either side breaches the "
+                           "non-inferiority gate (tau)",
+                           fired=sum(len(value) for _g, value in dropped),
+                           first=with_drops[0] if with_drops else None,
+                           last=with_drops[-1] if with_drops else None,
+                           effect=(f"dropped pairs on {len(with_drops)} generation(s)"
+                                   if with_drops else "no pair was ever dropped"),
+                           evidence={"generations": len(dropped), "drop_generations":
+                                     with_drops,
+                                     "dropped_total": sum(len(value) for _g, value in dropped)})
     return {
-        "pair_gate": _entry("mirror_pair_gate", _status(len(dropped), bool(with_drops)),
-                            "drop a mirror pair as a whole when either side breaches the "
-                            "non-inferiority gate (tau)",
-                            fired=sum(len(value) for _g, value in dropped),
-                            first=with_drops[0] if with_drops else None,
-                            last=with_drops[-1] if with_drops else None,
-                            effect=(f"dropped pairs on {len(with_drops)} generation(s)"
-                                    if with_drops else "no pair was ever dropped"),
-                            evidence={"generations": len(dropped), "drop_generations":
-                                      with_drops,
-                                      "dropped_total": sum(len(value) for _g, value in dropped)}),
+        "pair_gate": pair_gate,
         "rank_reward": _entry("rank_shape_reward", _status(len(rewards), partial > 0),
                               "weight mirror pairs by the rank shape reward 1 - 2*rank/(M-1)",
                               fired=len(rewards),

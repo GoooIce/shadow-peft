@@ -30,7 +30,7 @@ from pathlib import Path
 
 import numpy as np
 
-PROTOCOL = "minicpm5-rank-mirror/v1"
+PROTOCOL = "minicpm5-rank-mirror-ungated/v2"
 GROUP_PROTOCOL = "minicpm5-13-groups/v1"
 RESIDUAL_COORDS = "code-value/e2m1/fp32"
 CLAMP = 1.5
@@ -536,25 +536,22 @@ def rank_shape_reward(values: list[float]) -> list[float]:
 def aggregate(
     pairs: list[dict],
     realized: list[dict[tuple[str, int], float]],
-    tau: float,
 ) -> dict:
-    """Mirror-pair aggregation in the realised-displacement space.
+    """Mirror-pair aggregation in the realised-displacement space (QES original).
 
-    ``pairs`` carry ``fitness`` for both sides plus the paired difference against
-    the centre; a pair is dropped as a whole when either side breaches the
-    non-inferiority gate (``delta_center >= -tau``).
+    Every mirror pair participates: the paired fitness difference is rank-shaped
+    into symmetric ``+/-`` coefficients and each side contributes its realised
+    displacement.  There is no per-side qualification gate -- the 09-ticket
+    non-inferiority gate starved the search on W4A4 terrain (three runs died
+    with ``moved=0``); the original QES update aggregates all seeds.  Schema
+    fields ``qualified_pairs``/``dropped_pairs`` are kept for ledger readers;
+    they now mean "all pairs" / "always empty".
     """
-    qualified = []
-    dropped = []
-    for pair in pairs:
-        plus, minus = pair["plus"], pair["minus"]
-        ok = plus["delta_center"] >= -tau and minus["delta_center"] >= -tau
-        (qualified if ok else dropped).append(pair)
-    diffs = [pair["plus"]["fitness"] - pair["minus"]["fitness"] for pair in qualified]
+    diffs = [pair["plus"]["fitness"] - pair["minus"]["fitness"] for pair in pairs]
     rewards = rank_shape_reward(diffs)
     gradient: dict[tuple[str, int], float] = {}
     weight_total = 0.0
-    for pair, reward in zip(qualified, rewards):
+    for pair, reward in zip(pairs, rewards):
         weight_total += 2.0 * abs(reward)
         for side, coefficient in (("plus", reward), ("minus", -reward)):
             for coordinate, value in realized[pair[side]["index"]].items():
@@ -563,8 +560,8 @@ def aggregate(
         gradient = {key: value / weight_total for key, value in gradient.items()}
     return {
         "gamma": GAMMA,
-        "qualified_pairs": len(qualified),
-        "dropped_pairs": [pair["pair"] for pair in dropped],
+        "qualified_pairs": len(pairs),
+        "dropped_pairs": [],
         "pair_diffs": diffs,
         "pair_rewards": rewards,
         "gradient": gradient,

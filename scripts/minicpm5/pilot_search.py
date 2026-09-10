@@ -974,7 +974,7 @@ class Runner:
                 "minus": {"index": minus["index"], "fitness": minus["fitness"]["acc"],
                           "delta_center": minus["delta_center"]},
             })
-        aggregation = pl.aggregate(pairs_payload, realized_list, args.tau)
+        aggregation = pl.aggregate(pairs_payload, realized_list)
         gradient = aggregation.pop("gradient")
         # 第 2 轮 §1：步前快照（只有 --retention 才取；快照覆盖 apply_step 会访问的全部坐标）
         step_snapshot = None
@@ -1325,7 +1325,9 @@ def main() -> int:
     parser.add_argument("--edits", type=int, default=16)
     parser.add_argument("--edits-plan", help="json: group_id -> sparse edit count")
     parser.add_argument("--alpha", type=float, default=1.0)
-    parser.add_argument("--tau", type=float, default=0.02, help="non-inferiority tolerance (accuracy)")
+    parser.add_argument("--tau", type=float, default=0.02,
+                        help="confirm-time non-inferiority tolerance (accuracy); "
+                             "does not gate aggregation (QES-original, ungated)")
     parser.add_argument("--seed", type=int, default=20260910)
     parser.add_argument("--limit", type=int, default=0, help="dev item limit (smoke)")
     parser.add_argument("--chunk", type=int, default=256)
