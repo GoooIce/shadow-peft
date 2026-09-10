@@ -118,11 +118,39 @@ def test_edge_cases():
           and empty["dropped_pairs"] == [], empty)
 
 
+def test_sha256_ignores_empty_layer_buckets():
+    """delta_map drops empty buckets, so the identity hash must too.
+
+    set_code returning the last coordinate of a layer to base leaves an empty
+    ``{}`` bucket behind; before the fix the same centre hashed differently
+    before/after a state.json round-trip (cross-process resume mismatch).
+    """
+    with_bucket = pl.CentreState(generation=1)
+    with_bucket.set_code("l0", 1, 5, base=0)
+    with_bucket.set_code("l1", 2, 3, base=0)
+    with_bucket.codes["l2"] = {}                       # the empty-bucket artefact
+    round_tripped = pl.CentreState.from_dict(with_bucket.to_dict())
+    check("sha256 is invariant to empty layer buckets",
+          with_bucket.sha256(lambda layer: f"base-{layer}")
+          == round_tripped.sha256(lambda layer: f"base-{layer}"),
+          (with_bucket.delta_map(), round_tripped.delta_map()))
+    check("...and delta maps agree", with_bucket.delta_map() == round_tripped.delta_map())
+    emptied = pl.CentreState(generation=1)
+    emptied.set_code("l0", 1, 5, base=0)
+    emptied.set_code("l1", 2, 0, base=0)               # back to base -> empty bucket
+    no_artefact = pl.CentreState(generation=1)
+    no_artefact.set_code("l0", 1, 5, base=0)           # same delta, no l1 key at all
+    check("a coordinate returned to base does not change the identity",
+          emptied.sha256(lambda layer: f"base-{layer}")
+          == no_artefact.sha256(lambda layer: f"base-{layer}"))
+
+
 def main():
     test_all_pairs_aggregate_regardless_of_delta()
     test_symmetric_coefficients_and_weight()
     test_signature_and_protocol()
     test_edge_cases()
+    test_sha256_ignores_empty_layer_buckets()
     print("qes-faithful aggregation: all checks passed")
 
 

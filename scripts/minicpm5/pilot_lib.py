@@ -358,10 +358,15 @@ class CentreState:
         lookup = base_hash_of if callable(base_hash_of) else base_hash_of.__getitem__
         digest = hashlib.sha256()
         digest.update(PROTOCOL.encode())
+        # empty layer buckets carry no delta; hashing them would make the same
+        # centre hash differently before/after a state.json round-trip
+        # (delta_map drops them, set_code can leave them behind)
         for layer in sorted(self.codes):
+            bucket = self.codes[layer]
+            if not bucket:
+                continue
             digest.update(layer.encode())
             digest.update(str(lookup(layer)).encode())
-            bucket = self.codes[layer]
             for flat in sorted(bucket):
                 digest.update(f"{flat}:{bucket[flat]}".encode())
         return digest.hexdigest()
