@@ -111,6 +111,37 @@ def compare_tensor(key: str, left: torch.Tensor, right: torch.Tensor,
         row["canonical_code_diffs"] = 0
         return row
 
+    if left.dtype == torch.int8:
+        # Uniform int8 grid (W8A8 line): every byte IS a code and the codes are
+        # the values, so all three calibres collapse to exact signed-code
+        # equality and the 0<->8 channel is empty by definition.  Critically,
+        # bytes 0x00 and 0x08 are codes 0 and +8 -- a REAL value difference
+        # that the packed-nibble path below would fold onto the E2M1 zero and
+        # silently wave through the gate.
+        a_c = left.detach().cpu().contiguous().reshape(-1).to(torch.int16).numpy()
+        b_c = right.detach().cpu().contiguous().reshape(-1).to(torch.int16).numpy()
+        mask = a_c != b_c
+        value = int(mask.sum())
+        row["raw_code_diffs"] = value
+        row["value_diffs"] = value
+        row["canonical_code_diffs"] = value
+        row["zero8_diffs"] = 0
+        row["equal_value_diffs"] = 0
+        examples = []
+        for position in np.flatnonzero(mask)[:max_diffs].tolist():
+            examples.append({
+                "flat": int(position),
+                "byte": int(position),
+                "left_code": int(a_c[position]),
+                "right_code": int(b_c[position]),
+                "left_value": float(a_c[position]),
+                "right_value": float(b_c[position]),
+                "class": "value",
+            })
+        row["diff_examples"] = examples
+        row["diff_examples_truncated"] = value > len(examples)
+        return row
+
     if _is_packed(key):
         # nibble layout: even flat index = low nibble (compressed-tensors)
         positions = np.flatnonzero(raw_mask)
@@ -241,9 +272,12 @@ def main() -> int:
         "e2m1_values": list(E2M1_VALUES),
         "calibres": {
             "raw_code_diffs": "code positions as stored (the pre-ticket-18 gate)",
-            "value_diffs": "decoded E2M1 value differs per coordinate (the frozen gate)",
-            "canonical_code_diffs": "code positions after folding 8->0 on both sides",
-            "zero8_diffs": "raw differences that are the numerically empty 0<->8 channel",
+            "value_diffs": "decoded E2M1 value differs per coordinate (the frozen gate); "
+                           "on int8 tensors this is exact signed-code equality",
+            "canonical_code_diffs": "code positions after folding 8->0 on both sides "
+                                    "(nvfp4 only; identical to value_diffs on int8)",
+            "zero8_diffs": "raw differences that are the numerically empty 0<->8 channel "
+                           "(nvfp4 only; always 0 on int8)",
         },
     }
     summary.update(totals)
