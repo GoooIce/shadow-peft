@@ -82,3 +82,15 @@ gradient[coord] += coefficient * realized[...][coord]   # plus: +reward, minus: 
 4. `alpha_sweep.py`：重放调用点同步（记录里的 tau 不再回放进聚合）。
 5. `mechanism_audit.py`：门相关文案/字段改（门已不存在，审计不得再把它列为活机制）。
 6. 单测：新增「全部对参与聚合、极端负 delta 仍参与、梯度非空」三项；跑 improve 分支既有 176 项单测确认无回归。
+
+---
+
+## 10. 战役冻结补充（2026-09-10 深夜，int8 冒烟通过后写就并冻结）
+
+- **KL 基线（W8A8 q0 实测）**：**1.1040**（冒烟 gen0；W4A4 是 2.1346——8 位把 KL 贴近 BF16 一半）。绝对阈 = 3× = **3.312**；趋势材质带 = 1.5× = **1.656**。bf16 参照沿用冻结的 `bf16_kl.json`。
+- **冒烟证据**（`goooinext:~/minicpm5-w8a8qes/out/smoke_seed20260914`，2 代 × 10 候选）：硬门 2/2（336 张量 raw/value 全零，int8 口径实测）；live readback 2/2 value-clean；refit ≈93 ms/候选；候选 d 均值 ≈ **+0.008**（对比 W4A4 v3 dev 的 −3.6——地形平缓一个量级，去门后 M 恒满）。
+- **机器与排程**：**仅 `goooinext`**（`gooo` 另有用途不可抢占）；种子 **20260915 / 20260916 串行**，参数除种子外逐位相同。
+- **参数**：300 代 × 50 候选 × 32 改码、α=12 起点 + 阶梯、τ=0.02（仅判定期容差）、`--verify-live --gate-halt --stop-policy --alpha-ladder --linear-backend triton`、kernel_base 为 int8 导出（sha 见 manifest）。
+- **拒答模式处置（不改适应度）**：沿用 run300 的 no-answer 仪表（逐代率 + q0 启动参照 + attribution verdict）；**主张规则**：任何正收益必须在「双方都作答」子集上成立（`gain_both`），否则判 artifact-dominated 如实报告；q0 不答率超出按 family 披露。
+- **判定**：每种子停止后各开一次 v4 confirm（`--confirm-only`，同进程 q0/中心两臂 + swap 形态 = 一次开箱）；`confirm_gate.py --looks 2`；v3 final 保持封存。
+- **预计墙钟**：≈2.7 s/候选 → ≈11–13 h/种子，串行两枚 ≈1 天。
