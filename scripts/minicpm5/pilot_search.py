@@ -1005,10 +1005,15 @@ class Runner:
         state_sha = state.sha256(self._base_hash)
 
         # --- §1 定向修订：读回反馈通道 -> 逐 family 分解 -> 越带则回滚 ----------
-        retention, centre_post_rows = self.retention_check(
-            state, generation, live, centre_rows, centre_sha, state_sha,
-            ledger, step_snapshot, step_coordinates,
-        )
+        # docstring 契约：--retention 关闭时不进 retention_check（无额外评分、
+        # 无回滚判定）；快照也只在开时拍，否则 rollback 会拿着 None 快照崩掉。
+        if args.retention:
+            retention, centre_post_rows = self.retention_check(
+                state, generation, live, centre_rows, centre_sha, state_sha,
+                ledger, step_snapshot, step_coordinates,
+            )
+        else:
+            retention, centre_post_rows = None, None
         if retention and retention["rollback"]:
             state_sha = retention["centre_restored_sha256"]
             deploy = retention["redeploy"]
