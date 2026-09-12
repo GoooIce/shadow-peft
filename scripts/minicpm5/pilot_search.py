@@ -986,9 +986,11 @@ class Runner:
             minus = candidate_records[2 * pair_index + 1]
             pairs_payload.append({
                 "pair": pair_index,
-                "plus": {"index": plus["index"], "fitness": plus["fitness"]["acc"],
+                "plus": {"index": plus["index"],
+                         "fitness": plus["fitness"][args.fitness_metric],
                          "delta_center": plus["delta_center"]},
-                "minus": {"index": minus["index"], "fitness": minus["fitness"]["acc"],
+                "minus": {"index": minus["index"],
+                          "fitness": minus["fitness"][args.fitness_metric],
                           "delta_center": minus["delta_center"]},
             })
         aggregation = pl.aggregate(pairs_payload, realized_list)
@@ -1366,6 +1368,12 @@ def main() -> int:
     parser.add_argument("--edits", type=int, default=16)
     parser.add_argument("--edits-plan", help="json: group_id -> sparse edit count")
     parser.add_argument("--alpha", type=float, default=1.0)
+    parser.add_argument("--fitness-metric", choices=("acc", "gold_prob"),
+                        default="acc",
+                        help="statistic the mirror-pair aggregation ranks.  acc is the "
+                             "frozen campaign default; gold_prob (continuous) is for "
+                             "tasksets where 32-code int8 perturbations never flip a "
+                             "first-token decision and acc is provably flat")
     parser.add_argument("--tau", type=float, default=0.02,
                         help="confirm-time non-inferiority tolerance (accuracy); "
                              "does not gate aggregation (QES-original, ungated)")
