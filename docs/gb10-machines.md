@@ -20,6 +20,7 @@
 - **本地链式命令不可靠**:`ssh A 'cmd1 && sleep && cmd2'` 的本地包装会被工具后台化导致后半截丢失。顺序任务写成**远端 bash 链脚本**再 nohup 整个脚本。
 - **nohup 要三重重定向**(`> log 2>&1 < /dev/null`),且 dc4a 上观察到 ssh 会话收尾会连带清算 nohup 子进程——**长跑一律走 setsid 启动器**:小的 `launch_xxx.sh`(`exec setsid .venv/bin/python ... 三重重定向`),然后 `nohup launch_xxx.sh`。
 - **pkill 两个坑**:①模式会匹配 ssh 包装自身命令行,用 `[x]` 中括号技巧;②**远端命令的文本里含模式串也会自杀**(heredoc 写的启动脚本里含脚本名时尤其如此)——kill 与 launch 永远分开两条 ssh。
+- **pgrep -f 等待同样会被骗**(2026-09-12 实战):`while pgrep -f "script.sh"; do sleep; done` 这种排队等待会匹配到 ①**写脚本时遗留的 heredoc 进程**(它的命令行文本里含整个脚本内容,包括那行等待模式本身)②**你自己的诊断命令**(命令行里提到该脚本名)。后果是队列静默卡死(等一个永远不退出的幽灵,真任务从未启动)。**排队一律用 PID 等待**:启动时记 `$!`,等待器 `while kill -0 <PID>; do sleep 60; done`,绝不用进程名模式。
 
 ## 发训练与验收
 
