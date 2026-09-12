@@ -25,6 +25,7 @@ import hashlib
 import json
 import random
 import re
+from statistics import fmean, pstdev
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -36,6 +37,16 @@ RESIDUAL_COORDS = "code-value/e2m1/fp32"
 CLAMP = 1.5
 GAMMA = 1.0
 BLOCK = 16
+COEFF_CLIP = 3.0
+
+#: aggregation semantics of the running line; feeds the centre identity hash so
+#: two update rules can never share a centre namespace
+AGGREGATION_VARIANT = "rank-sumab"
+
+
+def set_aggregation_variant(name: str) -> None:
+    global AGGREGATION_VARIANT
+    AGGREGATION_VARIANT = str(name)
 
 # --------------------------------------------------------------------------- #
 # quantisation grid: NVFP4 E2M1 (default) or INT8 uniform (W8A8 line)
@@ -459,6 +470,7 @@ class CentreState:
         digest = hashlib.sha256()
         digest.update(PROTOCOL.encode())
         digest.update(f"grid={GRID_KIND}".encode())
+        digest.update(f"agg={AGGREGATION_VARIANT}".encode())
         # empty layer buckets carry no delta; hashing them would make the same
         # centre hash differently before/after a state.json round-trip
         # (delta_map drops them, set_code can leave them behind)
@@ -477,6 +489,7 @@ class CentreState:
             "generation": self.generation,
             "protocol": PROTOCOL,
             "grid": GRID_KIND,
+            "aggregation": AGGREGATION_VARIANT,
             "residual_coordinates": RESIDUAL_COORDS,
             "clamp": CLAMP,
             "gamma": GAMMA,
@@ -656,22 +669,52 @@ def rank_shape_reward(values: list[float]) -> list[float]:
     return reward
 
 
+def zscore_reward(values: list[float], clip: float = COEFF_CLIP) -> list[float]:
+    """Paper-default coefficients: ``clip((d - mean)/std, +/-clip)``.
+
+    Exact port of the QES driver's mirror branch (``int4_perturb.py`` L648-655):
+    per-pair reward differences are standardised (population std, ``+1e-8``
+    guard) and clipped to ``+/-coeff_clip`` (default 3.0).  Unlike the rank
+    transform this carries the *magnitude* of the paired difference, so a
+    strong pair votes proportionally harder.
+    """
+    if not values:
+        return []
+    mean = fmean(values)
+    std = pstdev(values)
+    return [min(clip, max(-clip, (v - mean) / (std + 1e-8))) for v in values]
+
+
 def aggregate(
     pairs: list[dict],
     realized: list[dict[tuple[str, int], float]],
+    coef_transform: str = "rank",
+    coef_normalize: str = "sum-abs",
+    coeff_clip: float = COEFF_CLIP,
 ) -> dict:
-    """Mirror-pair aggregation in the realised-displacement space (QES original).
+    """Mirror-pair aggregation in the realised-displacement space.
 
-    Every mirror pair participates: the paired fitness difference is rank-shaped
-    into symmetric ``+/-`` coefficients and each side contributes its realised
-    displacement.  There is no per-side qualification gate -- the 09-ticket
-    non-inferiority gate starved the search on W4A4 terrain (three runs died
-    with ``moved=0``); the original QES update aggregates all seeds.  Schema
-    fields ``qualified_pairs``/``dropped_pairs`` are kept for ledger readers;
-    they now mean "all pairs" / "always empty".
+    Every mirror pair participates; there is no per-side qualification gate
+    (the 09-ticket gate starved the search on W4A4 terrain).
+
+    ``coef_transform``
+        ``rank`` (frozen campaign default): ``1 - 2*rank/(M-1)``.
+        ``zscore`` (paper default): ``clip((d-mean)/std, +/-coeff_clip)``.
+    ``coef_normalize``
+        ``sum-abs`` (frozen default): divide by ``2*sum(|reward|) ~ M+1``.
+        ``none`` (paper): no coefficient-sum division -- the paper normalises
+        only by the noise sigma, which in our unit choice (perturbations are
+        single code steps, sigma == 1) is the identity.  This is the setting
+        whose absence fixes the population-size dilution: with ``sum-abs`` a
+        larger N shrinks the per-coordinate step until the update vanishes.
     """
     diffs = [pair["plus"]["fitness"] - pair["minus"]["fitness"] for pair in pairs]
-    rewards = rank_shape_reward(diffs)
+    if coef_transform == "zscore":
+        rewards = zscore_reward(diffs, coeff_clip)
+    elif coef_transform == "rank":
+        rewards = rank_shape_reward(diffs)
+    else:
+        raise ValueError(f"unknown coef_transform {coef_transform!r}")
     gradient: dict[tuple[str, int], float] = {}
     weight_total = 0.0
     for pair, reward in zip(pairs, rewards):
@@ -679,10 +722,15 @@ def aggregate(
         for side, coefficient in (("plus", reward), ("minus", -reward)):
             for coordinate, value in realized[pair[side]["index"]].items():
                 gradient[coordinate] = gradient.get(coordinate, 0.0) + coefficient * value
-    if weight_total:
-        gradient = {key: value / weight_total for key, value in gradient.items()}
+    if coef_normalize == "sum-abs":
+        if weight_total:
+            gradient = {key: value / weight_total for key, value in gradient.items()}
+    elif coef_normalize != "none":
+        raise ValueError(f"unknown coef_normalize {coef_normalize!r}")
     return {
         "gamma": GAMMA,
+        "coef_transform": coef_transform,
+        "coef_normalize": coef_normalize,
         "qualified_pairs": len(pairs),
         "dropped_pairs": [],
         "pair_diffs": diffs,

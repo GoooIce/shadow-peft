@@ -96,12 +96,68 @@ def test_symmetric_coefficients_and_weight():
 def test_signature_and_protocol():
     """The tau parameter is gone and the protocol string is the ungated v2."""
     params = list(inspect.signature(pl.aggregate).parameters)
-    check("aggregate takes (pairs, realized) only", params == ["pairs", "realized"], params)
+    check("aggregate's required parameters stay (pairs, realized)",
+          params[:2] == ["pairs", "realized"]
+          and params[2:] == ["coef_transform", "coef_normalize", "coeff_clip"], params)
     check("PROTOCOL is the ungated v2", pl.PROTOCOL == "minicpm5-rank-mirror-ungated/v2",
           pl.PROTOCOL)
     help_text = inspect.getdoc(pl.aggregate) or ""
     check("docstring states the ungated QES-original semantics",
           "no per-side qualification gate" in help_text, help_text)
+
+
+def test_zscore_coefficients():
+    """Paper-default coefficients: clip((d - mean)/std, +/-clip), symmetric."""
+    diffs = [0.010, 0.020, -0.010, 0.030, 0.000, 0.005, 0.015, -0.005]
+    coeffs = pl.zscore_reward(diffs, clip=3.0)
+    mean = sum(diffs) / len(diffs)
+    var = sum((d - mean) ** 2 for d in diffs) / len(diffs)
+    std = var ** 0.5
+    manual = [min(3.0, max(-3.0, (d - mean) / (std + 1e-8))) for d in diffs]
+    check("zscore matches the paper formula elementwise",
+          all(abs(a - b) < 1e-12 for a, b in zip(coeffs, manual)), (coeffs, manual))
+    check("zscore is centred", abs(sum(coeffs)) < 1e-9, sum(coeffs))
+    check("clip binds on outliers",
+          pl.zscore_reward([0.0] * 19 + [10.0], clip=3.0)[-1] == 3.0)
+    pairs = [make_pair(i, 0.5 + d, 0.5) for i, d in enumerate(diffs)]
+    realized = [{("l0", i): 1.0} for i in range(len(diffs))] + \
+               [{("l0", i): -1.0} for i in range(len(diffs))]
+    out = pl.aggregate(pairs, realized, coef_transform="zscore", coef_normalize="none")
+    check("zscore mode reports its transform",
+          out["coef_transform"] == "zscore" and out["coef_normalize"] == "none", out)
+
+
+def test_no_normalization_keeps_scale():
+    """coef_normalize=none must not divide the gradient (paper convention)."""
+    pairs = [make_pair(0, 0.60, 0.50), make_pair(1, 0.52, 0.50)]
+    realized = [{("l0", 0): 1.0}, {("l0", 0): -1.0},
+                {("l0", 1): 1.0}, {("l0", 1): -1.0}]
+    raw = pl.aggregate(pairs, realized, coef_transform="rank", coef_normalize="none")
+    norm = pl.aggregate(pairs, realized, coef_transform="rank", coef_normalize="sum-abs")
+    rewards = raw["pair_rewards"]
+    # coordinate l0:0 gets 2*reward_0 (plus +1 with +r, minus -1 with -r)
+    check("no-normalization keeps the raw coefficient sum",
+          abs(raw["gradient"][("l0", 0)] - 2.0 * rewards[0]) < 1e-12,
+          (raw["gradient"], rewards))
+    check("sum-abs divides by weight_total as before",
+          abs(norm["gradient"][("l0", 0)] - 2.0 * rewards[0] / norm["weight_total"]) < 1e-12,
+          norm["gradient"])
+    check("the two normalizations differ whenever weight_total != 1",
+          abs(norm["weight_total"] - 1.0) > 0.5, norm["weight_total"])
+
+
+def test_aggregation_variant_in_identity():
+    """The identity hash must namespace update semantics."""
+    state = pl.CentreState(generation=1)
+    state.set_code("l0", 1, 5, base=0)
+    pl.set_aggregation_variant("rank-sumab")
+    first = state.sha256(lambda layer: "b")
+    pl.set_aggregation_variant("zscore-none")
+    second = state.sha256(lambda layer: "b")
+    check("same weights under different update rules hash differently",
+          first != second)
+    pl.set_aggregation_variant("rank-sumab")
+    check("variant round-trips", state.sha256(lambda layer: "b") == first)
 
 
 def test_edge_cases():
@@ -149,6 +205,9 @@ def main():
     test_all_pairs_aggregate_regardless_of_delta()
     test_symmetric_coefficients_and_weight()
     test_signature_and_protocol()
+    test_zscore_coefficients()
+    test_no_normalization_keeps_scale()
+    test_aggregation_variant_in_identity()
     test_edge_cases()
     test_sha256_ignores_empty_layer_buckets()
     print("qes-faithful aggregation: all checks passed")

@@ -993,7 +993,12 @@ class Runner:
                           "fitness": minus["fitness"][args.fitness_metric],
                           "delta_center": minus["delta_center"]},
             })
-        aggregation = pl.aggregate(pairs_payload, realized_list)
+        pl.set_aggregation_variant(
+            f"{args.coef_transform}-{'sumab' if args.coef_normalize == 'sum-abs' else 'none'}")
+        aggregation = pl.aggregate(pairs_payload, realized_list,
+                                   coef_transform=args.coef_transform,
+                                   coef_normalize=args.coef_normalize,
+                                   coeff_clip=args.coeff_clip)
         gradient = aggregation.pop("gradient")
         # 第 2 轮 §1：步前快照（只有 --retention 才取；快照覆盖 apply_step 会访问的全部坐标）
         step_snapshot = None
@@ -1001,7 +1006,7 @@ class Runner:
         if args.retention:
             step_coordinates = pl.step_coordinates(state, gradient)
             step_snapshot = pl.snapshot_layers(state, step_coordinates)
-        ledger = pl.apply_step(state, self.reader, gradient, args.alpha)
+        ledger = pl.apply_step(state, self.reader, gradient, args.alpha, gamma=args.gamma)
         state.generation = generation + 1
         deploy = self.patch(live, center_delta(state))
         state_sha = state.sha256(self._base_hash)
@@ -1060,6 +1065,10 @@ class Runner:
                 for cand in candidate_records
             ],
             "aggregation": {
+                "coef_transform": aggregation["coef_transform"],
+                "coef_normalize": aggregation["coef_normalize"],
+                "coeff_clip": args.coeff_clip,
+                "gamma": args.gamma,
                 "qualified_pairs": aggregation["qualified_pairs"],
                 "dropped_pairs": aggregation["dropped_pairs"],
                 "pair_diffs": aggregation["pair_diffs"],
@@ -1368,6 +1377,17 @@ def main() -> int:
     parser.add_argument("--edits", type=int, default=16)
     parser.add_argument("--edits-plan", help="json: group_id -> sparse edit count")
     parser.add_argument("--alpha", type=float, default=1.0)
+    parser.add_argument("--coef-transform", choices=("rank", "zscore"), default="rank",
+                        help="mirror-pair coefficient transform: rank (frozen campaign "
+                             "default) or zscore (paper default, clipped to +/-coeff-clip)")
+    parser.add_argument("--coeff-clip", type=float, default=pl.COEFF_CLIP,
+                        help="zscore coefficient clip (paper default 3.0)")
+    parser.add_argument("--coef-normalize", choices=("sum-abs", "none"), default="sum-abs",
+                        help="sum-abs divides by 2*sum(|reward|) ~ M+1 (frozen default; "
+                             "dilutes the step as N grows); none matches the paper (which "
+                             "normalises only by the noise sigma, == 1 in our units)")
+    parser.add_argument("--gamma", type=float, default=pl.GAMMA,
+                        help="residual decay (paper A.3: 0.9; frozen campaign default 1.0)")
     parser.add_argument("--fitness-metric", choices=("acc", "gold_prob"),
                         default="acc",
                         help="statistic the mirror-pair aggregation ranks.  acc is the "
