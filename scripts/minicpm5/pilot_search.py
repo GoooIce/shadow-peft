@@ -961,7 +961,7 @@ class Runner:
         centre_attr = self.attribution(centre_rows)
         self.observe_centre_reading(centre_sha, centre_rows, f"pre-gen{generation}")
         log(f"gen{generation} centre dev acc={centre_summary['acc']:.4f} "
-            f"gold_prob={centre_summary['gold_prob']:.4f} "
+            f"gold_prob={centre_summary['gold_prob']} "
             f"na={centre_na['overall']['rate']:.4f}")
 
         candidate_records = []
@@ -999,7 +999,7 @@ class Runner:
             pl.json_dump(self.out / "records" / f"cand_gen{generation:02d}_{candidate.index:03d}.json",
                          {"generation": generation, "candidate": candidate_records[-1], "rows": rows})
             log(f"  cand{candidate.index:03d} pair{candidate.pair}{'+' if candidate.sign > 0 else '-'} "
-                f"acc={summary['acc']:.4f} gp={summary['gold_prob']:.4f} "
+                f"acc={summary['acc']:.4f} gp={summary['gold_prob']} "
                 f"na={candidate_records[-1]['no_answer']['overall']['rate']:.4f} "
                 f"d={stats['mean']:+.4f} sd={stats['sd']:.4f} "
                 f"refit={patch.get('refit_seconds', 0)*1000:.0f}ms "
@@ -1621,7 +1621,7 @@ def main() -> int:
         rows, timing = runner.score(runner.dev_reqs, "centre")
         summary = pl.fitness_summary(rows)
         log(f"centre gen{state.generation} dev: acc={summary['acc']:.4f} "
-            f"gp={summary['gold_prob']:.4f} episodes={summary['episodes']} "
+            f"gp={summary['gold_prob']} episodes={summary['episodes']} "
             f"({timing['wall_seconds']}s)")
         baseline = {
             "generation": state.generation,

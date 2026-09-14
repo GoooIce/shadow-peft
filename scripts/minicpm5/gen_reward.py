@@ -56,6 +56,10 @@ def score_rows_gen(outputs, items) -> list[dict]:
         text = output.outputs[0].text
         rows.append({
             "item": item,
+            "id": item["id"],
+            "family": item.get("family"),
+            "stratum": item.get("stratum"),
+            "tier": item.get("tier"),
             "gen_text": text,
             "gen_n_tokens": len(output.outputs[0].token_ids),
             "gen_decision": parse_yes_no(text),
