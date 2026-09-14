@@ -40,6 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np  # noqa: E402
 
+import gen_reward as gr  # noqa: E402
 import pilot_lib as pl  # noqa: E402
 import pilot_worker as pw  # noqa: E402
 import retention_lib as rl  # noqa: E402
@@ -425,6 +426,35 @@ class Runner:
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.args.model)
         self.items = load_items(Path(self.args.taskset), self.args.limit)
+        if getattr(self.args, "score_mode", "tf") == "gen":
+            batch = self.items
+            n = int(getattr(self.args, "gen_batch_items", 0) or 0)
+            if n and n < len(batch):
+                # 按层轮转取满 n 题（episode 结构保持 4/4 配平）
+                by_tier: dict[str, list[dict]] = {}
+                for item in batch:
+                    by_tier.setdefault(item["tier"], []).append(item)
+                tiers = sorted(by_tier)
+                picked: list[dict] = []
+                cursor = 0
+                while len(picked) < n:
+                    tier = tiers[cursor % len(tiers)]
+                    idx = (cursor // len(tiers)) % len(by_tier[tier])
+                    picked.append(by_tier[tier][idx])
+                    cursor += 1
+                batch = picked[:n]
+            self.items = batch
+            self.dev_reqs = [{"item": item,
+                              "prompt": gr.question_prompt(self.tokenizer,
+                                                           item["question"])}
+                             for item in batch]
+            self.confirm_reqs = None
+            self.confirm_reqs_by_variant = {}
+            self.feedback_slice_reqs = None
+            log(f"gen-mode fitness: {len(self.dev_reqs)} items, "
+                f"max_tokens={self.args.gen_max_tokens} (no Answer suffix, "
+                "final-answer reward)")
+            return
         # 反馈通道（dev 池）永远是冻结形态：它是适应度与 retention 判据的通道，
         # 换 prompt 形态的是终端 swap 臂，不是这里。
         self.dev_reqs = self.build_reqs(self.items, PROMPT_VARIANT_DEFAULT, strict=True)
@@ -454,12 +484,26 @@ class Runner:
     def score(self, reqs: list[dict], tag: str) -> tuple[list[dict], dict]:
         from vllm import SamplingParams
 
-        from score_taskset import score_tf
-
         started = time.perf_counter()
-        rows, timing = score_tf(self.llm, SamplingParams, self.tokenizer, reqs, self.args.chunk, tag)
+        if getattr(self.args, "score_mode", "tf") == "gen":
+            sp = SamplingParams(temperature=0.0, max_tokens=self.args.gen_max_tokens)
+            prompts = [r["prompt"] for r in reqs]
+            outs = []
+            for i in range(0, len(prompts), self.args.chunk):
+                outs.extend(self.llm.generate(prompts[i:i + self.args.chunk], sp,
+                                              use_tqdm=False))
+            rows = gr.score_rows_gen(outs, [r["item"] for r in reqs])
+            # 语义映射：gen 模式的"未作答" = 生成里找不到 yes/no 决策
+            for row in rows:
+                row["tf_correct"] = row["gen_correct"]
+                row["tf_first_argmax"] = 130073 if row["gen_decision"] is None else 1
+        else:
+            from score_taskset import score_tf
+
+            rows, _ = score_tf(self.llm, SamplingParams, self.tokenizer, reqs,
+                               self.args.chunk, tag)
         attach_episodes(rows, [r["item"] for r in reqs])
-        timing["wall_seconds"] = round(time.perf_counter() - started, 3)
+        timing = {"wall_seconds": round(time.perf_counter() - started, 3)}
         return rows, timing
 
     # -- 反馈噪声带与轨迹读数（第 2 轮 §4a）----------------------------------- #
@@ -1377,6 +1421,12 @@ def main() -> int:
     parser.add_argument("--edits", type=int, default=16)
     parser.add_argument("--edits-plan", help="json: group_id -> sparse edit count")
     parser.add_argument("--alpha", type=float, default=1.0)
+    parser.add_argument("--score-mode", choices=("tf", "gen"), default="tf",
+                        help="tf: frozen-prompt first-token scoring (legacy); gen: "
+                             "free generation, final-answer reward (the paper's form)")
+    parser.add_argument("--gen-max-tokens", type=int, default=256)
+    parser.add_argument("--gen-batch-items", type=int, default=0,
+                        help="gen mode: fixed fitness batch size (0 = whole taskset)")
     parser.add_argument("--coef-transform", choices=("rank", "zscore"), default="rank",
                         help="mirror-pair coefficient transform: rank (frozen campaign "
                              "default) or zscore (paper default, clipped to +/-coeff-clip)")
