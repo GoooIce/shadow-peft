@@ -1,0 +1,396 @@
+{
+  "arm": "both",
+  "enable_prefix_caching": false,
+  "enable_thinking": false,
+  "engine_load_s": 34.703224897384644,
+  "gen": {
+    "acc": 0.4875,
+    "length_cap_hit_rate": 0.004166666666666667,
+    "max_tokens": 24,
+    "n": 480,
+    "per_family": {
+      "arith": {
+        "acc": 0.4895833333333333,
+        "n": 96
+      },
+      "logic": {
+        "acc": 0.4583333333333333,
+        "n": 96
+      },
+      "modulo": {
+        "acc": 0.4895833333333333,
+        "n": 96
+      },
+      "ordering": {
+        "acc": 0.5104166666666666,
+        "n": 96
+      },
+      "pct": {
+        "acc": 0.4895833333333333,
+        "n": 96
+      }
+    },
+    "per_stratum": {
+      "arith/easy": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "arith/hard": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "arith/medium": {
+        "acc": 0.46875,
+        "n": 32
+      },
+      "logic/easy": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "logic/hard": {
+        "acc": 0.40625,
+        "n": 32
+      },
+      "logic/medium": {
+        "acc": 0.46875,
+        "n": 32
+      },
+      "modulo/easy": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "modulo/hard": {
+        "acc": 0.46875,
+        "n": 32
+      },
+      "modulo/medium": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "ordering/easy": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "ordering/hard": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "ordering/medium": {
+        "acc": 0.53125,
+        "n": 32
+      },
+      "pct/easy": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "pct/hard": {
+        "acc": 0.46875,
+        "n": 32
+      },
+      "pct/medium": {
+        "acc": 0.5,
+        "n": 32
+      }
+    },
+    "stop_reason": {
+      "length": 2,
+      "stop": 478
+    }
+  },
+  "gen_timing": {
+    "gen_output_tokens": 1554,
+    "gen_seconds": 1.3111913204193115,
+    "gen_tokens_per_s": 1185.1817319100614
+  },
+  "generated_at": "2026-09-10T22:01:06",
+  "linear_backend": "cutlass",
+  "model": "/home/goooice/minicpm5-payload/out/MiniCPM5-2B-NVFP4-W4A4",
+  "n_items": 480,
+  "n_unstable_prefix": 0,
+  "no_answer": {
+    "metric": "no_answer = argmax at the first gold-token position == 130073 (<|im_end|>); GEN-arm marker gen_n_tokens == 1 is recorded alongside",
+    "overall": {
+      "n": 480,
+      "n_no_answer": 3,
+      "rate": 0.00625
+    },
+    "per_family": {
+      "arith": {
+        "n": 96,
+        "n_no_answer": 0,
+        "rate": 0.0
+      },
+      "logic": {
+        "n": 96,
+        "n_no_answer": 1,
+        "rate": 0.010416666666666666
+      },
+      "modulo": {
+        "n": 96,
+        "n_no_answer": 0,
+        "rate": 0.0
+      },
+      "ordering": {
+        "n": 96,
+        "n_no_answer": 2,
+        "rate": 0.020833333333333332
+      },
+      "pct": {
+        "n": 96,
+        "n_no_answer": 0,
+        "rate": 0.0
+      }
+    },
+    "per_stratum": {
+      "arith/easy": {
+        "n": 32,
+        "n_no_answer": 0,
+        "rate": 0.0
+      },
+      "arith/hard": {
+        "n": 32,
+        "n_no_answer": 0,
+        "rate": 0.0
+      },
+      "arith/medium": {
+        "n": 32,
+        "n_no_answer": 0,
+        "rate": 0.0
+      },
+      "logic/easy": {
+        "n": 32,
+        "n_no_answer": 0,
+        "rate": 0.0
+      },
+      "logic/hard": {
+        "n": 32,
+        "n_no_answer": 1,
+        "rate": 0.03125
+      },
+      "logic/medium": {
+        "n": 32,
+        "n_no_answer": 0,
+        "rate": 0.0
+      },
+      "modulo/easy": {
+        "n": 32,
+        "n_no_answer": 0,
+        "rate": 0.0
+      },
+      "modulo/hard": {
+        "n": 32,
+        "n_no_answer": 0,
+        "rate": 0.0
+      },
+      "modulo/medium": {
+        "n": 32,
+        "n_no_answer": 0,
+        "rate": 0.0
+      },
+      "ordering/easy": {
+        "n": 32,
+        "n_no_answer": 0,
+        "rate": 0.0
+      },
+      "ordering/hard": {
+        "n": 32,
+        "n_no_answer": 2,
+        "rate": 0.0625
+      },
+      "ordering/medium": {
+        "n": 32,
+        "n_no_answer": 0,
+        "rate": 0.0
+      },
+      "pct/easy": {
+        "n": 32,
+        "n_no_answer": 0,
+        "rate": 0.0
+      },
+      "pct/hard": {
+        "n": 32,
+        "n_no_answer": 0,
+        "rate": 0.0
+      },
+      "pct/medium": {
+        "n": 32,
+        "n_no_answer": 0,
+        "rate": 0.0
+      }
+    },
+    "per_tier": {
+      "easy": {
+        "n": 160,
+        "n_no_answer": 0,
+        "rate": 0.0
+      },
+      "hard": {
+        "n": 160,
+        "n_no_answer": 3,
+        "rate": 0.01875
+      },
+      "medium": {
+        "n": 160,
+        "n_no_answer": 0,
+        "rate": 0.0
+      }
+    },
+    "rows_without_any_marker": 0,
+    "rows_without_tf_first_argmax": 0
+  },
+  "prompt_tokens": {
+    "max": 183,
+    "median": 41,
+    "min": 34,
+    "total": 27484
+  },
+  "selftest": {
+    "gold_token_logprob_present": 8,
+    "n": 8,
+    "prompt_has_closed_think": 8,
+    "sample_gold_ids": [
+      442,
+      1305
+    ],
+    "sample_prompt_ids": [
+      0,
+      130072,
+      8448,
+      220,
+      2928,
+      357,
+      285,
+      1886,
+      304,
+      242,
+      732,
+      442,
+      242,
+      741,
+      442,
+      242,
+      706,
+      1596,
+      220,
+      96178,
+      401,
+      950,
+      285,
+      4202,
+      4219,
+      33,
+      401,
+      768,
+      10005,
+      35,
+      130073,
+      220,
+      130072,
+      130071,
+      220,
+      8,
+      130063,
+      9,
+      130063,
+      21742
+    ],
+    "sample_prompt_text": "<s><|im_start|>user\nWhat is the value of 13 - 16 - 18?\n\nReply with only the final answer, with no explanation.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nAnswer:",
+    "tf_firstgold_top1_eq_greedy": 8
+  },
+  "tag": "w4a4",
+  "tf": {
+    "acc": 0.5,
+    "n": 480,
+    "per_family": {
+      "arith": {
+        "acc": 0.5,
+        "n": 96
+      },
+      "logic": {
+        "acc": 0.5,
+        "n": 96
+      },
+      "modulo": {
+        "acc": 0.5,
+        "n": 96
+      },
+      "ordering": {
+        "acc": 0.5,
+        "n": 96
+      },
+      "pct": {
+        "acc": 0.5,
+        "n": 96
+      }
+    },
+    "per_stratum": {
+      "arith/easy": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "arith/hard": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "arith/medium": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "logic/easy": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "logic/hard": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "logic/medium": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "modulo/easy": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "modulo/hard": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "modulo/medium": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "ordering/easy": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "ordering/hard": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "ordering/medium": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "pct/easy": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "pct/hard": {
+        "acc": 0.5,
+        "n": 32
+      },
+      "pct/medium": {
+        "acc": 0.5,
+        "n": 32
+      }
+    }
+  },
+  "tf_format_im_end_rate": 0.98125,
+  "tf_gold_logprob_mean": -1.1701457215757425,
+  "tf_timing": {
+    "tf_prompt_tokens": 28384,
+    "tf_seconds": 1.6317667961120605,
+    "tf_tokens_per_s": 17394.642462163905
+  }
+}

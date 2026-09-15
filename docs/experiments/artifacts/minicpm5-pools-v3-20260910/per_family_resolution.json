@@ -1,0 +1,1904 @@
+{
+  "items_file": "taskset_dev.jsonl",
+  "n_items": 480,
+  "n_episodes": 60,
+  "episode_size": 8,
+  "arms": [
+    "q0",
+    "bf16",
+    "cand_search",
+    "centre"
+  ],
+  "delta_target": 0.02,
+  "generated_at": "2026-09-10T16:01:31",
+  "arm_accuracy": {
+    "q0": {
+      "n_items": 480,
+      "item_acc": 0.5,
+      "episode_acc": 0.5,
+      "gold_prob_episode": 0.5054449920557511,
+      "tf_next_is_im_end_rate": 0.98125
+    },
+    "bf16": {
+      "n_items": 480,
+      "item_acc": 0.6020833333333333,
+      "episode_acc": 0.6020833333333333,
+      "gold_prob_episode": 0.5657147938937783,
+      "tf_next_is_im_end_rate": 0.9958333333333333
+    },
+    "cand_search": {
+      "n_items": 480,
+      "item_acc": 0.4375,
+      "episode_acc": 0.4375,
+      "gold_prob_episode": 0.4584000904443271,
+      "tf_next_is_im_end_rate": 0.9895833333333334
+    },
+    "centre": {
+      "n_items": 480,
+      "item_acc": 0.49583333333333335,
+      "episode_acc": 0.49583333333333335,
+      "gold_prob_episode": 0.5022460198030211,
+      "tf_next_is_im_end_rate": 0.9770833333333333
+    }
+  },
+  "pairs": {
+    "q0-bf16": {
+      "n_items": 480,
+      "n_episodes": 60,
+      "mean_episode_delta": -0.10208333333333333,
+      "sd_episode_delta": 0.24312598186034243,
+      "se_episode_delta": 0.031387429292514424,
+      "t_stat": -3.2523636256403816,
+      "delta_min_80pct_at_dev_size": 0.08793455794047439,
+      "sd_ci95": [
+        0.20607806641393386,
+        0.29656124335679074
+      ],
+      "n_episodes_needed_delta_target": 1160,
+      "item_flip_rate": 0.27291666666666664,
+      "item_mean_delta": -0.10208333333333333,
+      "per_stratum": {
+        "arith/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.40625,
+          "sd_episode_delta": 0.10364452469860624,
+          "sd_ci95": [
+            0.05878986433740342,
+            0.421503631856769
+          ],
+          "delta_min_80pct_at_dev_size": 0.14518448416697985,
+          "n_episodes_needed_delta_target": 211,
+          "item_flip_rate": 0.40625
+        },
+        "arith/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.0625,
+          "sd_episode_delta": 0.0625,
+          "sd_ci95": [
+            0.03545162208782964,
+            0.2541762535710902
+          ],
+          "delta_min_80pct_at_dev_size": 0.08754953806603026,
+          "n_episodes_needed_delta_target": 77,
+          "item_flip_rate": 0.0625
+        },
+        "arith/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.375,
+          "sd_episode_delta": 0.08838834764831845,
+          "sd_ci95": [
+            0.05013616476473426,
+            0.3594595050334186
+          ],
+          "delta_min_80pct_at_dev_size": 0.12381374411247956,
+          "n_episodes_needed_delta_target": 154,
+          "item_flip_rate": 0.375
+        },
+        "logic/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.0625,
+          "sd_episode_delta": 0.13975424859373686,
+          "sd_ci95": [
+            0.0792722369010201,
+            0.5683553812511813
+          ],
+          "delta_min_80pct_at_dev_size": 0.19576671851434915,
+          "n_episodes_needed_delta_target": 384,
+          "item_flip_rate": 0.125
+        },
+        "logic/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.34375,
+          "sd_episode_delta": 0.16237976320958225,
+          "sd_ci95": [
+            0.09210601600027797,
+            0.6603692778939577
+          ],
+          "delta_min_80pct_at_dev_size": 0.22746037216432483,
+          "n_episodes_needed_delta_target": 518,
+          "item_flip_rate": 0.40625
+        },
+        "logic/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.15625,
+          "sd_episode_delta": 0.10364452469860624,
+          "sd_ci95": [
+            0.05878986433740342,
+            0.421503631856769
+          ],
+          "delta_min_80pct_at_dev_size": 0.14518448416697985,
+          "n_episodes_needed_delta_target": 211,
+          "item_flip_rate": 0.40625
+        },
+        "modulo/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.0625,
+          "sd_episode_delta": 0.1875,
+          "sd_ci95": [
+            0.10635486626348892,
+            0.7625287607132706
+          ],
+          "delta_min_80pct_at_dev_size": 0.26264861419809077,
+          "n_episodes_needed_delta_target": 690,
+          "item_flip_rate": 0.25
+        },
+        "modulo/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.0,
+          "sd_episode_delta": 0.08838834764831845,
+          "sd_ci95": [
+            0.05013616476473426,
+            0.3594595050334186
+          ],
+          "delta_min_80pct_at_dev_size": 0.12381374411247956,
+          "n_episodes_needed_delta_target": 154,
+          "item_flip_rate": 0.25
+        },
+        "modulo/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.03125,
+          "sd_episode_delta": 0.10364452469860624,
+          "sd_ci95": [
+            0.05878986433740342,
+            0.421503631856769
+          ],
+          "delta_min_80pct_at_dev_size": 0.14518448416697985,
+          "n_episodes_needed_delta_target": 211,
+          "item_flip_rate": 0.15625
+        },
+        "ordering/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.125,
+          "sd_episode_delta": 0.15309310892394862,
+          "sd_ci95": [
+            0.08683838466916426,
+            0.6226021259814415
+          ],
+          "delta_min_80pct_at_dev_size": 0.2144516954781465,
+          "n_episodes_needed_delta_target": 460,
+          "item_flip_rate": 0.25
+        },
+        "ordering/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.1875,
+          "sd_episode_delta": 0.10825317547305482,
+          "sd_ci95": [
+            0.06140401066685197,
+            0.4402461852626385
+          ],
+          "delta_min_80pct_at_dev_size": 0.15164024810954987,
+          "n_episodes_needed_delta_target": 230,
+          "item_flip_rate": 0.25
+        },
+        "ordering/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.0625,
+          "sd_episode_delta": 0.13975424859373686,
+          "sd_ci95": [
+            0.0792722369010201,
+            0.5683553812511813
+          ],
+          "delta_min_80pct_at_dev_size": 0.19576671851434915,
+          "n_episodes_needed_delta_target": 384,
+          "item_flip_rate": 0.125
+        },
+        "pct/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.34375,
+          "sd_episode_delta": 0.05412658773652741,
+          "sd_ci95": [
+            0.030702005333425986,
+            0.22012309263131924
+          ],
+          "delta_min_80pct_at_dev_size": 0.07582012405477494,
+          "n_episodes_needed_delta_target": 58,
+          "item_flip_rate": 0.40625
+        },
+        "pct/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.21875,
+          "sd_episode_delta": 0.05412658773652741,
+          "sd_ci95": [
+            0.030702005333425986,
+            0.22012309263131924
+          ],
+          "delta_min_80pct_at_dev_size": 0.07582012405477494,
+          "n_episodes_needed_delta_target": 58,
+          "item_flip_rate": 0.21875
+        },
+        "pct/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.40625,
+          "sd_episode_delta": 0.05412658773652741,
+          "sd_ci95": [
+            0.030702005333425986,
+            0.22012309263131924
+          ],
+          "delta_min_80pct_at_dev_size": 0.07582012405477494,
+          "n_episodes_needed_delta_target": 58,
+          "item_flip_rate": 0.40625
+        }
+      },
+      "per_family": {
+        "arith": {
+          "n_episodes": 12,
+          "mean_episode_delta": -0.23958333333333334,
+          "sd_episode_delta": 0.23081791464750354,
+          "sd_ci95": [
+            0.16351376671697035,
+            0.3930857507358823
+          ],
+          "delta_min_80pct_at_dev_size": 0.18667352450814048,
+          "n_episodes_needed_delta_target": 1046,
+          "item_flip_rate": 0.28125
+        },
+        "logic": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.041666666666666664,
+          "sd_episode_delta": 0.2568505834570407,
+          "sd_ci95": [
+            0.18195557501960355,
+            0.43741970626218135
+          ],
+          "delta_min_80pct_at_dev_size": 0.20772739308004426,
+          "n_episodes_needed_delta_target": 1295,
+          "item_flip_rate": 0.3125
+        },
+        "modulo": {
+          "n_episodes": 12,
+          "mean_episode_delta": -0.03125,
+          "sd_episode_delta": 0.13621559198564606,
+          "sd_ci95": [
+            0.09649651572829443,
+            0.23197683039196212
+          ],
+          "delta_min_80pct_at_dev_size": 0.11016408621382712,
+          "n_episodes_needed_delta_target": 365,
+          "item_flip_rate": 0.21875
+        },
+        "ordering": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.041666666666666664,
+          "sd_episode_delta": 0.18633899812498247,
+          "sd_ci95": [
+            0.13200444825183288,
+            0.3173376082233101
+          ],
+          "delta_min_80pct_at_dev_size": 0.1507012901768389,
+          "n_episodes_needed_delta_target": 682,
+          "item_flip_rate": 0.20833333333333334
+        },
+        "pct": {
+          "n_episodes": 12,
+          "mean_episode_delta": -0.3229166666666667,
+          "sd_episode_delta": 0.09490034978275312,
+          "sd_ci95": [
+            0.06722837644310992,
+            0.16161646420045242
+          ],
+          "delta_min_80pct_at_dev_size": 0.07675046712927867,
+          "n_episodes_needed_delta_target": 177,
+          "item_flip_rate": 0.34375
+        }
+      }
+    },
+    "q0-cand_search": {
+      "n_items": 480,
+      "n_episodes": 60,
+      "mean_episode_delta": 0.0625,
+      "sd_episode_delta": 0.18470133549417916,
+      "se_episode_delta": 0.02384483987970749,
+      "t_stat": 2.6211121699831144,
+      "delta_min_80pct_at_dev_size": 0.06680335093525912,
+      "sd_ci95": [
+        0.15655625857616487,
+        0.22529577992728797
+      ],
+      "n_episodes_needed_delta_target": 670,
+      "item_flip_rate": 0.29583333333333334,
+      "item_mean_delta": 0.0625,
+      "per_stratum": {
+        "arith/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.21875,
+          "sd_episode_delta": 0.10364452469860624,
+          "sd_ci95": [
+            0.05878986433740342,
+            0.421503631856769
+          ],
+          "delta_min_80pct_at_dev_size": 0.14518448416697985,
+          "n_episodes_needed_delta_target": 211,
+          "item_flip_rate": 0.28125
+        },
+        "arith/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.3125,
+          "sd_episode_delta": 0.0625,
+          "sd_ci95": [
+            0.03545162208782964,
+            0.2541762535710902
+          ],
+          "delta_min_80pct_at_dev_size": 0.08754953806603026,
+          "n_episodes_needed_delta_target": 77,
+          "item_flip_rate": 0.375
+        },
+        "arith/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.0625,
+          "sd_episode_delta": 0.10825317547305482,
+          "sd_ci95": [
+            0.06140401066685197,
+            0.4402461852626385
+          ],
+          "delta_min_80pct_at_dev_size": 0.15164024810954987,
+          "n_episodes_needed_delta_target": 230,
+          "item_flip_rate": 0.3125
+        },
+        "logic/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.0625,
+          "sd_episode_delta": 0.10825317547305482,
+          "sd_ci95": [
+            0.06140401066685197,
+            0.4402461852626385
+          ],
+          "delta_min_80pct_at_dev_size": 0.15164024810954987,
+          "n_episodes_needed_delta_target": 230,
+          "item_flip_rate": 0.25
+        },
+        "logic/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.0625,
+          "sd_episode_delta": 0.2576941016011038,
+          "sd_ci95": [
+            0.1461707824676017,
+            1.047995540997383
+          ],
+          "delta_min_80pct_at_dev_size": 0.3609759929202769,
+          "n_episodes_needed_delta_target": 1304,
+          "item_flip_rate": 0.375
+        },
+        "logic/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.03125,
+          "sd_episode_delta": 0.05412658773652741,
+          "sd_ci95": [
+            0.030702005333425986,
+            0.22012309263131924
+          ],
+          "delta_min_80pct_at_dev_size": 0.07582012405477494,
+          "n_episodes_needed_delta_target": 58,
+          "item_flip_rate": 0.40625
+        },
+        "modulo/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.03125,
+          "sd_episode_delta": 0.16237976320958225,
+          "sd_ci95": [
+            0.09210601600027797,
+            0.6603692778939577
+          ],
+          "delta_min_80pct_at_dev_size": 0.22746037216432483,
+          "n_episodes_needed_delta_target": 518,
+          "item_flip_rate": 0.21875
+        },
+        "modulo/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.15625,
+          "sd_episode_delta": 0.13621559198564606,
+          "sd_ci95": [
+            0.07726501903272193,
+            0.5539643015820758
+          ],
+          "delta_min_80pct_at_dev_size": 0.19080979449174668,
+          "n_episodes_needed_delta_target": 365,
+          "item_flip_rate": 0.40625
+        },
+        "modulo/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.125,
+          "sd_episode_delta": 0.08838834764831845,
+          "sd_ci95": [
+            0.05013616476473426,
+            0.3594595050334186
+          ],
+          "delta_min_80pct_at_dev_size": 0.12381374411247956,
+          "n_episodes_needed_delta_target": 154,
+          "item_flip_rate": 0.25
+        },
+        "ordering/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.0,
+          "sd_episode_delta": 0.15309310892394862,
+          "sd_ci95": [
+            0.08683838466916426,
+            0.6226021259814415
+          ],
+          "delta_min_80pct_at_dev_size": 0.2144516954781465,
+          "n_episodes_needed_delta_target": 460,
+          "item_flip_rate": 0.1875
+        },
+        "ordering/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.28125,
+          "sd_episode_delta": 0.10364452469860624,
+          "sd_ci95": [
+            0.05878986433740342,
+            0.421503631856769
+          ],
+          "delta_min_80pct_at_dev_size": 0.14518448416697985,
+          "n_episodes_needed_delta_target": 211,
+          "item_flip_rate": 0.28125
+        },
+        "ordering/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.21875,
+          "sd_episode_delta": 0.13621559198564606,
+          "sd_ci95": [
+            0.07726501903272193,
+            0.5539643015820758
+          ],
+          "delta_min_80pct_at_dev_size": 0.19080979449174668,
+          "n_episodes_needed_delta_target": 365,
+          "item_flip_rate": 0.28125
+        },
+        "pct/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.03125,
+          "sd_episode_delta": 0.10364452469860624,
+          "sd_ci95": [
+            0.05878986433740342,
+            0.421503631856769
+          ],
+          "delta_min_80pct_at_dev_size": 0.14518448416697985,
+          "n_episodes_needed_delta_target": 211,
+          "item_flip_rate": 0.28125
+        },
+        "pct/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.03125,
+          "sd_episode_delta": 0.10364452469860624,
+          "sd_ci95": [
+            0.05878986433740342,
+            0.421503631856769
+          ],
+          "delta_min_80pct_at_dev_size": 0.14518448416697985,
+          "n_episodes_needed_delta_target": 211,
+          "item_flip_rate": 0.21875
+        },
+        "pct/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.0625,
+          "sd_episode_delta": 0.0625,
+          "sd_ci95": [
+            0.03545162208782964,
+            0.2541762535710902
+          ],
+          "delta_min_80pct_at_dev_size": 0.08754953806603026,
+          "n_episodes_needed_delta_target": 77,
+          "item_flip_rate": 0.3125
+        }
+      },
+      "per_family": {
+        "arith": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.010416666666666666,
+          "sd_episode_delta": 0.2418372242967479,
+          "sd_ci95": [
+            0.17131995814764964,
+            0.41185177075074697
+          ],
+          "delta_min_80pct_at_dev_size": 0.19558536903724646,
+          "n_episodes_needed_delta_target": 1148,
+          "item_flip_rate": 0.3229166666666667
+        },
+        "logic": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.052083333333333336,
+          "sd_episode_delta": 0.16503103664327978,
+          "sd_ci95": [
+            0.11690967084578024,
+            0.2810498874522527
+          ],
+          "delta_min_80pct_at_dev_size": 0.13346851915927022,
+          "n_episodes_needed_delta_target": 535,
+          "item_flip_rate": 0.34375
+        },
+        "modulo": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.08333333333333333,
+          "sd_episode_delta": 0.15590239111558088,
+          "sd_ci95": [
+            0.1104428451769945,
+            0.26550369171637467
+          ],
+          "delta_min_80pct_at_dev_size": 0.12608574543807344,
+          "n_episodes_needed_delta_target": 477,
+          "item_flip_rate": 0.2916666666666667
+        },
+        "ordering": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.16666666666666666,
+          "sd_episode_delta": 0.17921510973005472,
+          "sd_ci95": [
+            0.1269578129986513,
+            0.3052055385693782
+          ],
+          "delta_min_80pct_at_dev_size": 0.14493985975704377,
+          "n_episodes_needed_delta_target": 631,
+          "item_flip_rate": 0.25
+        },
+        "pct": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.0,
+          "sd_episode_delta": 0.10206207261596575,
+          "sd_ci95": [
+            0.07230181399855226,
+            0.17381296636864385
+          ],
+          "delta_min_80pct_at_dev_size": 0.08254249607498637,
+          "n_episodes_needed_delta_target": 205,
+          "item_flip_rate": 0.2708333333333333
+        }
+      }
+    },
+    "q0-centre": {
+      "n_items": 480,
+      "n_episodes": 60,
+      "mean_episode_delta": 0.004166666666666667,
+      "sd_episode_delta": 0.16765332948942258,
+      "se_episode_delta": 0.02164395176829195,
+      "t_stat": 0.19250951541902658,
+      "delta_min_80pct_at_dev_size": 0.060637375335596766,
+      "sd_ci95": [
+        0.14210605425496872,
+        0.2045008907145472
+      ],
+      "n_episodes_needed_delta_target": 552,
+      "item_flip_rate": 0.25833333333333336,
+      "item_mean_delta": 0.004166666666666667,
+      "per_stratum": {
+        "arith/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.125,
+          "sd_episode_delta": 0.125,
+          "sd_ci95": [
+            0.07090324417565928,
+            0.5083525071421804
+          ],
+          "delta_min_80pct_at_dev_size": 0.17509907613206052,
+          "n_episodes_needed_delta_target": 307,
+          "item_flip_rate": 0.1875
+        },
+        "arith/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.1875,
+          "sd_episode_delta": 0.13975424859373686,
+          "sd_ci95": [
+            0.0792722369010201,
+            0.5683553812511813
+          ],
+          "delta_min_80pct_at_dev_size": 0.19576671851434915,
+          "n_episodes_needed_delta_target": 384,
+          "item_flip_rate": 0.1875
+        },
+        "arith/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.0625,
+          "sd_episode_delta": 0.13975424859373686,
+          "sd_ci95": [
+            0.0792722369010201,
+            0.5683553812511813
+          ],
+          "delta_min_80pct_at_dev_size": 0.19576671851434915,
+          "n_episodes_needed_delta_target": 384,
+          "item_flip_rate": 0.3125
+        },
+        "logic/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.03125,
+          "sd_episode_delta": 0.16237976320958225,
+          "sd_ci95": [
+            0.09210601600027797,
+            0.6603692778939577
+          ],
+          "delta_min_80pct_at_dev_size": 0.22746037216432483,
+          "n_episodes_needed_delta_target": 518,
+          "item_flip_rate": 0.21875
+        },
+        "logic/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.125,
+          "sd_episode_delta": 0.15309310892394862,
+          "sd_ci95": [
+            0.08683838466916426,
+            0.6226021259814415
+          ],
+          "delta_min_80pct_at_dev_size": 0.2144516954781465,
+          "n_episodes_needed_delta_target": 460,
+          "item_flip_rate": 0.375
+        },
+        "logic/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.125,
+          "sd_episode_delta": 0.08838834764831845,
+          "sd_ci95": [
+            0.05013616476473426,
+            0.3594595050334186
+          ],
+          "delta_min_80pct_at_dev_size": 0.12381374411247956,
+          "n_episodes_needed_delta_target": 154,
+          "item_flip_rate": 0.4375
+        },
+        "modulo/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.1875,
+          "sd_episode_delta": 0.13975424859373686,
+          "sd_ci95": [
+            0.0792722369010201,
+            0.5683553812511813
+          ],
+          "delta_min_80pct_at_dev_size": 0.19576671851434915,
+          "n_episodes_needed_delta_target": 384,
+          "item_flip_rate": 0.1875
+        },
+        "modulo/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.0625,
+          "sd_episode_delta": 0.0625,
+          "sd_ci95": [
+            0.03545162208782964,
+            0.2541762535710902
+          ],
+          "delta_min_80pct_at_dev_size": 0.08754953806603026,
+          "n_episodes_needed_delta_target": 77,
+          "item_flip_rate": 0.25
+        },
+        "modulo/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.0,
+          "sd_episode_delta": 0.08838834764831845,
+          "sd_ci95": [
+            0.05013616476473426,
+            0.3594595050334186
+          ],
+          "delta_min_80pct_at_dev_size": 0.12381374411247956,
+          "n_episodes_needed_delta_target": 154,
+          "item_flip_rate": 0.125
+        },
+        "ordering/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.09375,
+          "sd_episode_delta": 0.05412658773652741,
+          "sd_ci95": [
+            0.030702005333425986,
+            0.22012309263131924
+          ],
+          "delta_min_80pct_at_dev_size": 0.07582012405477494,
+          "n_episodes_needed_delta_target": 58,
+          "item_flip_rate": 0.28125
+        },
+        "ordering/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.21875,
+          "sd_episode_delta": 0.05412658773652741,
+          "sd_ci95": [
+            0.030702005333425986,
+            0.22012309263131924
+          ],
+          "delta_min_80pct_at_dev_size": 0.07582012405477494,
+          "n_episodes_needed_delta_target": 58,
+          "item_flip_rate": 0.34375
+        },
+        "ordering/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.09375,
+          "sd_episode_delta": 0.184877493221863,
+          "sd_ci95": [
+            0.10486731235594837,
+            0.7518634975479641
+          ],
+          "delta_min_80pct_at_dev_size": 0.2589750260860759,
+          "n_episodes_needed_delta_target": 671,
+          "item_flip_rate": 0.21875
+        },
+        "pct/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.0625,
+          "sd_episode_delta": 0.10825317547305482,
+          "sd_ci95": [
+            0.06140401066685197,
+            0.4402461852626385
+          ],
+          "delta_min_80pct_at_dev_size": 0.15164024810954987,
+          "n_episodes_needed_delta_target": 230,
+          "item_flip_rate": 0.1875
+        },
+        "pct/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.0,
+          "sd_episode_delta": 0.08838834764831845,
+          "sd_ci95": [
+            0.05013616476473426,
+            0.3594595050334186
+          ],
+          "delta_min_80pct_at_dev_size": 0.12381374411247956,
+          "n_episodes_needed_delta_target": 154,
+          "item_flip_rate": 0.1875
+        },
+        "pct/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.125,
+          "sd_episode_delta": 0.08838834764831845,
+          "sd_ci95": [
+            0.05013616476473426,
+            0.3594595050334186
+          ],
+          "delta_min_80pct_at_dev_size": 0.12381374411247956,
+          "n_episodes_needed_delta_target": 154,
+          "item_flip_rate": 0.375
+        }
+      },
+      "per_family": {
+        "arith": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.0,
+          "sd_episode_delta": 0.19094065395649334,
+          "sd_ci95": [
+            0.13526430821241933,
+            0.32517428476516347
+          ],
+          "delta_min_80pct_at_dev_size": 0.15442287008086591,
+          "n_episodes_needed_delta_target": 716,
+          "item_flip_rate": 0.22916666666666666
+        },
+        "logic": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.09375,
+          "sd_episode_delta": 0.1454608337892598,
+          "sd_ci95": [
+            0.10304593938904767,
+            0.24772159102138833
+          ],
+          "delta_min_80pct_at_dev_size": 0.1176411569388019,
+          "n_episodes_needed_delta_target": 416,
+          "item_flip_rate": 0.34375
+        },
+        "modulo": {
+          "n_episodes": 12,
+          "mean_episode_delta": -0.08333333333333333,
+          "sd_episode_delta": 0.12842529172852035,
+          "sd_ci95": [
+            0.09097778750980177,
+            0.21870985313109068
+          ],
+          "delta_min_80pct_at_dev_size": 0.10386369654002213,
+          "n_episodes_needed_delta_target": 324,
+          "item_flip_rate": 0.1875
+        },
+        "ordering": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.07291666666666667,
+          "sd_episode_delta": 0.17274087449767708,
+          "sd_ci95": [
+            0.1223713986768926,
+            0.29417983625053357
+          ],
+          "delta_min_80pct_at_dev_size": 0.13970383502660466,
+          "n_episodes_needed_delta_target": 586,
+          "item_flip_rate": 0.28125
+        },
+        "pct": {
+          "n_episodes": 12,
+          "mean_episode_delta": -0.0625,
+          "sd_episode_delta": 0.10825317547305482,
+          "sd_ci95": [
+            0.07668765445569713,
+            0.18435649076612606
+          ],
+          "delta_min_80pct_at_dev_size": 0.08754953806603026,
+          "n_episodes_needed_delta_target": 230,
+          "item_flip_rate": 0.25
+        }
+      }
+    },
+    "bf16-cand_search": {
+      "n_items": 480,
+      "n_episodes": 60,
+      "mean_episode_delta": 0.16458333333333333,
+      "sd_episode_delta": 0.19161004598460443,
+      "se_episode_delta": 0.024736750568813675,
+      "t_stat": 6.653393414607504,
+      "delta_min_80pct_at_dev_size": 0.06930211473773595,
+      "sd_ci95": [
+        0.16241220901135253,
+        0.23372291616898153
+      ],
+      "n_episodes_needed_delta_target": 721,
+      "item_flip_rate": 0.27708333333333335,
+      "item_mean_delta": 0.16458333333333333,
+      "per_stratum": {
+        "arith/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.1875,
+          "sd_episode_delta": 0.13975424859373686,
+          "sd_ci95": [
+            0.0792722369010201,
+            0.5683553812511813
+          ],
+          "delta_min_80pct_at_dev_size": 0.19576671851434915,
+          "n_episodes_needed_delta_target": 384,
+          "item_flip_rate": 0.1875
+        },
+        "arith/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.25,
+          "sd_episode_delta": 0.0,
+          "sd_ci95": [
+            null,
+            null
+          ],
+          "delta_min_80pct_at_dev_size": null,
+          "n_episodes_needed_delta_target": null,
+          "item_flip_rate": 0.3125
+        },
+        "arith/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.3125,
+          "sd_episode_delta": 0.13975424859373686,
+          "sd_ci95": [
+            0.0792722369010201,
+            0.5683553812511813
+          ],
+          "delta_min_80pct_at_dev_size": 0.19576671851434915,
+          "n_episodes_needed_delta_target": 384,
+          "item_flip_rate": 0.3125
+        },
+        "logic/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.125,
+          "sd_episode_delta": 0.08838834764831845,
+          "sd_ci95": [
+            0.05013616476473426,
+            0.3594595050334186
+          ],
+          "delta_min_80pct_at_dev_size": 0.12381374411247956,
+          "n_episodes_needed_delta_target": 154,
+          "item_flip_rate": 0.25
+        },
+        "logic/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.28125,
+          "sd_episode_delta": 0.13621559198564606,
+          "sd_ci95": [
+            0.07726501903272193,
+            0.5539643015820758
+          ],
+          "delta_min_80pct_at_dev_size": 0.19080979449174668,
+          "n_episodes_needed_delta_target": 365,
+          "item_flip_rate": 0.34375
+        },
+        "logic/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.1875,
+          "sd_episode_delta": 0.10825317547305482,
+          "sd_ci95": [
+            0.06140401066685197,
+            0.4402461852626385
+          ],
+          "delta_min_80pct_at_dev_size": 0.15164024810954987,
+          "n_episodes_needed_delta_target": 230,
+          "item_flip_rate": 0.25
+        },
+        "modulo/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.03125,
+          "sd_episode_delta": 0.16237976320958225,
+          "sd_ci95": [
+            0.09210601600027797,
+            0.6603692778939577
+          ],
+          "delta_min_80pct_at_dev_size": 0.22746037216432483,
+          "n_episodes_needed_delta_target": 518,
+          "item_flip_rate": 0.15625
+        },
+        "modulo/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.15625,
+          "sd_episode_delta": 0.13621559198564606,
+          "sd_ci95": [
+            0.07726501903272193,
+            0.5539643015820758
+          ],
+          "delta_min_80pct_at_dev_size": 0.19080979449174668,
+          "n_episodes_needed_delta_target": 365,
+          "item_flip_rate": 0.34375
+        },
+        "modulo/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.15625,
+          "sd_episode_delta": 0.05412658773652741,
+          "sd_ci95": [
+            0.030702005333425986,
+            0.22012309263131924
+          ],
+          "delta_min_80pct_at_dev_size": 0.07582012405477494,
+          "n_episodes_needed_delta_target": 58,
+          "item_flip_rate": 0.21875
+        },
+        "ordering/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.125,
+          "sd_episode_delta": 0.125,
+          "sd_ci95": [
+            0.07090324417565928,
+            0.5083525071421804
+          ],
+          "delta_min_80pct_at_dev_size": 0.17509907613206052,
+          "n_episodes_needed_delta_target": 307,
+          "item_flip_rate": 0.3125
+        },
+        "ordering/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.09375,
+          "sd_episode_delta": 0.184877493221863,
+          "sd_ci95": [
+            0.10486731235594837,
+            0.7518634975479641
+          ],
+          "delta_min_80pct_at_dev_size": 0.2589750260860759,
+          "n_episodes_needed_delta_target": 671,
+          "item_flip_rate": 0.21875
+        },
+        "ordering/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.15625,
+          "sd_episode_delta": 0.13621559198564606,
+          "sd_ci95": [
+            0.07726501903272193,
+            0.5539643015820758
+          ],
+          "delta_min_80pct_at_dev_size": 0.19080979449174668,
+          "n_episodes_needed_delta_target": 365,
+          "item_flip_rate": 0.21875
+        },
+        "pct/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.375,
+          "sd_episode_delta": 0.08838834764831845,
+          "sd_ci95": [
+            0.05013616476473426,
+            0.3594595050334186
+          ],
+          "delta_min_80pct_at_dev_size": 0.12381374411247956,
+          "n_episodes_needed_delta_target": 154,
+          "item_flip_rate": 0.375
+        },
+        "pct/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.25,
+          "sd_episode_delta": 0.08838834764831845,
+          "sd_ci95": [
+            0.05013616476473426,
+            0.3594595050334186
+          ],
+          "delta_min_80pct_at_dev_size": 0.12381374411247956,
+          "n_episodes_needed_delta_target": 154,
+          "item_flip_rate": 0.25
+        },
+        "pct/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.34375,
+          "sd_episode_delta": 0.05412658773652741,
+          "sd_ci95": [
+            0.030702005333425986,
+            0.22012309263131924
+          ],
+          "delta_min_80pct_at_dev_size": 0.07582012405477494,
+          "n_episodes_needed_delta_target": 58,
+          "item_flip_rate": 0.40625
+        }
+      },
+      "per_family": {
+        "arith": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.25,
+          "sd_episode_delta": 0.125,
+          "sd_ci95": [
+            0.08855127588703549,
+            0.2128765391413553
+          ],
+          "delta_min_80pct_at_dev_size": 0.10109349873969993,
+          "n_episodes_needed_delta_target": 307,
+          "item_flip_rate": 0.2708333333333333
+        },
+        "logic": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.010416666666666666,
+          "sd_episode_delta": 0.2363917857897962,
+          "sd_ci95": [
+            0.1674623539272099,
+            0.4025781219230114
+          ],
+          "delta_min_80pct_at_dev_size": 0.1911813815905294,
+          "n_episodes_needed_delta_target": 1097,
+          "item_flip_rate": 0.28125
+        },
+        "modulo": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.11458333333333333,
+          "sd_episode_delta": 0.13936550166937137,
+          "sd_ci95": [
+            0.09872794389967687,
+            0.2373411653685964
+          ],
+          "delta_min_80pct_at_dev_size": 0.11271156933896193,
+          "n_episodes_needed_delta_target": 382,
+          "item_flip_rate": 0.23958333333333334
+        },
+        "ordering": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.125,
+          "sd_episode_delta": 0.15309310892394862,
+          "sd_ci95": [
+            0.10845272099782839,
+            0.2607194495529657
+          ],
+          "delta_min_80pct_at_dev_size": 0.12381374411247953,
+          "n_episodes_needed_delta_target": 460,
+          "item_flip_rate": 0.25
+        },
+        "pct": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.3229166666666667,
+          "sd_episode_delta": 0.09490034978275312,
+          "sd_ci95": [
+            0.06722837644310992,
+            0.16161646420045242
+          ],
+          "delta_min_80pct_at_dev_size": 0.07675046712927867,
+          "n_episodes_needed_delta_target": 177,
+          "item_flip_rate": 0.34375
+        }
+      }
+    },
+    "bf16-centre": {
+      "n_items": 480,
+      "n_episodes": 60,
+      "mean_episode_delta": 0.10625,
+      "sd_episode_delta": 0.20517396074226052,
+      "se_episode_delta": 0.026487844434339644,
+      "t_stat": 4.011273935989078,
+      "delta_min_80pct_at_dev_size": 0.07420795342692181,
+      "sd_ci95": [
+        0.1739092333313071,
+        0.2502679657541248
+      ],
+      "n_episodes_needed_delta_target": 827,
+      "item_flip_rate": 0.28541666666666665,
+      "item_mean_delta": 0.10625,
+      "per_stratum": {
+        "arith/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.28125,
+          "sd_episode_delta": 0.05412658773652741,
+          "sd_ci95": [
+            0.030702005333425986,
+            0.22012309263131924
+          ],
+          "delta_min_80pct_at_dev_size": 0.07582012405477494,
+          "n_episodes_needed_delta_target": 58,
+          "item_flip_rate": 0.28125
+        },
+        "arith/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.125,
+          "sd_episode_delta": 0.15309310892394862,
+          "sd_ci95": [
+            0.08683838466916426,
+            0.6226021259814415
+          ],
+          "delta_min_80pct_at_dev_size": 0.2144516954781465,
+          "n_episodes_needed_delta_target": 460,
+          "item_flip_rate": 0.1875
+        },
+        "arith/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.3125,
+          "sd_episode_delta": 0.10825317547305482,
+          "sd_ci95": [
+            0.06140401066685197,
+            0.4402461852626385
+          ],
+          "delta_min_80pct_at_dev_size": 0.15164024810954987,
+          "n_episodes_needed_delta_target": 230,
+          "item_flip_rate": 0.375
+        },
+        "logic/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.09375,
+          "sd_episode_delta": 0.13621559198564606,
+          "sd_ci95": [
+            0.07726501903272193,
+            0.5539643015820758
+          ],
+          "delta_min_80pct_at_dev_size": 0.19080979449174668,
+          "n_episodes_needed_delta_target": 365,
+          "item_flip_rate": 0.28125
+        },
+        "logic/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.21875,
+          "sd_episode_delta": 0.240035804620894,
+          "sd_ci95": [
+            0.13615453812748873,
+            0.9761824246633762
+          ],
+          "delta_min_80pct_at_dev_size": 0.3362403810218746,
+          "n_episodes_needed_delta_target": 1131,
+          "item_flip_rate": 0.40625
+        },
+        "logic/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.28125,
+          "sd_episode_delta": 0.16237976320958225,
+          "sd_ci95": [
+            0.09210601600027797,
+            0.6603692778939577
+          ],
+          "delta_min_80pct_at_dev_size": 0.22746037216432483,
+          "n_episodes_needed_delta_target": 518,
+          "item_flip_rate": 0.46875
+        },
+        "modulo/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.125,
+          "sd_episode_delta": 0.08838834764831845,
+          "sd_ci95": [
+            0.05013616476473426,
+            0.3594595050334186
+          ],
+          "delta_min_80pct_at_dev_size": 0.12381374411247956,
+          "n_episodes_needed_delta_target": 154,
+          "item_flip_rate": 0.25
+        },
+        "modulo/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.0625,
+          "sd_episode_delta": 0.13975424859373686,
+          "sd_ci95": [
+            0.0792722369010201,
+            0.5683553812511813
+          ],
+          "delta_min_80pct_at_dev_size": 0.19576671851434915,
+          "n_episodes_needed_delta_target": 384,
+          "item_flip_rate": 0.25
+        },
+        "modulo/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.03125,
+          "sd_episode_delta": 0.10364452469860624,
+          "sd_ci95": [
+            0.05878986433740342,
+            0.421503631856769
+          ],
+          "delta_min_80pct_at_dev_size": 0.14518448416697985,
+          "n_episodes_needed_delta_target": 211,
+          "item_flip_rate": 0.21875
+        },
+        "ordering/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.03125,
+          "sd_episode_delta": 0.13621559198564606,
+          "sd_ci95": [
+            0.07726501903272193,
+            0.5539643015820758
+          ],
+          "delta_min_80pct_at_dev_size": 0.19080979449174668,
+          "n_episodes_needed_delta_target": 365,
+          "item_flip_rate": 0.28125
+        },
+        "ordering/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.03125,
+          "sd_episode_delta": 0.13621559198564606,
+          "sd_ci95": [
+            0.07726501903272193,
+            0.5539643015820758
+          ],
+          "delta_min_80pct_at_dev_size": 0.19080979449174668,
+          "n_episodes_needed_delta_target": 365,
+          "item_flip_rate": 0.28125
+        },
+        "ordering/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.03125,
+          "sd_episode_delta": 0.10364452469860624,
+          "sd_ci95": [
+            0.05878986433740342,
+            0.421503631856769
+          ],
+          "delta_min_80pct_at_dev_size": 0.14518448416697985,
+          "n_episodes_needed_delta_target": 211,
+          "item_flip_rate": 0.15625
+        },
+        "pct/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.28125,
+          "sd_episode_delta": 0.05412658773652741,
+          "sd_ci95": [
+            0.030702005333425986,
+            0.22012309263131924
+          ],
+          "delta_min_80pct_at_dev_size": 0.07582012405477494,
+          "n_episodes_needed_delta_target": 58,
+          "item_flip_rate": 0.28125
+        },
+        "pct/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.21875,
+          "sd_episode_delta": 0.05412658773652741,
+          "sd_ci95": [
+            0.030702005333425986,
+            0.22012309263131924
+          ],
+          "delta_min_80pct_at_dev_size": 0.07582012405477494,
+          "n_episodes_needed_delta_target": 58,
+          "item_flip_rate": 0.21875
+        },
+        "pct/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.28125,
+          "sd_episode_delta": 0.10364452469860624,
+          "sd_ci95": [
+            0.05878986433740342,
+            0.421503631856769
+          ],
+          "delta_min_80pct_at_dev_size": 0.14518448416697985,
+          "n_episodes_needed_delta_target": 211,
+          "item_flip_rate": 0.34375
+        }
+      },
+      "per_family": {
+        "arith": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.23958333333333334,
+          "sd_episode_delta": 0.13936550166937137,
+          "sd_ci95": [
+            0.09872794389967687,
+            0.2373411653685964
+          ],
+          "delta_min_80pct_at_dev_size": 0.11271156933896193,
+          "n_episodes_needed_delta_target": 382,
+          "item_flip_rate": 0.28125
+        },
+        "logic": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.052083333333333336,
+          "sd_episode_delta": 0.2769736625064236,
+          "sd_ci95": [
+            0.19621096961639176,
+            0.4716895576613857
+          ],
+          "delta_min_80pct_at_dev_size": 0.22400189281218563,
+          "n_episodes_needed_delta_target": 1506,
+          "item_flip_rate": 0.3854166666666667
+        },
+        "modulo": {
+          "n_episodes": 12,
+          "mean_episode_delta": -0.052083333333333336,
+          "sd_episode_delta": 0.12968645414571595,
+          "sd_ci95": [
+            0.09187120783894935,
+            0.22085762825643263
+          ],
+          "delta_min_80pct_at_dev_size": 0.10488365910988869,
+          "n_episodes_needed_delta_target": 331,
+          "item_flip_rate": 0.23958333333333334
+        },
+        "ordering": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.03125,
+          "sd_episode_delta": 0.12629537138523064,
+          "sd_ci95": [
+            0.08946893019831333,
+            0.21508257256048044
+          ],
+          "delta_min_80pct_at_dev_size": 0.10214112774370199,
+          "n_episodes_needed_delta_target": 313,
+          "item_flip_rate": 0.23958333333333334
+        },
+        "pct": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.2604166666666667,
+          "sd_episode_delta": 0.08001193487363134,
+          "sd_ci95": [
+            0.056681271354003554,
+            0.13626131028721722
+          ],
+          "delta_min_80pct_at_dev_size": 0.06470949149846722,
+          "n_episodes_needed_delta_target": 126,
+          "item_flip_rate": 0.28125
+        }
+      }
+    },
+    "cand_search-centre": {
+      "n_items": 480,
+      "n_episodes": 60,
+      "mean_episode_delta": -0.058333333333333334,
+      "sd_episode_delta": 0.15723301886761007,
+      "se_episode_delta": 0.02029869545160568,
+      "t_stat": -2.87374789539586,
+      "delta_min_80pct_at_dev_size": 0.056868525124195414,
+      "sd_ci95": [
+        0.1332736067808472,
+        0.1917903599414774
+      ],
+      "n_episodes_needed_delta_target": 486,
+      "item_flip_rate": 0.3,
+      "item_mean_delta": -0.058333333333333334,
+      "per_stratum": {
+        "arith/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.09375,
+          "sd_episode_delta": 0.13621559198564606,
+          "sd_ci95": [
+            0.07726501903272193,
+            0.5539643015820758
+          ],
+          "delta_min_80pct_at_dev_size": 0.19080979449174668,
+          "n_episodes_needed_delta_target": 365,
+          "item_flip_rate": 0.28125
+        },
+        "arith/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.125,
+          "sd_episode_delta": 0.15309310892394862,
+          "sd_ci95": [
+            0.08683838466916426,
+            0.6226021259814415
+          ],
+          "delta_min_80pct_at_dev_size": 0.2144516954781465,
+          "n_episodes_needed_delta_target": 460,
+          "item_flip_rate": 0.25
+        },
+        "arith/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.0,
+          "sd_episode_delta": 0.15309310892394862,
+          "sd_ci95": [
+            0.08683838466916426,
+            0.6226021259814415
+          ],
+          "delta_min_80pct_at_dev_size": 0.2144516954781465,
+          "n_episodes_needed_delta_target": 460,
+          "item_flip_rate": 0.375
+        },
+        "logic/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.03125,
+          "sd_episode_delta": 0.10364452469860624,
+          "sd_ci95": [
+            0.05878986433740342,
+            0.421503631856769
+          ],
+          "delta_min_80pct_at_dev_size": 0.14518448416697985,
+          "n_episodes_needed_delta_target": 211,
+          "item_flip_rate": 0.28125
+        },
+        "logic/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.0625,
+          "sd_episode_delta": 0.2576941016011038,
+          "sd_ci95": [
+            0.1461707824676017,
+            1.047995540997383
+          ],
+          "delta_min_80pct_at_dev_size": 0.3609759929202769,
+          "n_episodes_needed_delta_target": 1304,
+          "item_flip_rate": 0.375
+        },
+        "logic/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": 0.09375,
+          "sd_episode_delta": 0.13621559198564606,
+          "sd_ci95": [
+            0.07726501903272193,
+            0.5539643015820758
+          ],
+          "delta_min_80pct_at_dev_size": 0.19080979449174668,
+          "n_episodes_needed_delta_target": 365,
+          "item_flip_rate": 0.34375
+        },
+        "modulo/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.15625,
+          "sd_episode_delta": 0.10364452469860624,
+          "sd_ci95": [
+            0.05878986433740342,
+            0.421503631856769
+          ],
+          "delta_min_80pct_at_dev_size": 0.14518448416697985,
+          "n_episodes_needed_delta_target": 211,
+          "item_flip_rate": 0.21875
+        },
+        "modulo/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.21875,
+          "sd_episode_delta": 0.13621559198564606,
+          "sd_ci95": [
+            0.07726501903272193,
+            0.5539643015820758
+          ],
+          "delta_min_80pct_at_dev_size": 0.19080979449174668,
+          "n_episodes_needed_delta_target": 365,
+          "item_flip_rate": 0.34375
+        },
+        "modulo/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.125,
+          "sd_episode_delta": 0.08838834764831845,
+          "sd_ci95": [
+            0.05013616476473426,
+            0.3594595050334186
+          ],
+          "delta_min_80pct_at_dev_size": 0.12381374411247956,
+          "n_episodes_needed_delta_target": 154,
+          "item_flip_rate": 0.3125
+        },
+        "ordering/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.09375,
+          "sd_episode_delta": 0.10364452469860624,
+          "sd_ci95": [
+            0.05878986433740342,
+            0.421503631856769
+          ],
+          "delta_min_80pct_at_dev_size": 0.14518448416697985,
+          "n_episodes_needed_delta_target": 211,
+          "item_flip_rate": 0.34375
+        },
+        "ordering/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.0625,
+          "sd_episode_delta": 0.0625,
+          "sd_ci95": [
+            0.03545162208782964,
+            0.2541762535710902
+          ],
+          "delta_min_80pct_at_dev_size": 0.08754953806603026,
+          "n_episodes_needed_delta_target": 77,
+          "item_flip_rate": 0.25
+        },
+        "ordering/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.125,
+          "sd_episode_delta": 0.08838834764831845,
+          "sd_ci95": [
+            0.05013616476473426,
+            0.3594595050334186
+          ],
+          "delta_min_80pct_at_dev_size": 0.12381374411247956,
+          "n_episodes_needed_delta_target": 154,
+          "item_flip_rate": 0.25
+        },
+        "pct/easy": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.09375,
+          "sd_episode_delta": 0.10364452469860624,
+          "sd_ci95": [
+            0.05878986433740342,
+            0.421503631856769
+          ],
+          "delta_min_80pct_at_dev_size": 0.14518448416697985,
+          "n_episodes_needed_delta_target": 211,
+          "item_flip_rate": 0.28125
+        },
+        "pct/hard": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.03125,
+          "sd_episode_delta": 0.05412658773652741,
+          "sd_ci95": [
+            0.030702005333425986,
+            0.22012309263131924
+          ],
+          "delta_min_80pct_at_dev_size": 0.07582012405477494,
+          "n_episodes_needed_delta_target": 58,
+          "item_flip_rate": 0.21875
+        },
+        "pct/medium": {
+          "n_episodes": 4,
+          "mean_episode_delta": -0.0625,
+          "sd_episode_delta": 0.13975424859373686,
+          "sd_ci95": [
+            0.0792722369010201,
+            0.5683553812511813
+          ],
+          "delta_min_80pct_at_dev_size": 0.19576671851434915,
+          "n_episodes_needed_delta_target": 384,
+          "item_flip_rate": 0.375
+        }
+      },
+      "per_family": {
+        "arith": {
+          "n_episodes": 12,
+          "mean_episode_delta": -0.010416666666666666,
+          "sd_episode_delta": 0.17274087449767708,
+          "sd_ci95": [
+            0.1223713986768926,
+            0.29417983625053357
+          ],
+          "delta_min_80pct_at_dev_size": 0.13970383502660466,
+          "n_episodes_needed_delta_target": 586,
+          "item_flip_rate": 0.3020833333333333
+        },
+        "logic": {
+          "n_episodes": 12,
+          "mean_episode_delta": 0.041666666666666664,
+          "sd_episode_delta": 0.18633899812498247,
+          "sd_ci95": [
+            0.13200444825183288,
+            0.3173376082233101
+          ],
+          "delta_min_80pct_at_dev_size": 0.1507012901768389,
+          "n_episodes_needed_delta_target": 682,
+          "item_flip_rate": 0.3333333333333333
+        },
+        "modulo": {
+          "n_episodes": 12,
+          "mean_episode_delta": -0.16666666666666666,
+          "sd_episode_delta": 0.11785113019775792,
+          "sd_ci95": [
+            0.08348694354992481,
+            0.2007019258431678
+          ],
+          "delta_min_80pct_at_dev_size": 0.09531186465695402,
+          "n_episodes_needed_delta_target": 273,
+          "item_flip_rate": 0.2916666666666667
+        },
+        "ordering": {
+          "n_episodes": 12,
+          "mean_episode_delta": -0.09375,
+          "sd_episode_delta": 0.09021097956087903,
+          "sd_ci95": [
+            0.06390637871308096,
+            0.15363040897177174
+          ],
+          "delta_min_80pct_at_dev_size": 0.07295794838835856,
+          "n_episodes_needed_delta_target": 160,
+          "item_flip_rate": 0.28125
+        },
+        "pct": {
+          "n_episodes": 12,
+          "mean_episode_delta": -0.0625,
+          "sd_episode_delta": 0.10825317547305482,
+          "sd_ci95": [
+            0.07668765445569713,
+            0.18435649076612606
+          ],
+          "delta_min_80pct_at_dev_size": 0.08754953806603026,
+          "n_episodes_needed_delta_target": 230,
+          "item_flip_rate": 0.2916666666666667
+        }
+      }
+    }
+  },
+  "extrapolation": {
+    "rho_definition": "sigma_episode = sigma_item * sqrt((1 + (m-1) rho)/m)，m=8；rho = 同 episode 内 item 配对差值的簇内相关，在 dev 池上由 rho=(8*var_ep/var_item-1)/7 估计",
+    "pairs": {
+      "q0-bf16": {
+        "pool_items": 85815,
+        "item_flip_rate_all": 0.23167278447823808,
+        "rho_within_episode_used": 0.11449783041575233,
+        "rho_estimated_on_dev": {
+          "q0-bf16": 0.11449783041575233,
+          "q0-cand_search": 0.0,
+          "q0-centre": 0.0,
+          "bf16-cand_search": 0.024983072622788587,
+          "bf16-centre": 0.032645500132319115,
+          "cand_search-centre": 0.0
+        },
+        "sigma_item_all": 0.48132399117251373,
+        "sigma_episode_modelled_all": 0.2284061631179693,
+        "per_stratum": {
+          "arith/easy": {
+            "n_items": 6855,
+            "item_flip_rate": 0.20714806710430342,
+            "sigma_item": 0.4551352184838078,
+            "sigma_episode_modelled": 0.21597861494605183,
+            "n_episodes_needed_delta_target": 916,
+            "episodes_for_delta_0p05": 147,
+            "episodes_for_delta_0p10": 37
+          },
+          "arith/hard": {
+            "n_items": 14000,
+            "item_flip_rate": 0.15564285714285714,
+            "sigma_item": 0.39451597831121765,
+            "sigma_episode_modelled": 0.1872125274189802,
+            "n_episodes_needed_delta_target": 688,
+            "episodes_for_delta_0p05": 111,
+            "episodes_for_delta_0p10": 28
+          },
+          "arith/medium": {
+            "n_items": 4389,
+            "item_flip_rate": 0.2781954887218045,
+            "sigma_item": 0.5274424032269348,
+            "sigma_episode_modelled": 0.2502910675474856,
+            "n_episodes_needed_delta_target": 1230,
+            "episodes_for_delta_0p05": 197,
+            "episodes_for_delta_0p10": 50
+          },
+          "logic/easy": {
+            "n_items": 3598,
+            "item_flip_rate": 0.27209560867148413,
+            "sigma_item": 0.521627844992466,
+            "sigma_episode_modelled": 0.2475318430730816,
+            "n_episodes_needed_delta_target": 1203,
+            "episodes_for_delta_0p05": 193,
+            "episodes_for_delta_0p10": 49
+          },
+          "logic/hard": {
+            "n_items": 6621,
+            "item_flip_rate": 0.2786588128681468,
+            "sigma_item": 0.5278814382682411,
+            "sigma_episode_modelled": 0.25049940602862975,
+            "n_episodes_needed_delta_target": 1232,
+            "episodes_for_delta_0p05": 198,
+            "episodes_for_delta_0p10": 50
+          },
+          "logic/medium": {
+            "n_items": 5876,
+            "item_flip_rate": 0.3522804628999319,
+            "sigma_item": 0.5935321919659724,
+            "sigma_episode_modelled": 0.2816531341471336,
+            "n_episodes_needed_delta_target": 1557,
+            "episodes_for_delta_0p05": 250,
+            "episodes_for_delta_0p10": 63
+          },
+          "modulo/easy": {
+            "n_items": 5043,
+            "item_flip_rate": 0.16398968867737457,
+            "sigma_item": 0.40495640342804134,
+            "sigma_episode_modelled": 0.19216689804248707,
+            "n_episodes_needed_delta_target": 725,
+            "episodes_for_delta_0p05": 116,
+            "episodes_for_delta_0p10": 29
+          },
+          "modulo/hard": {
+            "n_items": 4204,
+            "item_flip_rate": 0.24048525214081826,
+            "sigma_item": 0.49039295686298173,
+            "sigma_episode_modelled": 0.2327097251568411,
+            "n_episodes_needed_delta_target": 1063,
+            "episodes_for_delta_0p05": 171,
+            "episodes_for_delta_0p10": 43
+          },
+          "modulo/medium": {
+            "n_items": 3682,
+            "item_flip_rate": 0.15643671917436175,
+            "sigma_item": 0.39552082015282297,
+            "sigma_episode_modelled": 0.18768936230315536,
+            "n_episodes_needed_delta_target": 692,
+            "episodes_for_delta_0p05": 111,
+            "episodes_for_delta_0p10": 28
+          },
+          "ordering/easy": {
+            "n_items": 3531,
+            "item_flip_rate": 0.2945341263098272,
+            "sigma_item": 0.5427099836098718,
+            "sigma_episode_modelled": 0.2575361031561759,
+            "n_episodes_needed_delta_target": 1302,
+            "episodes_for_delta_0p05": 209,
+            "episodes_for_delta_0p10": 53
+          },
+          "ordering/hard": {
+            "n_items": 8585,
+            "item_flip_rate": 0.16843331391962726,
+            "sigma_item": 0.4104062790938112,
+            "sigma_episode_modelled": 0.19475306705362688,
+            "n_episodes_needed_delta_target": 745,
+            "episodes_for_delta_0p05": 120,
+            "episodes_for_delta_0p10": 30
+          },
+          "ordering/medium": {
+            "n_items": 3762,
+            "item_flip_rate": 0.2934609250398724,
+            "sigma_item": 0.5417203384033799,
+            "sigma_episode_modelled": 0.25706647964143636,
+            "n_episodes_needed_delta_target": 1297,
+            "episodes_for_delta_0p05": 208,
+            "episodes_for_delta_0p10": 52
+          },
+          "pct/easy": {
+            "n_items": 3368,
+            "item_flip_rate": 0.3806413301662708,
+            "sigma_item": 0.6169613684553278,
+            "sigma_episode_modelled": 0.2927711511275699,
+            "n_episodes_needed_delta_target": 1682,
+            "episodes_for_delta_0p05": 270,
+            "episodes_for_delta_0p10": 68
+          },
+          "pct/hard": {
+            "n_items": 6761,
+            "item_flip_rate": 0.22156485726963468,
+            "sigma_item": 0.47070676356903424,
+            "sigma_episode_modelled": 0.22336789312865607,
+            "n_episodes_needed_delta_target": 980,
+            "episodes_for_delta_0p05": 157,
+            "episodes_for_delta_0p10": 40
+          },
+          "pct/medium": {
+            "n_items": 5540,
+            "item_flip_rate": 0.24963898916967509,
+            "sigma_item": 0.49963885874667024,
+            "sigma_episode_modelled": 0.23709725001026483,
+            "n_episodes_needed_delta_target": 1104,
+            "episodes_for_delta_0p05": 177,
+            "episodes_for_delta_0p10": 45
+          }
+        },
+        "per_family": {
+          "arith": {
+            "n_items": 25244,
+            "item_flip_rate": 0.19093646014894627,
+            "sigma_item": 0.4369627674630257,
+            "sigma_episode_modelled": 0.20735511001334553,
+            "n_episodes_needed_delta_target": 844,
+            "episodes_for_delta_0p05": 135,
+            "episodes_for_delta_0p10": 34
+          },
+          "logic": {
+            "n_items": 16095,
+            "item_flip_rate": 0.3040695868282075,
+            "sigma_item": 0.5514250509617853,
+            "sigma_episode_modelled": 0.2616717272506994,
+            "n_episodes_needed_delta_target": 1344,
+            "episodes_for_delta_0p05": 215,
+            "episodes_for_delta_0p10": 54
+          },
+          "modulo": {
+            "n_items": 12929,
+            "item_flip_rate": 0.1867120426947173,
+            "sigma_item": 0.432101889251502,
+            "sigma_episode_modelled": 0.20504844223438592,
+            "n_episodes_needed_delta_target": 826,
+            "episodes_for_delta_0p05": 133,
+            "episodes_for_delta_0p10": 34
+          },
+          "ordering": {
+            "n_items": 15878,
+            "item_flip_rate": 0.2260990049124575,
+            "sigma_item": 0.4754986907578795,
+            "sigma_episode_modelled": 0.22564184107893084,
+            "n_episodes_needed_delta_target": 1000,
+            "episodes_for_delta_0p05": 160,
+            "episodes_for_delta_0p10": 40
+          },
+          "pct": {
+            "n_items": 15669,
+            "item_flip_rate": 0.2656838343225477,
+            "sigma_item": 0.5154452777187387,
+            "sigma_episode_modelled": 0.24459798460122198,
+            "n_episodes_needed_delta_target": 1174,
+            "episodes_for_delta_0p05": 188,
+            "episodes_for_delta_0p10": 47
+          }
+        }
+      }
+    }
+  },
+  "per_family_gating_verdict": {
+    "scenario_pair": "q0-cand_search",
+    "dev_episodes_per_family": 12,
+    "dev_items_per_family": 96,
+    "dev_episodes_per_stratum": 4,
+    "dev_items_per_stratum": 32,
+    "pool_sigma_dev60ep": 0.18470133549417916,
+    "per_family_sigma_median": 0.16503103664327978,
+    "delta_min_per_family_at_dev_size": 0.14937683381601355,
+    "delta_min_per_stratum_at_dev_size": 0.25872826564310825,
+    "delta_min_per_family_at_dev_size_using_median_family_sigma": 0.13346851915927022,
+    "confirm_episodes_per_family": 801,
+    "final_episodes_per_family": 135,
+    "delta_min_per_family_at_confirm_size": 0.018283427538627807,
+    "delta_min_per_family_at_final_size": 0.04453556729017275,
+    "sigma_uncertainty_note": "逐 stratum 的 σ 只有 3 个自由度，逐 family 11 个自由度 —— 点估计不能直接当门限，故结论用**整池 pooled σ**（60 ep）而不是各格子的 σ。",
+    "required_scale_per_family": {
+      "0.01": {
+        "delta": 0.01,
+        "n_episodes_per_family": 2678,
+        "items_per_family": 21424,
+        "items_all_5_families": 107120,
+        "n_episodes_per_stratum": 893,
+        "generations_to_accumulate_on_dev": 223.2,
+        "gold_prob_n_episodes_per_family": 1339,
+        "gold_prob_generations_to_accumulate_on_dev": 111.6,
+        "feasible_at_dev_size": false,
+        "feasible_at_confirm_size": false,
+        "feasible_at_final_size": false
+      },
+      "0.02": {
+        "delta": 0.02,
+        "n_episodes_per_family": 670,
+        "items_per_family": 5360,
+        "items_all_5_families": 26800,
+        "n_episodes_per_stratum": 224,
+        "generations_to_accumulate_on_dev": 55.8,
+        "gold_prob_n_episodes_per_family": 335,
+        "gold_prob_generations_to_accumulate_on_dev": 27.9,
+        "feasible_at_dev_size": false,
+        "feasible_at_confirm_size": true,
+        "feasible_at_final_size": false
+      },
+      "0.03": {
+        "delta": 0.03,
+        "n_episodes_per_family": 298,
+        "items_per_family": 2384,
+        "items_all_5_families": 11920,
+        "n_episodes_per_stratum": 100,
+        "generations_to_accumulate_on_dev": 24.8,
+        "gold_prob_n_episodes_per_family": 149,
+        "gold_prob_generations_to_accumulate_on_dev": 12.4,
+        "feasible_at_dev_size": false,
+        "feasible_at_confirm_size": true,
+        "feasible_at_final_size": false
+      },
+      "0.05": {
+        "delta": 0.05,
+        "n_episodes_per_family": 108,
+        "items_per_family": 864,
+        "items_all_5_families": 4320,
+        "n_episodes_per_stratum": 36,
+        "generations_to_accumulate_on_dev": 9.0,
+        "gold_prob_n_episodes_per_family": 54,
+        "gold_prob_generations_to_accumulate_on_dev": 4.5,
+        "feasible_at_dev_size": false,
+        "feasible_at_confirm_size": true,
+        "feasible_at_final_size": true
+      },
+      "0.1": {
+        "delta": 0.1,
+        "n_episodes_per_family": 27,
+        "items_per_family": 216,
+        "items_all_5_families": 1080,
+        "n_episodes_per_stratum": 9,
+        "generations_to_accumulate_on_dev": 2.2,
+        "gold_prob_n_episodes_per_family": 14,
+        "gold_prob_generations_to_accumulate_on_dev": 1.2,
+        "feasible_at_dev_size": false,
+        "feasible_at_confirm_size": true,
+        "feasible_at_final_size": true
+      }
+    },
+    "feasible_per_family_gating_at_dev_size": false,
+    "feasible_per_family_gating_at_confirm_size_delta_0p02": true,
+    "which_deltas_feasible_at_confirm_size": [
+      "0.02",
+      "0.03",
+      "0.05",
+      "0.1"
+    ],
+    "recommendation": "逐 family 门**不能**挂在 dev 上（12 ep/family → 只能分辨 ~13–15 点，而观察到的损伤是 3–7 点）；可行路径有三条：(1) **在确认池上做逐 family 判定**（本池 confirm 给每 family 801 episode → δ≈1.8 点，达标 δ=0.02）；(2) **跨代累积**：每代 dev 给每 family 12 episode，累积到 670 episode 需要 ~56 代（用 gold_prob ≈ 28 代），适合『家族疑似偏移』时再启用；(3) **定向探针**：只在某 family 被标记可疑时，对该 family 单独开一次 670-episode 探针（5,360 题，≈1.5 min GPU），其它 family 不动。**不建议**把 dev 从 480 题放大——它是每候选成本，会乘以候选数×代数。"
+  },
+  "note": "逐 stratum / 逐 family 的 σ 与 δ_min 是**诊断量**；判定轴仍是整池 episode 配对差。本文件的用途：量化『若下一轮要上逐 family 门，需要多大池子』。"
+}

@@ -1,0 +1,15 @@
+{
+  "delta_n": 62107,
+  "id_remap": {},
+  "new_n": 85815,
+  "note": "按题干复用旧分数；同一题干在不同 stratum 间移动时，以新池的 stratum 标签为准（模型得分只取决于题面）",
+  "old_items_absent_from_new": [],
+  "old_n": 23708,
+  "old_scores_files": [
+    "remote/scores_q0_pool_v3.jsonl",
+    "remote/scores_bf16_pool_v3.jsonl"
+  ],
+  "reuse_n": 23708,
+  "reuse_rate": 0.2762687175901649,
+  "scored_old_n": 23708
+}

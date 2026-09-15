@@ -1,0 +1,335 @@
+{
+  "schema": "minicpm5-decontamination-v3",
+  "method": {
+    "A_signature": "题干整数多重集(剥列表编号,含重复,排序)精确相等 且 答案整数精确相等；仅对含 >= 100 的数的条目生效（小数字多重集撞车率过高）",
+    "A2_exact_question": "sha1(lowercase alnum-folded question) == sha1(row user text); 全语料",
+    "B_ngram": "n=min(13,#question tokens)>=5 词 n-gram 交集；对 user 侧 <= 3000 词的行",
+    "C_blocked_substring": "长行(>3000 词)且含条目 >=3 位数字锚：规范化题干子串包含",
+    "unchanged_from": "16 票（2026-09-10）定义、17 票原样重跑；本脚本从 decontaminate.py import 常量与函数，未重定义阈值"
+  },
+  "corpus_root": "/home/goooice/data/ultradata",
+  "stats": {
+    "rows": 182369,
+    "bytes": 4826655620,
+    "tokens": 591324541,
+    "rows_ngram_checked": 165276,
+    "rows_blocked_substring": 16086,
+    "long_rows_skipped_ngram": 17054
+  },
+  "per_layer": {
+    "rl2609/data/Knowledge": {
+      "files": 2,
+      "rows": 11872,
+      "bytes": 9917256,
+      "hits": 0,
+      "group": "ultradata_rl_2609"
+    },
+    "rl2609/data/Long_Context": {
+      "files": 2,
+      "rows": 18045,
+      "bytes": 3589447206,
+      "hits": 0,
+      "group": "ultradata_rl_2609"
+    },
+    "rl2609/data/Math": {
+      "files": 4,
+      "rows": 32412,
+      "bytes": 14395577,
+      "hits": 3,
+      "group": "ultradata_rl_2609"
+    },
+    "rl2609_code_samples": {
+      "files": 36,
+      "rows": 40,
+      "bytes": 108000026,
+      "hits": 0,
+      "group": "ultradata_rl_2609_code_sample"
+    },
+    "sft2605/data/no_think/Knowledge": {
+      "files": 4,
+      "rows": 40000,
+      "bytes": 84573177,
+      "hits": 0,
+      "group": "ultradata_sft_2605_sample"
+    },
+    "sft2605/data/no_think/Math": {
+      "files": 5,
+      "rows": 50000,
+      "bytes": 542711189,
+      "hits": 14,
+      "group": "ultradata_sft_2605_sample"
+    },
+    "sft_agent2609/data/General_Agent": {
+      "files": 1,
+      "rows": 10000,
+      "bytes": 373239121,
+      "hits": 0,
+      "group": "ultradata_sft_agent_2609_sample"
+    },
+    "sft_agent2609/data/Search_Agent": {
+      "files": 1,
+      "rows": 10000,
+      "bytes": 36736287,
+      "hits": 0,
+      "group": "ultradata_sft_agent_2609_sample"
+    },
+    "sft_agent2609/data/Tool_Use": {
+      "files": 1,
+      "rows": 10000,
+      "bytes": 67635781,
+      "hits": 0,
+      "group": "ultradata_sft_agent_2609_sample"
+    }
+  },
+  "layer_rows_by_group": {
+    "ultradata_rl_2609": 62329,
+    "ultradata_rl_2609_code_sample": 40,
+    "ultradata_sft_2605_sample": 90000,
+    "ultradata_sft_agent_2609_sample": 30000
+  },
+  "n_items": 85815,
+  "n_items_hit": 18,
+  "hit_rate": 0.0002097535395909806,
+  "hits_by_check": {
+    "A_signature": 17,
+    "A2_exact_question": 1,
+    "B_ngram": 1,
+    "C_blocked_substring": 0
+  },
+  "hit_item_ids": [
+    "mini18-modulo-easy-0366-a7f0ed195c1c",
+    "mini18-modulo-easy-1250-e0e05e0e3803",
+    "mini18-modulo-easy-3931-4b240473c613",
+    "mini18-modulo-medium-2220-4784219f5f02",
+    "mini18-pct-easy-1134-75666a9b76d3",
+    "mini18-pct-easy-2413-418847dbf1ee",
+    "mini18-pct-medium-0270-56648c3c3703",
+    "mini18-pct-medium-0391-8a2a9754678f",
+    "mini18-pct-medium-0537-e07fd43ccf24",
+    "mini18-pct-medium-0559-7ec18c9647dc",
+    "mini18-pct-medium-0968-16512517e838",
+    "mini18-pct-medium-1007-0693f2e16b89",
+    "mini18-pct-medium-2019-43f8c64167b9",
+    "mini18-pct-medium-2151-a6e884251cad",
+    "mini18-pct-medium-2239-f8b0a2fd66ff",
+    "mini18-pct-medium-2316-28a44af1165a",
+    "mini18-pct-medium-2869-ec0c05ed86e3",
+    "mini18-pct-medium-5002-925aa72d0b90"
+  ],
+  "hits_by_family": {
+    "modulo": 4,
+    "pct": 14
+  },
+  "hits_by_stratum": {
+    "modulo/easy": 3,
+    "modulo/medium": 1,
+    "pct/easy": 2,
+    "pct/medium": 12
+  },
+  "hits_by_check_and_layer": {
+    "A_signature": {
+      "rl2609/data/Math": 2,
+      "sft2605/data/no_think/Math": 15
+    },
+    "A2_exact_question": {
+      "sft2605/data/no_think/Math": 1
+    },
+    "B_ngram": {
+      "sft2605/data/no_think/Math": 1
+    },
+    "C_blocked_substring": {}
+  },
+  "hit_item_layers": {
+    "mini18-modulo-easy-0366-a7f0ed195c1c": {
+      "A_signature": [
+        "sft2605/data/no_think/Math"
+      ]
+    },
+    "mini18-modulo-easy-1250-e0e05e0e3803": {
+      "A_signature": [
+        "sft2605/data/no_think/Math"
+      ]
+    },
+    "mini18-modulo-easy-3931-4b240473c613": {
+      "A_signature": [
+        "sft2605/data/no_think/Math"
+      ]
+    },
+    "mini18-modulo-medium-2220-4784219f5f02": {
+      "A2_exact_question": [
+        "sft2605/data/no_think/Math"
+      ],
+      "B_ngram": [
+        "sft2605/data/no_think/Math"
+      ]
+    },
+    "mini18-pct-easy-1134-75666a9b76d3": {
+      "A_signature": [
+        "rl2609/data/Math"
+      ]
+    },
+    "mini18-pct-easy-2413-418847dbf1ee": {
+      "A_signature": [
+        "rl2609/data/Math"
+      ]
+    },
+    "mini18-pct-medium-0270-56648c3c3703": {
+      "A_signature": [
+        "sft2605/data/no_think/Math"
+      ]
+    },
+    "mini18-pct-medium-0391-8a2a9754678f": {
+      "A_signature": [
+        "sft2605/data/no_think/Math"
+      ]
+    },
+    "mini18-pct-medium-0537-e07fd43ccf24": {
+      "A_signature": [
+        "sft2605/data/no_think/Math"
+      ]
+    },
+    "mini18-pct-medium-0559-7ec18c9647dc": {
+      "A_signature": [
+        "sft2605/data/no_think/Math"
+      ]
+    },
+    "mini18-pct-medium-0968-16512517e838": {
+      "A_signature": [
+        "sft2605/data/no_think/Math"
+      ]
+    },
+    "mini18-pct-medium-1007-0693f2e16b89": {
+      "A_signature": [
+        "sft2605/data/no_think/Math"
+      ]
+    },
+    "mini18-pct-medium-2019-43f8c64167b9": {
+      "A_signature": [
+        "sft2605/data/no_think/Math"
+      ]
+    },
+    "mini18-pct-medium-2151-a6e884251cad": {
+      "A_signature": [
+        "sft2605/data/no_think/Math"
+      ]
+    },
+    "mini18-pct-medium-2239-f8b0a2fd66ff": {
+      "A_signature": [
+        "sft2605/data/no_think/Math"
+      ]
+    },
+    "mini18-pct-medium-2316-28a44af1165a": {
+      "A_signature": [
+        "sft2605/data/no_think/Math"
+      ]
+    },
+    "mini18-pct-medium-2869-ec0c05ed86e3": {
+      "A_signature": [
+        "sft2605/data/no_think/Math"
+      ]
+    },
+    "mini18-pct-medium-5002-925aa72d0b90": {
+      "A_signature": [
+        "sft2605/data/no_think/Math"
+      ]
+    }
+  },
+  "hit_examples": {
+    "A_signature": {
+      "mini18-pct-easy-2413-418847dbf1ee": [
+        "rl2609/data/Math:31479",
+        "rl2609/data/Math:61238"
+      ],
+      "mini18-pct-easy-1134-75666a9b76d3": [
+        "rl2609/data/Math:35112"
+      ],
+      "mini18-pct-medium-0270-56648c3c3703": [
+        "sft2605/data/no_think/Math:109086",
+        "sft2605/data/no_think/Math:109361"
+      ],
+      "mini18-pct-medium-0537-e07fd43ccf24": [
+        "sft2605/data/no_think/Math:109086",
+        "sft2605/data/no_think/Math:109361"
+      ],
+      "mini18-pct-medium-0559-7ec18c9647dc": [
+        "sft2605/data/no_think/Math:109086",
+        "sft2605/data/no_think/Math:109361"
+      ],
+      "mini18-pct-medium-0968-16512517e838": [
+        "sft2605/data/no_think/Math:109086",
+        "sft2605/data/no_think/Math:109361"
+      ],
+      "mini18-modulo-easy-3931-4b240473c613": [
+        "sft2605/data/no_think/Math:121900",
+        "sft2605/data/no_think/Math:121904"
+      ],
+      "mini18-modulo-easy-0366-a7f0ed195c1c": [
+        "sft2605/data/no_think/Math:124351",
+        "sft2605/data/no_think/Math:124354"
+      ],
+      "mini18-pct-medium-0391-8a2a9754678f": [
+        "sft2605/data/no_think/Math:128103"
+      ],
+      "mini18-pct-medium-1007-0693f2e16b89": [
+        "sft2605/data/no_think/Math:128103"
+      ]
+    },
+    "A2_exact_question": {
+      "mini18-modulo-medium-2220-4784219f5f02": [
+        "sft2605/data/no_think/Math:129798"
+      ]
+    },
+    "B_ngram": {
+      "mini18-modulo-medium-2220-4784219f5f02": [
+        "sft2605/data/no_think/Math:129798"
+      ]
+    },
+    "C_blocked_substring": {}
+  },
+  "rl2609_layer_report": {
+    "question": "题集是否与 UltraData-RL-2609 层相交（下一轮的候选训练语料）？",
+    "ultradata_rl_2609_full_scan": true,
+    "ultradata_rl_2609_layers": [
+      "rl2609/data/Knowledge",
+      "rl2609/data/Long_Context",
+      "rl2609/data/Math"
+    ],
+    "ultradata_rl_2609_code_sample_only": true,
+    "n_hits_in_rl2609_layer": 2,
+    "hit_ids_in_rl2609_layer": [
+      "mini18-pct-easy-1134-75666a9b76d3",
+      "mini18-pct-easy-2413-418847dbf1ee"
+    ],
+    "n_hits_in_rl2609_code_sample": 0,
+    "hit_ids_in_rl2609_code_sample": [],
+    "n_hits_in_sft2605_sample": 16,
+    "n_hits_in_sft_agent_sample": 0,
+    "hit_ids_in_sft2605_sample": [
+      "mini18-modulo-easy-0366-a7f0ed195c1c",
+      "mini18-modulo-easy-1250-e0e05e0e3803",
+      "mini18-modulo-easy-3931-4b240473c613",
+      "mini18-modulo-medium-2220-4784219f5f02",
+      "mini18-pct-medium-0270-56648c3c3703",
+      "mini18-pct-medium-0391-8a2a9754678f",
+      "mini18-pct-medium-0537-e07fd43ccf24",
+      "mini18-pct-medium-0559-7ec18c9647dc",
+      "mini18-pct-medium-0968-16512517e838",
+      "mini18-pct-medium-1007-0693f2e16b89",
+      "mini18-pct-medium-2019-43f8c64167b9",
+      "mini18-pct-medium-2151-a6e884251cad",
+      "mini18-pct-medium-2239-f8b0a2fd66ff",
+      "mini18-pct-medium-2316-28a44af1165a",
+      "mini18-pct-medium-2869-ec0c05ed86e3",
+      "mini18-pct-medium-5002-925aa72d0b90"
+    ],
+    "hit_ids_in_sft_agent_sample": [],
+    "rows_scanned_by_group": {
+      "ultradata_rl_2609": 62329,
+      "ultradata_rl_2609_code_sample": 40,
+      "ultradata_sft_2605_sample": 90000,
+      "ultradata_sft_agent_2609_sample": 30000
+    },
+    "coverage_note": "RL-2609 的 Math/Knowledge/Long_Context 为全量扫描；RL-2609/Code 与 SFT-2605/SFT-Agent 为抽样（16/17 票同口径），抽样覆盖见 per_layer。"
+  },
+  "elapsed_s": 229.9
+}
