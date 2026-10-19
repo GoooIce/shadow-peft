@@ -9,6 +9,7 @@ import pytest
 
 from edge_cloud import knowledge
 from edge_cloud.backends import MockStreamingEdgeBackend
+from edge_cloud.boundaries import detect_boundary
 from edge_cloud.handoff import HandoffDecision, HandoffFeatures, HandoffStep
 from edge_cloud.handoff_eval import (
     NUMERIC_HANDOFF_FEATURES,
@@ -48,24 +49,51 @@ def test_token_counter_matches_the_mock_streaming_backend() -> None:
         assert count_tokens(generation.text) == generation.output_tokens
 
 
-def test_synthetic_dataset_is_deterministic_and_keeps_kb_keywords() -> None:
+def test_synthetic_dataset_is_deterministic_and_uses_prefix_semantics() -> None:
     first = synthetic_dataset(12, seed=7)
     second = synthetic_dataset(12, seed=7)
 
     assert first == second
     assert [sample.sample_id for sample in first] == [f"s{index:04d}" for index in range(12)]
 
+    hard = [sample for sample in first if sample.cloud_better_from is not None]
+    easy = [sample for sample in first if sample.cloud_better_from is None]
+    assert hard and easy
+
     for sample in first:
         entry = knowledge.lookup(sample.prompt)
         assert entry.key != "unknown", sample.prompt
-        assert sample.edge_answer == entry.edge_answer
         assert sample.cloud_answer == entry.cloud_answer
         assert sample.expected == sample.cloud_answer
-        assert sample.cloud_better_from == sample.risk_at
         assert sample.shadow_gap is not None
+
+    for sample in hard:
+        # The edge answer is a proper boundary-truncated prefix of the cloud answer.
+        assert sample.edge_answer != sample.cloud_answer
+        assert sample.cloud_answer.startswith(sample.edge_answer)
+        assert detect_boundary(sample.edge_answer) in {"sentence", "newline"}
+        assert sample.cloud_better_from == sample.risk_at
         assert sample.risk_at is not None
         # The oracle can only hand off when the label points inside the stream.
         assert 0 <= sample.risk_at < count_tokens(sample.edge_answer)
+
+    for sample in easy:
+        assert sample.edge_answer == sample.cloud_answer
+        assert sample.risk_at is None
+        assert sample.cloud_better_from is None
+
+
+def test_streaming_backend_can_override_the_knowledge_base_answer() -> None:
+    answer = "自定义端侧答案，截断在边界。"
+
+    generation = MockStreamingEdgeBackend(answer=answer).generate_until(
+        InferRequest(prompt="回流焊峰值温度"), _NeverPolicy()
+    )
+
+    assert generation.text == answer
+    assert generation.output_tokens == count_tokens(answer)
+    with pytest.raises(ValueError, match="answer"):
+        MockStreamingEdgeBackend(answer="   ")
 
 
 def test_synthetic_dataset_uses_a_different_seed_for_different_perturbations() -> None:
@@ -163,6 +191,8 @@ def test_all_strategies_share_the_result_schema_and_artifacts(tmp_path: Path) ->
         metrics = results["strategies"][strategy]
         assert metrics["n"] == 8
         assert 0.0 <= metrics["accuracy"] <= 1.0
+        assert metrics["accuracy"] == metrics["exact_match_rate"]
+        assert 0.0 <= metrics["contains_expected_rate"] <= 1.0
         assert results["curves"][strategy]["risk_coverage"]
         assert results["curves"][strategy]["cost_accuracy"]
         assert set(results["ci"][strategy]) == {"accuracy", "cost"}
@@ -226,6 +256,32 @@ def test_oracle_accuracy_is_at_least_probe_and_legacy(tmp_path: Path) -> None:
     assert metrics["probe"]["probe_fallback_rate"] == 0.0
     assert metrics["oracle"]["accuracy"] >= metrics["probe"]["accuracy"]
     assert metrics["oracle"]["accuracy"] >= metrics["legacy"]["accuracy"]
+
+
+def test_hard_samples_need_a_handoff_and_easy_samples_are_correct_on_edge() -> None:
+    samples = synthetic_dataset(30, seed=9)
+    run = run_evaluation(samples, strategies=STRATEGIES, seed=9, n_boot=0)
+
+    hard_ids = {sample.sample_id for sample in samples if sample.cloud_better_from is not None}
+    easy_ids = {sample.sample_id for sample in samples if sample.cloud_better_from is None}
+    by_strategy = {
+        name: [record for record in run.per_prompt if record["strategy"] == name]
+        for name in STRATEGIES
+    }
+
+    oracle_hard = [record for record in by_strategy["oracle"] if record["sample_id"] in hard_ids]
+    assert len(oracle_hard) == len(hard_ids)
+    assert sum(record["exact_match"] for record in oracle_hard) / len(oracle_hard) >= 0.9
+
+    edge_hard = [record for record in by_strategy["edge_only"] if record["sample_id"] in hard_ids]
+    assert edge_hard and not any(record["exact_match"] for record in edge_hard)
+    edge_easy = [record for record in by_strategy["edge_only"] if record["sample_id"] in easy_ids]
+    assert edge_easy and all(record["exact_match"] for record in edge_easy)
+    assert 0.0 < run.results["strategies"]["edge_only"]["accuracy"] < 0.6
+
+    for strategy in STRATEGIES:
+        metrics = run.results["strategies"][strategy]
+        assert metrics["accuracy"] == metrics["exact_match_rate"]
 
 
 def test_probe_without_an_artifact_falls_back_to_legacy() -> None:
