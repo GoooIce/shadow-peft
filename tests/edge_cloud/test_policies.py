@@ -8,7 +8,7 @@ import pytest
 
 from edge_cloud.handoff import HandoffFeatures, HandoffPolicy, HandoffStep
 from edge_cloud.policies import OraclePolicy, ProbePolicy
-from edge_cloud.probe import PROBE_VERSION, write_probe
+from edge_cloud.probe import PROBE_VERSION, fit_probe, write_probe
 
 _FIXED_TRAINED_AT = "2026-01-01T00:00:00+00:00"
 
@@ -195,6 +195,36 @@ def test_probe_policy_rejects_invalid_thresholds(tmp_path: Path) -> None:
         ProbePolicy(path, threshold=1.5)
     with pytest.raises(ValueError):
         ProbePolicy(path, threshold=0.5, threshold_by_task={"general": -0.1})
+
+
+def test_probe_policy_from_fitted_handoff_rows_triggers_only_on_handoff_features(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        {"kl_base_shadow": 0.9},
+        {"kl_base_shadow": 0.8},
+        {"kl_base_shadow": 0.95},
+        {"kl_base_shadow": 0.1},
+        {"kl_base_shadow": 0.15},
+        {"kl_base_shadow": 0.05},
+    ]
+    labels = [1, 1, 1, 0, 0, 0]
+    payload = fit_probe(rows, labels, threshold=0.5, trained_at=_FIXED_TRAINED_AT)
+    path = tmp_path / "fitted.json"
+    write_probe(payload, path)
+    policy = ProbePolicy(path, threshold=0.5)
+
+    assert policy.available is True
+    handoff = policy.observe(_step(prefix_tokens=4, kl_base_shadow=0.9))
+    stay = policy.observe(_step(prefix_tokens=2, kl_base_shadow=0.1))
+
+    assert handoff.action == "handoff"
+    assert handoff.reason == "low_prefix_trust"
+    assert handoff.handoff_index == 4
+    assert handoff.prefix_trust is not None and handoff.prefix_trust < 0.5
+    assert stay.action == "continue"
+    assert stay.reason is None
+    assert stay.prefix_trust is not None and stay.prefix_trust > 0.5
 
 
 def test_oracle_policy_hands_off_once_the_gold_index_is_reached() -> None:

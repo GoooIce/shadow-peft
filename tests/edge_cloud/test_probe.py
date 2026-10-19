@@ -100,6 +100,65 @@ def test_optional_missing_feature_is_imputed_at_the_training_mean(tmp_path: Path
     )
 
 
+def _handoff_direction_rows() -> tuple[list[dict[str, Any]], list[int]]:
+    """Rows whose feature is high exactly where the prefix should hand off."""
+    handoff = [{"kl_base_shadow": 0.9}, {"kl_base_shadow": 0.8}, {"kl_base_shadow": 0.95}]
+    stay = [{"kl_base_shadow": 0.1}, {"kl_base_shadow": 0.15}, {"kl_base_shadow": 0.05}]
+    return handoff + stay, [1, 1, 1, 0, 0, 0]
+
+
+def test_label_one_means_handoff_and_scores_low_prefix_trust() -> None:
+    rows, labels = _handoff_direction_rows()
+
+    payload = fit_probe(
+        rows, labels, threshold=0.5, trained_at=_FIXED_TRAINED_AT
+    )
+    model = ProbeModel.from_dict(payload)
+
+    handoff_trust = model.score(rows[0])
+    stay_trust = model.score(rows[-1])
+    assert handoff_trust < stay_trust
+    assert handoff_trust < 0.5 < stay_trust
+
+
+def test_fit_load_preserves_the_trust_direction(tmp_path: Path) -> None:
+    rows, labels = _handoff_direction_rows()
+    payload = fit_probe(
+        rows, labels, threshold=0.5, trained_at=_FIXED_TRAINED_AT
+    )
+    path = tmp_path / "probe.json"
+    write_probe(payload, path)
+
+    loaded = ProbeModel.load(path)
+
+    assert loaded.score(rows[0]) < 0.5
+    assert loaded.score(rows[-1]) > 0.5
+    assert loaded.score(rows[0]) < loaded.score(rows[-1])
+
+
+def test_calibration_positive_rate_is_the_handoff_rate() -> None:
+    rows, labels = _handoff_direction_rows()
+
+    payload = fit_probe(
+        rows,
+        labels,
+        threshold=0.5,
+        calibration_bins=2,
+        trained_at=_FIXED_TRAINED_AT,
+    )
+    model = ProbeModel.from_dict(payload)
+    lowest, highest = payload["calibration"]
+
+    # Both bins are populated: the handoff rows score low, the stay rows high.
+    assert lowest["count"] == 3
+    assert highest["count"] == 3
+    assert lowest["positive_rate"] == pytest.approx(1.0)
+    assert highest["positive_rate"] == pytest.approx(0.0)
+    assert lowest["mean_score"] == pytest.approx(
+        sum(model.score(row) for row in rows[:3]) / 3, abs=1e-6
+    )
+
+
 def test_fit_probe_returns_the_documented_artifact_schema() -> None:
     rows = [
         {"base_margin": 0.9, "low_prob_frac": 0.0},
@@ -161,8 +220,9 @@ def test_fit_load_score_round_trip_preserves_scores(tmp_path: Path) -> None:
 
     for row in rows:
         assert loaded.score(row) == pytest.approx(written.score(row), abs=1e-12)
-    assert loaded.score(rows[0]) > loaded.score(rows[2])
-    assert loaded.score(rows[0]) > 0.5 > loaded.score(rows[2])
+    # Labels 1 mean "should hand off", so the first rows must score lower trust.
+    assert loaded.score(rows[0]) < loaded.score(rows[2])
+    assert loaded.score(rows[0]) < 0.5 < loaded.score(rows[2])
 
 
 def test_fit_is_deterministic_and_fingerprint_ignores_trained_at() -> None:
@@ -226,10 +286,23 @@ def test_fit_probe_calibration_bins_cover_every_training_row() -> None:
             assert 0.0 <= entry["mean_score"] <= 1.0
 
 
-def test_fit_probe_handles_a_single_class_without_diverging() -> None:
+def test_fit_probe_one_class_continue_rows_score_high_trust() -> None:
     payload = fit_probe(
         [{"base_margin": 0.9}, {"base_margin": 0.8}],
         [0, 0],
+        trained_at=_FIXED_TRAINED_AT,
+    )
+    model = ProbeModel.from_dict(payload)
+
+    assert all(math.isfinite(coef) for coef in payload["coefs"])
+    assert math.isfinite(payload["intercept"])
+    assert model.score({"base_margin": 0.9}) > 0.5
+
+
+def test_fit_probe_one_class_handoff_rows_score_low_trust() -> None:
+    payload = fit_probe(
+        [{"base_margin": 0.9}, {"base_margin": 0.8}],
+        [1, 1],
         trained_at=_FIXED_TRAINED_AT,
     )
     model = ProbeModel.from_dict(payload)
@@ -276,7 +349,8 @@ def test_fit_payload_written_with_plain_json_is_still_loadable(tmp_path: Path) -
 
     model = ProbeModel.load(path)
 
-    assert model.score({"base_margin": 0.9}) > 0.5 > model.score({"base_margin": 0.2})
+    # base_margin 0.9 is labelled should_handoff -> low trust; 0.2 stays on edge.
+    assert model.score({"base_margin": 0.9}) < 0.5 < model.score({"base_margin": 0.2})
 
 
 def test_load_missing_file_raises_file_not_found(tmp_path: Path) -> None:
