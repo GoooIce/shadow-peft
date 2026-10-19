@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 from dataclasses import fields
 from pathlib import Path
@@ -169,6 +170,7 @@ def test_all_strategies_share_the_result_schema_and_artifacts(tmp_path: Path) ->
     paths = write_outputs(run, tmp_path / "run")
     assert paths["results"].name == "results.json"
     assert paths["summary"].name == "summary.csv"
+    assert paths["curves"].name == "curves.csv"
     assert paths["per_prompt"].name == "per_prompt.jsonl"
     assert load_results(paths["results"]) == results
 
@@ -178,11 +180,22 @@ def test_all_strategies_share_the_result_schema_and_artifacts(tmp_path: Path) ->
     assert first["strategy"] == "edge_only"
     assert first["sample_id"] == "s0000"
 
-    import csv
-
     with paths["summary"].open("r", encoding="utf-8", newline="") as handle:
         summary = list(csv.DictReader(handle))
     assert [row["strategy"] for row in summary] == list(STRATEGIES)
+
+    with paths["curves"].open("r", encoding="utf-8", newline="") as handle:
+        curve_rows = list(csv.DictReader(handle))
+    expected_points = sum(
+        len(curves["risk_coverage"]) + len(curves["cost_accuracy"])
+        for curves in results["curves"].values()
+    )
+    assert len(curve_rows) == expected_points
+    assert {row["curve"] for row in curve_rows} == {"risk_coverage", "cost_accuracy"}
+    oracle_cuts = [
+        row for row in curve_rows if row["strategy"] == "oracle" and row["curve"] == "cost_accuracy"
+    ]
+    assert all(row["x_name"] == "cut" for row in oracle_cuts)
 
 
 def test_repeated_runs_are_byte_identical(tmp_path: Path) -> None:
@@ -193,7 +206,7 @@ def test_repeated_runs_are_byte_identical(tmp_path: Path) -> None:
     first_paths = write_outputs(first, tmp_path / "first")
     second_paths = write_outputs(second, tmp_path / "second")
 
-    for name in ("results", "summary", "per_prompt"):
+    for name in ("results", "summary", "curves", "per_prompt"):
         assert first_paths[name].read_bytes() == second_paths[name].read_bytes(), name
 
 

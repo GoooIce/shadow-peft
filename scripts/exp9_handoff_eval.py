@@ -179,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     print(f"results : {paths['results']}")
     print(f"summary : {paths['summary']}")
+    print(f"curves  : {paths['curves']}")
     print(f"prompts : {paths['per_prompt']}")
     return 0
 

@@ -22,7 +22,8 @@ Everything that affects the numbers is deterministic: synthetic data is seeded,
 latency is a closed-form function of token counts and configured prices (never
 wall-clock), the cloud answer is scripted from the dataset, and bootstrap
 resampling uses ``random.Random(seed)``. Running the same command twice writes
-byte-identical ``results.json``, ``summary.csv`` and ``per_prompt.jsonl``.
+byte-identical ``results.json``, ``summary.csv``, ``curves.csv`` and
+``per_prompt.jsonl``.
 
 Accuracy semantics: a final answer is correct when its whitespace-normalized
 form equals the expected cloud answer or ends with it. The second case covers a
@@ -869,6 +870,16 @@ _STRATEGY_COLUMNS: tuple[str, ...] = (
     "continuation_mismatch_rate",
 )
 
+_CURVE_COLUMNS: tuple[str, ...] = (
+    "strategy",
+    "curve",
+    "x_name",
+    "x",
+    "accuracy",
+    "risk",
+    "cost",
+)
+
 
 def _format_cell(value: Any) -> str:
     if value is None:
@@ -912,13 +923,47 @@ def _summary_rows(results: Mapping[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _curve_rows(results: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Flatten both curve kinds into one long-form CSV table."""
+
+    rows: list[dict[str, Any]] = []
+    for strategy, curves in results["curves"].items():
+        for point in curves["risk_coverage"]:
+            rows.append(
+                {
+                    "strategy": strategy,
+                    "curve": "risk_coverage",
+                    "x_name": "threshold",
+                    "x": point["threshold"],
+                    "accuracy": None,
+                    "risk": point["risk"],
+                    "cost": None,
+                }
+            )
+        for point in curves["cost_accuracy"]:
+            x_name = "cut" if "cut" in point else "threshold"
+            rows.append(
+                {
+                    "strategy": strategy,
+                    "curve": "cost_accuracy",
+                    "x_name": x_name,
+                    "x": point[x_name],
+                    "accuracy": point["accuracy"],
+                    "risk": None,
+                    "cost": point["cost"],
+                }
+            )
+    return rows
+
+
 def write_outputs(run: EvaluationRun, out_dir: str | Path) -> dict[str, Path]:
-    """Write ``results.json``, ``summary.csv`` and ``per_prompt.jsonl`` stably."""
+    """Write ``results.json``, ``summary.csv``, ``curves.csv`` and ``per_prompt.jsonl``."""
 
     target = Path(out_dir)
     target.mkdir(parents=True, exist_ok=True)
     results_path = target / "results.json"
     summary_path = target / "summary.csv"
+    curves_path = target / "curves.csv"
     per_prompt_path = target / "per_prompt.jsonl"
 
     results_path.write_text(
@@ -933,6 +978,11 @@ def write_outputs(run: EvaluationRun, out_dir: str | Path) -> dict[str, Path]:
         writer.writeheader()
         for row in _summary_rows(run.results):
             writer.writerow({key: _format_cell(row[key]) for key in _STRATEGY_COLUMNS})
+    with curves_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(_CURVE_COLUMNS), lineterminator="\n")
+        writer.writeheader()
+        for row in _curve_rows(run.results):
+            writer.writerow({key: _format_cell(row[key]) for key in _CURVE_COLUMNS})
     with per_prompt_path.open("w", encoding="utf-8") as handle:
         for record in run.per_prompt:
             handle.write(
@@ -942,6 +992,7 @@ def write_outputs(run: EvaluationRun, out_dir: str | Path) -> dict[str, Path]:
     return {
         "results": results_path,
         "summary": summary_path,
+        "curves": curves_path,
         "per_prompt": per_prompt_path,
     }
 
