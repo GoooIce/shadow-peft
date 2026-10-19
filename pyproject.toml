@@ -37,6 +37,7 @@ Repository = "https://github.com/ShadowLLM/shadow-peft"
 
 [project.scripts]
 shadow-annotate = "shadow_lab.annotation.cli:main"
+edge-cloud = "edge_cloud.__main__:main"
 
 [dependency-groups]
 dev = [
@@ -49,7 +50,7 @@ requires = ["hatchling>=1.24.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/shadow_core", "src/shadow_lab", "src/shadow_peft", "src/shadow_peft_mlx"]
+packages = ["src/shadow_core", "src/shadow_lab", "src/shadow_peft", "src/shadow_peft_mlx", "src/edge_cloud"]
 
 [tool.ruff]
 line-length = 100

@@ -1,0 +1,54 @@
+{
+  "edge": {
+    "edge_id": "line-a-01",
+    "backend": {
+      "kind": "transformers",
+      "model_path": "/opt/models/Qwen3-0.6B",
+      "device": "auto",
+      "dtype": "bfloat16",
+      "shadow_ckpt": null,
+      "system_prompt": "你是生产线工艺与质量助手。回答必须给出结论、依据和可执行步骤；涉及数值时写明计算口径。",
+      "max_context_tokens": 2048
+    },
+    "cloud_url": "https://cloud.example.com",
+    "agent_port": 8080,
+    "cloud_timeout_ms": 8000,
+    "escalation_threshold": 0.62,
+    "require_cloud_tasks": [
+      "quality_verdict",
+      "safety"
+    ],
+    "max_cloud_calls_per_min": 120,
+    "max_cloud_ratio": 0.4,
+    "cloud_window_s": 60,
+    "offline": false,
+    "circuit_failures": 3,
+    "circuit_cooldown_s": 30,
+    "outbox_path": "~/data/edgecloud/outbox.jsonl",
+    "feedback_path": "~/data/edgecloud/edge_feedback.jsonl",
+    "adapter_version": "v1",
+    "enable_outbox_flusher": true,
+    "outbox_interval_s": 10,
+    "request_log_size": 512,
+    "expected_format_by_task": {
+      "quality_verdict": "verdict",
+      "process_calc": "number"
+    }
+  },
+  "cloud": {
+    "cloud_id": "cloud-prod",
+    "port": 9100,
+    "backend": {
+      "kind": "openai",
+      "base_url": "https://cloud.example.com/v1",
+      "model": "qwen3-32b",
+      "api_key": "",
+      "timeout_s": 30,
+      "supports_logprobs": true,
+      "system_prompt": "你是生产线工艺与质量专家。回答要给出结论、依据和可执行步骤；涉及数值时写明计算口径；不确定时明确要求补充上下文。"
+    },
+    "feedback_path": "~/data/edgecloud/cloud_feedback.jsonl",
+    "registry_path": "~/data/edgecloud/registry.json",
+    "dataset_path": "~/data/edgecloud/sft_hard_cases.jsonl"
+  }
+}

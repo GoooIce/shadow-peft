@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>端云协同推理控制台</title>
+<style>
+  :root{
+    --bg:#eef2f6; --panel:#ffffff; --ink:#0f172a; --muted:#64748b; --line:#dbe3ec;
+    --edge:#0f9d76; --edge-soft:#e7f7f1; --cloud:#2563eb; --cloud-soft:#eaf1ff;
+    --warn:#d97706; --warn-soft:#fef3e2; --danger:#dc2626; --danger-soft:#fdecec;
+    --shadow:0 1px 2px rgba(15,23,42,.04),0 8px 24px rgba(15,23,42,.06);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+    background:
+      radial-gradient(1200px 400px at 85% -10%,rgba(37,99,235,.10),transparent 60%),
+      radial-gradient(900px 360px at 5% 0%,rgba(15,157,118,.10),transparent 55%),
+      var(--bg);
+    color:var(--ink); min-height:100vh; padding-bottom:40px;
+  }
+  .wrap{max-width:1320px;margin:0 auto;padding:22px 22px 0}
+  header{
+    background:linear-gradient(135deg,#0b1220 0%,#111f36 55%,#0d2130 100%);
+    color:#e8eef7;border-radius:18px;padding:16px 22px;display:flex;gap:20px;
+    align-items:center;justify-content:space-between;flex-wrap:wrap;box-shadow:var(--shadow);
+    position:relative;overflow:hidden;
+  }
+  header::after{
+    content:"";position:absolute;inset:0;
+    background-image:linear-gradient(rgba(255,255,255,.045) 1px,transparent 1px),
+                     linear-gradient(90deg,rgba(255,255,255,.045) 1px,transparent 1px);
+    background-size:34px 34px;pointer-events:none;
+  }
+  .brand{display:flex;align-items:center;gap:14px;position:relative;z-index:1}
+  .logo{
+    width:46px;height:46px;border-radius:13px;display:grid;place-items:center;font-weight:800;
+    letter-spacing:.5px;background:linear-gradient(135deg,#34d399,#3b82f6);color:#06121f;
+    box-shadow:0 6px 18px rgba(52,211,153,.25);
+  }
+  h1{font-size:21px;font-weight:700;letter-spacing:.2px}
+  .sub{font-size:12.5px;color:#93a4bd;margin-top:3px}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;position:relative;z-index:1}
+  .chip{
+    display:inline-flex;align-items:center;gap:7px;padding:7px 11px;border-radius:999px;
+    background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.13);
+    font-size:12px;color:#d8e3f2;white-space:nowrap;
+  }
+  .dot{width:7px;height:7px;border-radius:50%;background:#94a3b8}
+  .dot.ok{background:#34d399;box-shadow:0 0 0 3px rgba(52,211,153,.18)}
+  .dot.bad{background:#f87171;box-shadow:0 0 0 3px rgba(248,113,113,.18)}
+  .dot.warn{background:#fbbf24;box-shadow:0 0 0 3px rgba(251,191,36,.18)}
+
+  main{display:grid;grid-template-columns:430px minmax(0,1fr);gap:18px;margin-top:14px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow)}
+  .panel-head{display:flex;align-items:center;justify-content:space-between;padding:14px 18px 0}
+  .panel-head h2{font-size:14px;letter-spacing:.3px}
+  .panel-head .hint{font-size:11.5px;color:var(--muted)}
+  .panel-body{padding:12px 18px 16px}
+
+  .sect-label{font-size:11px;font-weight:700;letter-spacing:.12em;color:var(--muted);text-transform:uppercase;margin-bottom:8px}
+  .scenarios{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-bottom:12px}
+  .scenario{
+    border:1px solid var(--line);background:#f8fafc;color:#334155;border-radius:8px;
+    padding:6px 4px;font-size:10.5px;cursor:pointer;transition:.15s;white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis;
+  }
+  .scenario:hover{border-color:#b8c7d9;background:#fff;transform:translateY(-1px)}
+  .scenario.hard{border-color:#f3d4a6;background:var(--warn-soft);color:#8a4b00}
+  textarea,input[type=text],select{
+    width:100%;border:1px solid var(--line);border-radius:11px;background:#fbfcfe;color:var(--ink);
+    padding:11px 12px;font-size:13.5px;font-family:inherit;line-height:1.6;outline:none;transition:.15s;
+  }
+  textarea{resize:vertical;min-height:90px}
+  textarea:focus,input[type=text]:focus,select:focus{border-color:#7aa7e8;background:#fff;box-shadow:0 0 0 3px rgba(37,99,235,.10)}
+  .field-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+  .field label{display:block;font-size:11.5px;color:var(--muted);margin-bottom:5px}
+  .switch-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:10px;padding:9px 12px;border:1px solid var(--line);border-radius:11px;background:#f8fafc}
+  .switch-row .t{font-size:12.5px;font-weight:600}
+  .switch-row .d{font-size:11px;color:var(--muted);margin-top:2px}
+  .switch{position:relative;display:inline-block;width:42px;height:24px;flex:0 0 auto}
+  .switch input{opacity:0;width:0;height:0}
+  .slider{position:absolute;inset:0;background:#cbd5e1;border-radius:999px;cursor:pointer;transition:.2s}
+  .slider::before{content:"";position:absolute;width:18px;height:18px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+  .switch input:checked + .slider{background:var(--warn)}
+  .switch input:checked + .slider::before{transform:translateX(18px)}
+  .range-row{margin-top:10px}
+  .range-row .top{display:flex;justify-content:space-between;font-size:11.5px;color:var(--muted);margin-bottom:6px}
+  .range-row input[type=range]{width:100%;accent-color:var(--cloud)}
+  .run-btn{
+    width:100%;margin-top:12px;border:0;border-radius:12px;padding:12px 18px;font-size:14.5px;font-weight:700;
+    color:#fff;background:linear-gradient(135deg,#1d4ed8,#2563eb);cursor:pointer;
+    box-shadow:0 8px 20px rgba(37,99,235,.22);transition:.15s;letter-spacing:.5px;
+  }
+  .run-btn:hover{transform:translateY(-1px);box-shadow:0 10px 24px rgba(37,99,235,.28)}
+  .run-btn:disabled{opacity:.6;cursor:wait;transform:none}
+  .footnote{margin-top:8px;font-size:10.5px;color:var(--muted);line-height:1.6}
+
+  .decision{
+    display:flex;align-items:center;gap:13px;padding:14px 16px;border-radius:12px;
+    border:1px solid var(--line);background:#f8fafc;margin-bottom:14px;
+  }
+  .decision .icon{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;font-size:18px;flex:0 0 auto}
+  .decision .ttl{font-size:14.5px;font-weight:700}
+  .decision .ds{font-size:12px;color:var(--muted);margin-top:2px}
+  .decision.edge{background:var(--edge-soft);border-color:#bfe9da}
+  .decision.edge .icon{background:#d2f2e7;color:#087a5b}
+  .decision.cloud{background:var(--cloud-soft);border-color:#c7d9fe}
+  .decision.cloud .icon{background:#d9e6ff;color:#1d4ed8}
+  .decision.degraded{background:var(--danger-soft);border-color:#f5c7c7}
+  .decision.degraded .icon{background:#fbdcdc;color:#b91c1c}
+  .decision.idle .icon{background:#e9eef5;color:#64748b}
+
+  .models{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .model{border:1px solid var(--line);border-radius:13px;padding:13px 14px;background:#fff;min-height:190px;display:flex;flex-direction:column;gap:9px}
+  .model.dim{background:#fafbfd;opacity:.72}
+  .model .mh{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+  .model .name{font-size:12.5px;font-weight:700}
+  .model .tag{font-size:10px;padding:3px 7px;border-radius:999px;background:#eef2f7;color:#53627a;white-space:nowrap}
+  .model.edge .tag{background:var(--edge-soft);color:#087a5b}
+  .model.cloud .tag{background:var(--cloud-soft);color:#1d4ed8}
+  .meta-line{display:flex;justify-content:space-between;font-size:10.5px;color:var(--muted)}
+  .bar{height:6px;border-radius:999px;background:#edf1f6;overflow:hidden}
+  .bar > i{display:block;height:100%;width:0;border-radius:999px;background:var(--edge);transition:width .35s ease}
+  .bar.cloud > i{background:var(--cloud)}
+  .bar.low > i{background:var(--danger)}
+  .bar.mid > i{background:var(--warn)}
+  .out{font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-word;color:#1e293b;flex:1}
+  .out.empty{color:#94a3b8;font-style:italic}
+
+  .trace{border:1px solid var(--line);border-radius:13px;margin-top:12px;background:#fbfcfe}
+  .trace .th{display:flex;justify-content:space-between;padding:10px 13px;border-bottom:1px solid var(--line);font-size:11.5px;font-weight:700;color:#475569}
+  .trace ol{list-style:none;padding:9px 13px 11px;display:flex;flex-direction:column;gap:6px}
+  .trace li{font-size:11.5px;color:#475569;line-height:1.55;padding-left:16px;position:relative}
+  .trace li::before{content:"";position:absolute;left:2px;top:7px;width:5px;height:5px;border-radius:50%;background:#94a3b8}
+
+  .feedback{margin-top:12px;border:1px dashed #c9d5e4;border-radius:13px;padding:12px 13px;background:#fbfcfe}
+  .feedback .fh{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:9px}
+  .feedback .fh span{font-size:11.5px;color:var(--muted)}
+  .fb-actions{display:flex;gap:8px;flex-wrap:wrap}
+  .btn{border:1px solid var(--line);background:#fff;color:#334155;border-radius:9px;padding:8px 12px;font-size:12px;font-weight:600;cursor:pointer;transition:.15s}
+  .btn:hover{border-color:#b8c7d9;transform:translateY(-1px)}
+  .btn.good{background:var(--edge-soft);border-color:#bfe9da;color:#087a5b}
+  .btn.bad{background:#fff;border-color:#f0c9c9;color:#b91c1c}
+  .btn.primary{background:#0f172a;color:#fff;border-color:#0f172a}
+  .btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+  .correction{margin-top:9px}
+
+  .bottom{display:grid;grid-template-columns:1.25fr .9fr;gap:18px;margin-top:18px}
+  .stats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:13px 14px;box-shadow:var(--shadow)}
+  .stat .k{font-size:10.5px;color:var(--muted);letter-spacing:.06em}
+  .stat .v{font-size:22px;font-weight:750;margin-top:5px;letter-spacing:-.3px}
+  .stat .n{font-size:10.5px;color:#94a3b8;margin-top:2px}
+  .stat.hl .v{color:var(--cloud)}
+  .fly{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:15px 18px}
+  .fly h2{font-size:14px;margin-bottom:3px}
+  .fly .sub2{font-size:11.5px;color:var(--muted);margin-bottom:12px}
+  .fly-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-bottom:12px}
+  .fly-cell{background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:9px 10px}
+  .fly-cell .k{font-size:10px;color:var(--muted)}
+  .fly-cell .v{font-size:17px;font-weight:700;margin-top:3px}
+  .reg{font-size:11.5px;color:#475569;background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin-bottom:10px;line-height:1.6}
+  .reg b{color:var(--ink)}
+  .reg .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
+  .fly-actions{display:flex;gap:7px;flex-wrap:wrap}
+
+  footer{max-width:1320px;margin:18px auto 0;padding:0 24px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;color:#94a3b8;font-size:11px}
+
+  #toast{
+    position:fixed;right:22px;bottom:22px;background:#0f172a;color:#f8fafc;border-radius:11px;
+    padding:11px 15px;font-size:12.5px;box-shadow:0 12px 30px rgba(15,23,42,.25);
+    opacity:0;transform:translateY(8px);transition:.25s;pointer-events:none;max-width:420px;z-index:50;
+  }
+  #toast.show{opacity:1;transform:translateY(0)}
+  #toast.err{background:#991b1b}
+
+  @media (max-width:1020px){
+    main{grid-template-columns:1fr}
+    .bottom{grid-template-columns:1fr}
+    .stats{grid-template-columns:repeat(3,1fr)}
+    .models{grid-template-columns:1fr}
+  }
+  @media (max-width:560px){
+    .wrap{padding:12px 12px 0}
+    .stats{grid-template-columns:repeat(2,1fr)}
+    .fly-grid{grid-template-columns:repeat(2,1fr)}
+    header{padding:16px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <div class="logo">EC</div>
+      <div>
+        <h1>端云协同推理控制台</h1>
+        <div class="sub">产线端侧小模型本地推理 · 云端大模型兜底增强 · 难例回流闭环</div>
+      </div>
+    </div>
+    <div class="chips">
+      <span class="chip"><i class="dot" id="edgeDot"></i>端侧 <b id="edgeState">检测中</b></span>
+      <span class="chip"><i class="dot" id="cloudDot"></i>云端 <b id="cloudState">检测中</b></span>
+      <span class="chip">适配器 <b id="adapterState">—</b></span>
+      <span class="chip">阈值 <b id="thresholdChip">0.62</b></span>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>产线工单</h2>
+        <span class="hint">模拟产线终端</span>
+      </div>
+      <div class="panel-body">
+        <div class="sect-label">场景模板</div>
+        <div class="scenarios" id="scenarios"></div>
+
+        <div class="sect-label">问题 / 工单描述</div>
+        <textarea id="prompt" placeholder="例如：回流焊峰值温度应该控制在多少？">回流焊峰值温度应该控制在多少？</textarea>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="task">任务类型</label>
+            <select id="task">
+              <option value="process_qa">工艺问答</option>
+              <option value="fault_diagnosis">故障诊断</option>
+              <option value="quality_verdict">质检判定（强制云端）</option>
+              <option value="process_calc">参数计算</option>
+              <option value="standard_qa">标准查询</option>
+              <option value="safety">安全操作</option>
+              <option value="general">通用</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>策略</label>
+            <div class="switch-row" style="margin:0;padding:9px 10px">
+              <div>
+                <div class="t">强制云端</div>
+                <div class="d">跳过端侧直出</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="forceCloud"><span class="slider"></span></label>
+            </div>
+          </div>
+        </div>
+
+        <div class="switch-row">
+          <div>
+            <div class="t">断网模式</div>
+            <div class="d">只走端侧；低置信度请求进入离线队列</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="offline"><span class="slider"></span></label>
+        </div>
+
+        <div class="range-row">
+          <div class="top"><span>端侧置信度升级阈值</span><span id="thresholdVal">0.62</span></div>
+          <input type="range" id="threshold" min="30" max="90" value="62">
+        </div>
+
+        <button class="run-btn" id="runBtn" onclick="runInfer()">执行协同推理</button>
+        <div class="footnote">端侧先答；置信度低于阈值、格式不合规或任务要求复核时升级云端。云端不可用时保留端侧结果并排队补算。</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>协同决策</h2>
+        <span class="hint" id="reqMeta">尚未执行</span>
+      </div>
+      <div class="panel-body">
+        <div class="decision idle" id="decision">
+          <div class="icon">◎</div>
+          <div>
+            <div class="ttl">等待输入</div>
+            <div class="ds">选择场景或输入产线问题，执行一次协同推理</div>
+          </div>
+        </div>
+
+        <div class="models">
+          <div class="model edge" id="edgeCard">
+            <div class="mh"><span class="name">端侧小模型</span><span class="tag">本地 · 低时延</span></div>
+            <div class="meta-line"><span id="edgeModel">—</span><span id="edgeLatency">—</span></div>
+            <div class="bar" id="edgeBar"><i></i></div>
+            <div class="meta-line"><span>置信度</span><b id="edgeConf">—</b></div>
+            <div class="out empty" id="edgeOut">等待端侧推理</div>
+          </div>
+          <div class="model cloud dim" id="cloudCard">
+            <div class="mh"><span class="name">云端大模型</span><span class="tag">增强 · 复核</span></div>
+            <div class="meta-line"><span id="cloudModel">—</span><span id="cloudLatency">—</span></div>
+            <div class="bar cloud" id="cloudBar"><i></i></div>
+            <div class="meta-line"><span>置信度</span><b id="cloudConf">—</b></div>
+            <div class="out empty" id="cloudOut">本次未触发云端调用</div>
+          </div>
+        </div>
+
+        <div class="trace">
+          <div class="th"><span>决策链路</span><span id="traceCount">0 步</span></div>
+          <ol id="traceList"><li>等待执行</li></ol>
+        </div>
+
+        <div class="feedback">
+          <div class="fh">
+            <b style="font-size:12px">产线结果反馈</b>
+            <span id="fbHint">执行推理后可提交</span>
+          </div>
+          <div class="fb-actions">
+            <button class="btn good" id="acceptBtn" onclick="sendFeedback(true)" disabled>采纳结果</button>
+            <button class="btn bad" id="rejectBtn" onclick="sendFeedback(false)" disabled>纠正并提交</button>
+          </div>
+          <div class="correction">
+            <input type="text" id="correction" placeholder="纠正答案（提交后进入云端难例数据集）" disabled>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="bottom">
+    <div class="stats">
+      <div class="stat"><div class="k">总请求</div><div class="v" id="sReq">0</div><div class="n">端侧服务累计</div></div>
+      <div class="stat"><div class="k">升级率</div><div class="v" id="sEsc">—</div><div class="n">触发云端增强</div></div>
+      <div class="stat"><div class="k">云端成功率</div><div class="v" id="sCloud">—</div><div class="n">成功 / 尝试</div></div>
+      <div class="stat hl"><div class="k">P95 时延</div><div class="v" id="sP95">—</div><div class="n">端到端</div></div>
+      <div class="stat"><div class="k">采纳率</div><div class="v" id="sAccept">—</div><div class="n">云端反馈口径</div></div>
+    </div>
+
+    <div class="fly">
+      <h2>数据飞轮与适配器</h2>
+      <div class="sub2">难例回流 → 云端训练 → 灰度下发 → 端侧生效</div>
+      <div class="fly-grid">
+        <div class="fly-cell"><div class="k">反馈总数</div><div class="v" id="fTotal">0</div></div>
+        <div class="fly-cell"><div class="k">难例</div><div class="v" id="fHard">0</div></div>
+        <div class="fly-cell"><div class="k">人工纠正</div><div class="v" id="fCorrected">0</div></div>
+        <div class="fly-cell"><div class="k">待同步</div><div class="v" id="fOutbox">0</div></div>
+      </div>
+      <div class="reg" id="registryBox">适配器注册表加载中…</div>
+      <div class="fly-actions">
+        <button class="btn" onclick="exportDataset()">导出难例数据集</button>
+        <button class="btn" onclick="publishAdapter()">发布灰度适配器</button>
+        <button class="btn" onclick="promoteAdapter()">灰度转正</button>
+        <button class="btn" onclick="rollbackAdapter()">回滚</button>
+        <button class="btn" onclick="flushOutbox()">同步离线队列</button>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <span>EdgeCloud-CI 参考实现 · 当前使用模拟端侧/云端模型，不连接真实产线设备</span>
+    <span>接口：/v1/infer · /v1/feedback · /v1/stats · /metrics</span>
+  </footer>
+</div>
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const SCENARIOS = [
+  {label:"回流焊温度", task:"process_qa", prompt:"回流焊峰值温度应该控制在多少？", kind:"easy"},
+  {label:"E-104 真空", task:"fault_diagnosis", prompt:"设备报 E-104 真空压力不足，怎么处理？", kind:"easy"},
+  {label:"空洞 25%", task:"quality_verdict", prompt:"抽检发现一个焊点空洞面积约 25%，是否放行？", kind:"easy"},
+  {label:"Class 3 虚焊", task:"standard_qa", prompt:"IPC-A-610 Class 3 对虚焊和空洞的具体要求是什么？", kind:"hard"},
+  {label:"DPPM 计算", task:"process_calc", prompt:"某批次 200 个焊点检出 6 个缺陷，DPPM 是多少？", kind:"hard"},
+  {label:"E-217 主轴", task:"fault_diagnosis", prompt:"设备报 E-217 主轴温度异常，应该怎么排查？", kind:"hard"},
+  {label:"OEE 92%", task:"improvement", prompt:"客户要求把产线 OEE 提升到 92%，应该先从哪入手？", kind:"hard"},
+  {label:"急停复位", task:"safety", prompt:"设备急停后如何正确复位？", kind:"easy"},
+];
+let last = null;
+let feedbackLocked = false;
+let busy = false;
+
+const REASONS = {
+  low_confidence: "端侧置信度低于阈值",
+  task_requires_cloud: "任务类型要求云端复核",
+  format_invalid: "端侧输出格式不合规",
+  edge_unavailable: "端侧模型不可用",
+  budget_max_calls: "云端调用达到窗口上限",
+  budget_max_ratio: "云端升级比例达到上限",
+  circuit_open: "云端熔断中，稍后重试",
+  deadline_exceeded: "剩余时延不足，跳过云端",
+  offline_mode: "断网模式",
+};
+
+function toast(message, isError) {
+  const el = $("toast");
+  el.textContent = message;
+  el.className = "show" + (isError ? " err" : "");
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => { el.className = ""; }, 3200);
+}
+
+async function api(path, options) {
+  const response = await fetch(path, options || {});
+  let payload;
+  try { payload = await response.json(); } catch (e) { payload = {error: "响应不是合法 JSON"}; }
+  if (!response.ok) throw new Error(payload.error || ("HTTP " + response.status));
+  return payload;
+}
+
+function post(path, body) {
+  return api(path, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body || {})});
+}
+
+function pct(value) {
+  if (!isFinite(value)) return "—";
+  return (value * 100).toFixed(1) + "%";
+}
+
+function setBar(id, score) {
+  const bar = $(id);
+  const fill = bar.querySelector("i");
+  const value = Math.max(0, Math.min(1, Number(score) || 0));
+  fill.style.width = (value * 100).toFixed(0) + "%";
+  bar.classList.remove("low", "mid");
+  if (value < 0.62) bar.classList.add("low");
+  else if (value < 0.8) bar.classList.add("mid");
+}
+
+function setDecision(kind, title, subtitle, icon) {
+  const el = $("decision");
+  el.className = "decision " + kind;
+  el.querySelector(".icon").textContent = icon;
+  el.querySelector(".ttl").textContent = title;
+  el.querySelector(".ds").textContent = subtitle;
+}
+
+function renderScenarios() {
+  const box = $("scenarios");
+  SCENARIOS.forEach((scenario) => {
+    const button = document.createElement("button");
+    button.className = "scenario" + (scenario.kind === "hard" ? " hard" : "");
+    button.textContent = scenario.label;
+    button.onclick = () => {
+      $("prompt").value = scenario.prompt;
+      $("task").value = scenario.task;
+      $("forceCloud").checked = false;
+    };
+    box.appendChild(button);
+  });
+}
+
+function render(response) {
+  const isCloud = response.source === "cloud";
+  const edgeText = response.edge_text || (response.source === "edge" ? response.text : "");
+  const edgeConf = response.edge_confidence == null ? (response.source === "edge" ? response.confidence : 0) : response.edge_confidence;
+
+  $("edgeModel").textContent = response.metadata?.edge_model || (response.source === "edge" ? response.model_id : "端侧模型");
+  $("edgeLatency").textContent = response.edge_latency_ms == null ? "—" : Math.round(response.edge_latency_ms) + " ms";
+  $("edgeConf").textContent = edgeConf ? edgeConf.toFixed(2) : "—";
+  setBar("edgeBar", edgeConf);
+  $("edgeOut").textContent = edgeText || "端侧无输出";
+  $("edgeOut").className = "out" + (edgeText ? "" : " empty");
+
+  $("cloudModel").textContent = isCloud ? response.model_id : "云端大模型";
+  $("cloudLatency").textContent = response.cloud_latency_ms == null ? "—" : Math.round(response.cloud_latency_ms) + " ms";
+  $("cloudConf").textContent = isCloud ? response.confidence.toFixed(2) : "—";
+  setBar("cloudBar", isCloud ? response.confidence : 0);
+  if (isCloud) {
+    $("cloudOut").textContent = response.text;
+    $("cloudOut").className = "out";
+    $("cloudCard").classList.remove("dim");
+  } else if (response.degraded) {
+    $("cloudOut").textContent = "云端不可用或已跳过，端侧结果已保留并写入待同步队列。";
+    $("cloudOut").className = "out empty";
+    $("cloudCard").classList.add("dim");
+  } else {
+    $("cloudOut").textContent = "本次端侧置信度达标，未触发云端调用。";
+    $("cloudOut").className = "out empty";
+    $("cloudCard").classList.add("dim");
+  }
+
+  if (response.degraded) {
+    setDecision("degraded", "降级兜底", "端侧结果已返回；" + (REASONS[response.escalation_reason] || response.escalation_reason || "云端不可用"), "!");
+  } else if (isCloud) {
+    setDecision("cloud", "云端增强", "触发原因：" + (REASONS[response.escalation_reason] || response.escalation_reason || "低置信度"), "↗");
+  } else {
+    setDecision("edge", "端侧直出", "本地完成推理，未产生云端调用", "✓");
+  }
+
+  const trace = response.trace || [];
+  $("traceCount").textContent = trace.length + " 步";
+  const list = $("traceList");
+  list.innerHTML = "";
+  trace.forEach((line) => {
+    const item = document.createElement("li");
+    item.textContent = line;
+    list.appendChild(item);
+  });
+
+  $("reqMeta").textContent = response.request_id.slice(0, 12) + " · " + Math.round(response.latency_ms) + " ms";
+  $("acceptBtn").disabled = false;
+  $("rejectBtn").disabled = false;
+  $("correction").disabled = false;
+  feedbackLocked = false;
+  $("fbHint").textContent = "采纳或纠正都会写入数据飞轮";
+}
+
+async function runInfer() {
+  if (busy) return;
+  const prompt = $("prompt").value.trim();
+  if (!prompt) { toast("请先输入产线问题", true); return; }
+  busy = true;
+  $("runBtn").disabled = true;
+  $("runBtn").textContent = "推理中…";
+  try {
+    const response = await post("/v1/infer", {
+      prompt: prompt,
+      task: $("task").value,
+      require_cloud: $("forceCloud").checked,
+      deadline_ms: 8000,
+    });
+    last = Object.assign({}, response, {prompt: prompt, task: $("task").value});
+    render(response);
+    refreshStats();
+  } catch (error) {
+    toast("推理失败：" + error.message, true);
+  } finally {
+    busy = false;
+    $("runBtn").disabled = false;
+    $("runBtn").textContent = "执行协同推理";
+  }
+}
+
+async function sendFeedback(accepted) {
+  if (!last || feedbackLocked) return;
+  const correction = $("correction").value.trim();
+  if (!accepted && !correction) { toast("请先填写纠正答案", true); return; }
+  const body = {
+    request_id: last.request_id,
+    accepted: accepted,
+    prompt: last.prompt,
+    task: last.task,
+    edge_text: last.edge_text || "",
+    cloud_text: last.source === "cloud" ? last.text : "",
+    final_text: accepted ? last.text : correction,
+    corrected_text: accepted ? "" : correction,
+    source: last.source,
+    confidence: last.confidence,
+    escalation_reason: last.escalation_reason,
+    adapter_version: last.adapter_version || "",
+  };
+  try {
+    await post("/v1/feedback", body);
+    feedbackLocked = true;
+    $("acceptBtn").disabled = true;
+    $("rejectBtn").disabled = true;
+    $("correction").disabled = true;
+    $("fbHint").textContent = "已提交，可用于云端训练";
+    toast(accepted ? "已采纳，反馈已写入数据飞轮" : "已提交纠正，难例已进入数据集");
+    refreshStats();
+  } catch (error) {
+    toast("反馈提交失败：" + error.message, true);
+  }
+}
+
+async function toggleOffline() {
+  try {
+    await post("/v1/admin/config", {offline: $("offline").checked});
+    toast($("offline").checked ? "已切换断网模式：仅端侧推理" : "已恢复云端连接");
+    refreshStats();
+  } catch (error) {
+    toast("切换失败：" + error.message, true);
+    $("offline").checked = !$("offline").checked;
+  }
+}
+
+async function applyThreshold() {
+  const value = Number($("threshold").value) / 100;
+  $("thresholdVal").textContent = value.toFixed(2);
+  try {
+    await post("/v1/admin/config", {escalation_threshold: value});
+    $("thresholdChip").textContent = value.toFixed(2);
+  } catch (error) {
+    toast("阈值更新失败：" + error.message, true);
+  }
+}
+
+async function refreshStats() {
+  try {
+    const edge = await api("/v1/stats");
+    const counters = edge.metrics?.counters || {};
+    const requests = counters.requests_total || 0;
+    const escalations = counters.escalation_total || 0;
+    const attempts = counters.cloud_attempt_total || 0;
+    const successes = counters.cloud_success_total || 0;
+    $("sReq").textContent = requests;
+    $("sEsc").textContent = requests ? pct(escalations / requests) : "—";
+    $("sCloud").textContent = attempts ? pct(successes / attempts) : "—";
+    $("sP95").textContent = Math.round(edge.metrics?.latency_ms?.request_latency_ms?.p95 || 0) + " ms";
+    $("fOutbox").textContent = edge.outbox?.pending || 0;
+    $("adapterState").textContent = (edge.adapter_version || "—") + " · " + (edge.adapter_channel || "local");
+    $("thresholdChip").textContent = Number(edge.threshold || 0).toFixed(2);
+    $("threshold").value = Math.round(Number(edge.threshold || 0.62) * 100);
+    $("thresholdVal").textContent = Number(edge.threshold || 0.62).toFixed(2);
+    $("offline").checked = !!edge.offline;
+    $("edgeDot").className = "dot ok";
+    $("edgeState").textContent = edge.edge_id || "在线";
+
+    const cloud = await api("/v1/cloud/stats").catch(() => null);
+    if (cloud) {
+      $("cloudDot").className = "dot ok";
+      $("cloudState").textContent = "在线";
+      const feedback = cloud.feedback || {};
+      $("sAccept").textContent = pct(feedback.acceptance_rate || 0);
+      $("fTotal").textContent = feedback.total || 0;
+      $("fHard").textContent = feedback.hard_cases || 0;
+      $("fCorrected").textContent = feedback.corrected || 0;
+    } else {
+      $("cloudDot").className = "dot bad";
+      $("cloudState").textContent = "不可达";
+    }
+
+    const registry = await api("/v1/cloud/registry").catch(() => null);
+    if (registry) {
+      const versions = registry.versions ? Object.keys(registry.versions) : [];
+      const canary = registry.canary ? registry.canary.version + " @" + Math.round((registry.canary.ratio || 0) * 100) + "%" : "无";
+      $("registryBox").innerHTML =
+        "稳定版本 <b class=\"mono\">" + (registry.active || "未发布") + "</b>" +
+        " · 灰度 <b class=\"mono\">" + canary + "</b>" +
+        " · 版本数 <b>" + versions.length + "</b>" +
+        (versions.length ? " · <span class=\"mono\">" + versions.join(" / ") + "</span>" : "");
+    }
+  } catch (error) {
+    $("edgeDot").className = "dot bad";
+    $("edgeState").textContent = "不可达";
+  }
+}
+
+async function exportDataset() {
+  try {
+    const result = await post("/v1/cloud/dataset/export", {hard_only: true});
+    toast("已导出 " + result.exported + " 条难例 → " + result.path, false);
+    refreshStats();
+  } catch (error) {
+    toast("导出失败：" + error.message, true);
+  }
+}
+
+async function publishAdapter() {
+  try {
+    const registry = await api("/v1/cloud/registry");
+    const versions = registry.versions ? Object.keys(registry.versions) : [];
+    const version = "v" + (versions.length + 1);
+    await post("/v1/cloud/registry/publish", {
+      version: version,
+      artifact: "runs/edge_cloud/adapters/" + version,
+      notes: "控制台模拟发布：由难例数据集训练",
+      canary_ratio: 0.25,
+    });
+    toast("已发布灰度版本 " + version + "（25% 设备）");
+    refreshStats();
+  } catch (error) {
+    toast("发布失败：" + error.message, true);
+  }
+}
+
+async function promoteAdapter() {
+  try {
+    const registry = await api("/v1/cloud/registry");
+    if (!registry.canary) { toast("当前没有灰度版本", true); return; }
+    await post("/v1/cloud/registry/promote", {version: registry.canary.version});
+    await post("/v1/admin/refresh-adapter", {});
+    toast("已将 " + registry.canary.version + " 转为稳定版，端侧适配器已刷新");
+    refreshStats();
+  } catch (error) {
+    toast("转正失败：" + error.message, true);
+  }
+}
+
+async function rollbackAdapter() {
+  try {
+    await post("/v1/cloud/registry/rollback", {});
+    await post("/v1/admin/refresh-adapter", {});
+    toast("已回滚到上一个稳定版本");
+    refreshStats();
+  } catch (error) {
+    toast("回滚失败：" + error.message, true);
+  }
+}
+
+async function flushOutbox() {
+  try {
+    const result = await post("/v1/outbox/flush", {});
+    toast("离线队列已同步 " + result.flushed + " 条");
+    refreshStats();
+  } catch (error) {
+    toast("同步失败：" + error.message, true);
+  }
+}
+
+$("offline").addEventListener("change", toggleOffline);
+$("threshold").addEventListener("change", applyThreshold);
+$("threshold").addEventListener("input", () => { $("thresholdVal").textContent = (Number($("threshold").value) / 100).toFixed(2); });
+$("prompt").addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") runInfer();
+});
+
+renderScenarios();
+refreshStats();
+</script>
+</body>
+</html>

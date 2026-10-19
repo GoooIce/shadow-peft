@@ -627,6 +627,23 @@ convert_checkpoint("./torch-ckpt", "./mlx-ckpt", direction="torch_to_mlx")
 
 ---
 
+## EdgeCloud-CI: 端云协同推理参考实现
+
+This repository also ships a runnable reference implementation for **edge-cloud collaborative inference**（产线端小模型 + 云端大模型增强）: local-first routing with confidence-based escalation, offline outbox, feedback flywheel, and canary adapter rollout.
+
+- Design: [docs/edge-cloud-system.md](docs/edge-cloud-system.md)
+- Requirements draft: [docs/edge-cloud-srs.md](docs/edge-cloud-srs.md)
+- Code: `src/edge_cloud/`
+
+```bash
+PYTHONPATH=src python -m edge_cloud demo --port 8080 --cloud-port 9100 --reset
+PYTHONPATH=src python -m pytest tests/edge_cloud -q
+```
+
+The demo uses deterministic mock models. Swap in `transformers`（端侧，可选 ShadowPEFT 适配器）or an OpenAI-compatible cloud endpoint via `configs/edge-cloud/example.json`.
+
+---
+
 ## Notes and Limitations
 
 - **KV cache is supported.** Training and full-sequence forwards default to `use_cache=False`; generation works with `use_cache=True`, keeping one KV cache for the base model and a second one for the shadow backbone (identical tokens to uncached decoding, much faster).
