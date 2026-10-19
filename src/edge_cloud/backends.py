@@ -11,14 +11,20 @@ import json
 import math
 import os
 import random
+import re
 import time
 import urllib.error
 import urllib.request
 import zlib
-from dataclasses import dataclass, field
-from typing import Any, Protocol
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from itertools import islice
+from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 from . import knowledge
+from .boundaries import detect_boundary
+from .features import compute_handoff_features
+from .handoff import HandoffOutcome, HandoffPolicy, HandoffStep
 from .protocol import InferRequest
 
 
@@ -39,12 +45,249 @@ class Generation:
     finish_reason: str = "stop"
     latency_ms: float = 0.0
     raw: dict[str, Any] = field(default_factory=dict)
+    handoff: HandoffOutcome | None = None
+    output_tokens: int = 0
 
 
 class Backend(Protocol):
     model_id: str
 
     def generate(self, request: InferRequest, *, draft: str | None = None) -> Generation: ...
+
+
+@runtime_checkable
+class StreamingBackend(Protocol):
+    """Backend that can pause generation at a semantic handoff boundary."""
+
+    model_id: str
+
+    def generate_until(
+        self,
+        request: InferRequest,
+        policy: HandoffPolicy,
+        *,
+        max_boundary_wait_tokens: int = 12,
+        expected_format: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> Generation: ...
+
+
+class _DecodeOutcome(NamedTuple):
+    text: str
+    token_logprobs: list[float] | None
+    finish_reason: str
+    handoff: HandoffOutcome | None
+    output_tokens: int
+    waited_tokens: int
+
+
+StepContext = str | Mapping[str, Any] | None
+StepSource = Iterable[
+    tuple[str, float | None, Sequence[float], Sequence[float] | None, StepContext]
+]
+
+
+def _context_task(context: Any, fallback: str = "general") -> str:
+    if isinstance(context, Mapping):
+        task = context.get("task")
+        if isinstance(task, str) and task.strip():
+            return task.strip()
+    return fallback
+
+
+def _step_context(boundary_context: StepContext, task: str) -> tuple[str, float]:
+    format_ok = 1.0
+    if isinstance(boundary_context, Mapping):
+        raw_task = boundary_context.get("task")
+        if isinstance(raw_task, str) and raw_task.strip():
+            task = raw_task.strip()
+        raw_format = boundary_context.get("format_ok")
+        if raw_format is not None:
+            try:
+                format_ok = float(raw_format)
+            except (TypeError, ValueError):
+                format_ok = 1.0
+    return task, format_ok
+
+
+def _step_expected_format(
+    expected_format: str | None, boundary_context: StepContext
+) -> str | None:
+    if isinstance(boundary_context, Mapping):
+        raw = boundary_context.get("expected_format")
+        if isinstance(raw, str) and raw:
+            return raw
+    return expected_format
+
+
+def _decode_until(
+    step_source: StepSource,
+    policy: HandoffPolicy,
+    *,
+    max_tokens: int,
+    max_boundary_wait_tokens: int = 12,
+    expected_format: str | None = None,
+    context: dict[str, Any] | None = None,
+) -> _DecodeOutcome:
+    """Run the shared token loop over a backend-specific step source.
+
+    ``step_source`` yields plain Python values
+    ``(token_text, token_logprob, base_logits, shadow_logits, boundary_context)``.
+    A step is observed *after* it is sampled and *before* it is committed, so a
+    policy decides with the current prefix plus the next-token distribution. If
+    the current prefix already ends on a qualifying boundary, a handoff request
+    cuts immediately and the sampled token is never emitted. Otherwise the
+    backend keeps committing tokens until ``detect_boundary`` confirms a
+    sentence/newline/step/JSON-field edge, or until
+    ``max_boundary_wait_tokens`` tokens have been committed after the request,
+    in which case the cut is forced at the raw token boundary. If the source
+    ends while a handoff is pending, the outcome resolves at the last committed
+    token instead of being dropped.
+    """
+
+    if max_tokens < 0:
+        raise ValueError("max_tokens 不能为负数")
+    if max_boundary_wait_tokens < 0:
+        raise ValueError("max_boundary_wait_tokens 不能为负数")
+
+    policy.reset(context)
+    default_task = _context_task(context)
+
+    text = ""
+    output_logprobs: list[float] = []
+    scored_logprobs: list[float] = []
+    committed = 0
+    waited = 0
+    pending = False
+    pending_reason = None
+    pending_trust: float | None = None
+    pending_cost = None
+    handoff: HandoffOutcome | None = None
+    finish_reason = "stop"
+
+    for token_text, token_logprob, base_logits, shadow_logits, boundary_context in islice(
+        step_source, max_tokens
+    ):
+        token_text = "" if token_text is None else str(token_text)
+        step_format = _step_expected_format(expected_format, boundary_context)
+        boundary_kind = detect_boundary(text, expected_format=step_format)
+        task, format_ok = _step_context(boundary_context, default_task)
+
+        features = compute_handoff_features(
+            base_logits,
+            shadow_logits,
+            token_logprobs=scored_logprobs,
+        )
+        features = replace(
+            features,
+            boundary_kind=boundary_kind or "token",
+            task=task,
+            format_ok=format_ok,
+        )
+
+        decision = policy.observe(
+            HandoffStep(
+                features=features,
+                prefix_text=text,
+                token=token_text,
+                token_logprob=token_logprob,
+            )
+        )
+        if not pending and decision.action == "handoff":
+            pending = True
+            pending_reason = decision.reason
+            pending_trust = decision.prefix_trust
+            pending_cost = decision.estimated_cost
+            if boundary_kind is not None:
+                # The sampled token is risky: stop before emitting it.
+                handoff = HandoffOutcome(
+                    handed_off=True,
+                    reason=pending_reason,
+                    boundary=boundary_kind,
+                    handoff_index=committed,
+                    partial_trace=text,
+                    prefix_trust=pending_trust,
+                    estimated_cost=pending_cost,
+                )
+                finish_reason = "handoff"
+                break
+            if max_boundary_wait_tokens == 0:
+                # Zero budget: the sampled token is never emitted either.
+                handoff = HandoffOutcome(
+                    handed_off=True,
+                    reason=pending_reason,
+                    boundary="token",
+                    handoff_index=committed,
+                    partial_trace=text,
+                    prefix_trust=pending_trust,
+                    estimated_cost=pending_cost,
+                )
+                finish_reason = "handoff"
+                break
+
+        text += token_text
+        committed += 1
+        if token_logprob is None:
+            scored_logprobs.append(float("nan"))
+        else:
+            logprob = float(token_logprob)
+            scored_logprobs.append(logprob)
+            if math.isfinite(logprob):
+                output_logprobs.append(logprob)
+
+        if not pending:
+            continue
+
+        waited += 1
+        post_boundary = detect_boundary(text, expected_format=step_format)
+        if post_boundary is not None:
+            handoff = HandoffOutcome(
+                handed_off=True,
+                reason=pending_reason,
+                boundary=post_boundary,
+                handoff_index=committed,
+                partial_trace=text,
+                prefix_trust=pending_trust,
+                estimated_cost=pending_cost,
+            )
+        elif waited >= max_boundary_wait_tokens:
+            handoff = HandoffOutcome(
+                handed_off=True,
+                reason=pending_reason,
+                boundary="token",
+                handoff_index=committed,
+                partial_trace=text,
+                prefix_trust=pending_trust,
+                estimated_cost=pending_cost,
+            )
+        if handoff is not None:
+            finish_reason = "handoff"
+            break
+
+    if handoff is None and pending:
+        # Generation ended before a semantic boundary (max_tokens or EOS): the
+        # requested handoff still resolves at the last committed token.
+        handoff = HandoffOutcome(
+            handed_off=True,
+            reason=pending_reason,
+            boundary="token",
+            handoff_index=committed,
+            partial_trace=text,
+            prefix_trust=pending_trust,
+            estimated_cost=pending_cost,
+        )
+        finish_reason = "handoff"
+    elif handoff is None:
+        finish_reason = "length" if max_tokens > 0 and committed >= max_tokens else "stop"
+
+    return _DecodeOutcome(
+        text=text,
+        token_logprobs=output_logprobs or None,
+        finish_reason=finish_reason,
+        handoff=handoff,
+        output_tokens=committed,
+        waited_tokens=waited,
+    )
 
 
 def _synth_logprobs(text: str, quality: float) -> list[float]:
@@ -80,6 +323,141 @@ class MockEdgeBackend:
             finish_reason="stop",
             latency_ms=(time.perf_counter() - started) * 1000,
             raw={"kb_key": entry.key, "difficulty": entry.difficulty, "edge_quality": quality},
+        )
+
+
+_MOCK_TOKEN = re.compile(
+    r"[A-Za-z]+(?:['’\-][A-Za-z]+)*|\d+(?:[.,]\d+)*|\s+|.", re.DOTALL
+)
+
+# Base confidence used for tokens at or after ``risk_at``; log(0.05) is below
+# the -2.0 low-probability threshold shared with the legacy confidence path.
+_RISK_QUALITY = 0.05
+
+
+def _tokenize_answer(text: str) -> list[str]:
+    """Split a mock answer into Chinese characters, English words and whitespace."""
+
+    return _MOCK_TOKEN.findall(text)
+
+
+def _binary_logits(probability: float) -> list[float]:
+    """Two-token distribution with an exact softmax probability."""
+
+    p = max(1e-6, min(1.0 - 1e-6, float(probability)))
+    return [math.log(p), math.log1p(-p)]
+
+
+class MockStreamingEdgeBackend(MockEdgeBackend):
+    """Deterministic token-streaming edge model for tests and the eval bench.
+
+    The answer comes from the same knowledge base as ``MockEdgeBackend`` and is
+    split into Chinese characters, English words and whitespace runs. Each step
+    exposes a two-token base distribution whose top probability is
+    ``edge_quality`` (or ``_RISK_QUALITY`` from ``risk_at`` onwards). With
+    ``shadow_gap`` set, a shadow distribution moves that mass towards the
+    competing token, so ``compute_handoff_features`` reports a real KL and
+    top-1 agreement; without it the shadow fields stay ``None``.
+    """
+
+    model_id = "mock-streaming-edge-0.6b"
+
+    def __init__(
+        self,
+        latency_ms: float = 0.0,
+        *,
+        risk_at: int | None = None,
+        edge_quality: float | None = None,
+        shadow_gap: float | None = None,
+    ) -> None:
+        super().__init__(latency_ms=latency_ms)
+        if risk_at is not None:
+            risk_at = int(risk_at)
+            if risk_at < 0:
+                raise ValueError("risk_at 必须非负")
+        self.risk_at = risk_at
+        if edge_quality is not None:
+            edge_quality = float(edge_quality)
+            if not math.isfinite(edge_quality):
+                raise ValueError("edge_quality 必须是有限数值")
+        self.edge_quality = edge_quality
+        if shadow_gap is not None:
+            shadow_gap = float(shadow_gap)
+            if not math.isfinite(shadow_gap) or shadow_gap < 0.0:
+                raise ValueError("shadow_gap 必须是非负有限数值")
+        self.shadow_gap = shadow_gap
+
+    def _quality_at(self, index: int, base_quality: float) -> float:
+        quality = base_quality
+        if self.risk_at is not None and index >= self.risk_at:
+            quality = min(quality, _RISK_QUALITY)
+        return max(0.02, min(0.995, quality))
+
+    def _steps(
+        self,
+        tokens: Sequence[str],
+        base_quality: float,
+        task: str,
+    ) -> Iterable[tuple[str, float, list[float], list[float] | None, dict[str, Any]]]:
+        for index, token in enumerate(tokens):
+            quality = self._quality_at(index, base_quality)
+            base_logits = _binary_logits(quality)
+            shadow_logits: list[float] | None = None
+            if self.shadow_gap is not None:
+                shadow_quality = max(0.01, min(0.99, quality - self.shadow_gap))
+                shadow_logits = _binary_logits(shadow_quality)
+            yield (
+                token,
+                math.log(quality),
+                base_logits,
+                shadow_logits,
+                {"task": task, "format_ok": 1.0},
+            )
+
+    def generate_until(
+        self,
+        request: InferRequest,
+        policy: HandoffPolicy,
+        *,
+        max_boundary_wait_tokens: int = 12,
+        expected_format: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> Generation:
+        started = time.perf_counter()
+        if self.latency_ms:
+            time.sleep(self.latency_ms / 1000)
+        entry = knowledge.lookup(request.prompt)
+        base_quality = (
+            entry.edge_quality if self.edge_quality is None else self.edge_quality
+        )
+        tokens = _tokenize_answer(entry.edge_answer)
+        task = _context_task(context, request.task)
+        outcome = _decode_until(
+            self._steps(tokens, base_quality, task),
+            policy,
+            max_tokens=request.max_tokens,
+            max_boundary_wait_tokens=max_boundary_wait_tokens,
+            expected_format=expected_format,
+            context=context,
+        )
+        raw: dict[str, Any] = {
+            "kb_key": entry.key,
+            "difficulty": entry.difficulty,
+            "edge_quality": base_quality,
+            "risk_at": self.risk_at,
+            "shadow_gap": self.shadow_gap,
+        }
+        if outcome.handoff is not None:
+            raw["handoff_waited_tokens"] = outcome.waited_tokens
+        return Generation(
+            text=outcome.text,
+            token_logprobs=outcome.token_logprobs,
+            model_id=self.model_id,
+            finish_reason=outcome.finish_reason,
+            latency_ms=(time.perf_counter() - started) * 1000,
+            raw=raw,
+            handoff=outcome.handoff,
+            output_tokens=outcome.output_tokens,
         )
 
 
@@ -276,8 +654,10 @@ class TransformersBackend:
             model = AutoModelForCausalLM.from_pretrained(self.model_path, torch_dtype=dtype)
         if self.shadow_ckpt:
             from shadow_peft import ShadowPeftModel
+            from shadow_peft.task_models import ShadowForCausalLM
 
             model = ShadowPeftModel.from_pretrained(model, self.shadow_ckpt)
+            model = ShadowForCausalLM(model, inference_mode="base_shadow")
             self._shadow = True
         model.eval().to(device)
         self._tokenizer = tokenizer
@@ -326,6 +706,153 @@ class TransformersBackend:
             latency_ms=(time.perf_counter() - started) * 1000,
             raw={"prompt_tokens": prompt_len},
         )
+
+    def generate_until(
+        self,
+        request: InferRequest,
+        policy: HandoffPolicy,
+        *,
+        max_boundary_wait_tokens: int = 12,
+        expected_format: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> Generation:
+        """Token-level decoding that lets *policy* pause at a semantic boundary."""
+
+        self._ensure_loaded()
+        torch = self._torch
+        tokenizer = self._tokenizer
+        prompt_text = self._format_prompt(request.prompt)
+        inputs = tokenizer(
+            prompt_text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=self.max_context_tokens,
+        ).to(self._model.device if hasattr(self._model, "device") else "cpu")
+        prompt_len = int(inputs["input_ids"].shape[1])
+        started = time.perf_counter()
+
+        with torch.inference_mode():
+            outcome = _decode_until(
+                self._torch_step_source(
+                    inputs,
+                    request,
+                    expected_format=expected_format,
+                    context=context,
+                ),
+                policy,
+                max_tokens=request.max_tokens,
+                max_boundary_wait_tokens=max_boundary_wait_tokens,
+                expected_format=expected_format,
+                context=context,
+            )
+
+        raw: dict[str, Any] = {
+            "prompt_tokens": prompt_len,
+            "shadow": self._shadow,
+        }
+        if outcome.handoff is not None:
+            raw["handoff_waited_tokens"] = outcome.waited_tokens
+        return Generation(
+            text=outcome.text,
+            token_logprobs=outcome.token_logprobs,
+            model_id=self.model_id,
+            finish_reason=outcome.finish_reason,
+            latency_ms=(time.perf_counter() - started) * 1000,
+            raw=raw,
+            handoff=outcome.handoff,
+            output_tokens=outcome.output_tokens,
+        )
+
+    def _decode_until(
+        self,
+        step_source: StepSource,
+        policy: HandoffPolicy,
+        *,
+        max_tokens: int,
+        max_boundary_wait_tokens: int = 12,
+        expected_format: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> _DecodeOutcome:
+        """Expose the shared loop for torch-free unit tests of the decoding path."""
+
+        return _decode_until(
+            step_source,
+            policy,
+            max_tokens=max_tokens,
+            max_boundary_wait_tokens=max_boundary_wait_tokens,
+            expected_format=expected_format,
+            context=context,
+        )
+
+    def _torch_step_source(
+        self,
+        inputs: Any,
+        request: InferRequest,
+        *,
+        expected_format: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> Iterable[tuple[str, float, list[float], list[float] | None, dict[str, Any]]]:
+        """One full-prefix forward per token, yielding plain Python step values."""
+
+        torch = self._torch
+        tokenizer = self._tokenizer
+        ids = inputs["input_ids"]
+        attention_mask = inputs.get("attention_mask")
+        eos_token_id = tokenizer.eos_token_id
+        generated: list[int] = []
+        decoded = ""
+        task = _context_task(context, request.task)
+
+        for _ in range(request.max_tokens):
+            output = self._model(input_ids=ids, attention_mask=attention_mask, use_cache=False)
+            logits = output.logits[0, -1].float()
+            base_logits = logits.tolist()
+            raw_shadow = getattr(output, "shadow_logits", None)
+            shadow_logits = (
+                None if raw_shadow is None else raw_shadow[0, -1].float().tolist()
+            )
+            step_logprobs = torch.log_softmax(logits, dim=-1)
+            if request.temperature > 0:
+                probs = torch.softmax(logits / request.temperature, dim=-1)
+                next_id = int(torch.multinomial(probs, 1).item())
+            else:
+                next_id = int(torch.argmax(logits).item())
+            if eos_token_id is not None and next_id == eos_token_id:
+                break
+            logprob = float(step_logprobs[next_id].item())
+            generated.append(next_id)
+            ids = torch.cat(
+                [
+                    ids,
+                    torch.tensor([[next_id]], device=ids.device, dtype=ids.dtype),
+                ],
+                dim=1,
+            )
+            if attention_mask is not None:
+                attention_mask = torch.cat(
+                    [
+                        attention_mask,
+                        torch.ones(
+                            (1, 1),
+                            device=attention_mask.device,
+                            dtype=attention_mask.dtype,
+                        ),
+                    ],
+                    dim=1,
+                )
+            text_so_far = tokenizer.decode(generated, skip_special_tokens=True)
+            if text_so_far.startswith(decoded):
+                token_text = text_so_far[len(decoded):]
+            else:
+                token_text = tokenizer.decode([next_id], skip_special_tokens=True)
+            decoded = text_so_far
+            yield (
+                token_text,
+                logprob,
+                base_logits,
+                shadow_logits,
+                {"task": task, "format_ok": 1.0, "expected_format": expected_format},
+            )
 
     def _generate_plain(
         self, inputs: Any, request: InferRequest
