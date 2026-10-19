@@ -89,6 +89,14 @@ def test_confidence_high_vs_low() -> None:
     assert invalid_json.signals["format_ok"] == 0.0
 
 
+def test_confidence_format_validation_is_public_with_a_compat_alias() -> None:
+    from edge_cloud.confidence import _format_ok, format_ok
+
+    assert format_ok("{}", "json") == 1.0
+    assert format_ok("not json", "json") == 0.0
+    assert _format_ok is format_ok
+
+
 def test_router_keeps_confident_answer_on_edge(tmp_path: Path) -> None:
     router = Router(MockEdgeBackend(), edge_config(tmp_path), cloud_client=FakeCloud())
     response = router.infer(InferRequest(prompt=EASY_PROMPT))

@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from edge_cloud.handoff import HandoffFeatures, HandoffPolicy, HandoffStep
-from edge_cloud.policies import OraclePolicy, ProbePolicy
+from edge_cloud.policies import FormatGuardPolicy, OraclePolicy, ProbePolicy
 from edge_cloud.probe import PROBE_VERSION, fit_probe, write_probe
 
 _FIXED_TRAINED_AT = "2026-01-01T00:00:00+00:00"
@@ -46,6 +46,8 @@ def _step(
     base_margin: float = 0.0,
     kl_base_shadow: float | None = None,
     token: str = "",
+    prefix_text: str = "prefix",
+    format_ok: float = 1.0,
 ) -> HandoffStep:
     return HandoffStep(
         features=HandoffFeatures(
@@ -54,8 +56,9 @@ def _step(
             prefix_tokens=prefix_tokens,
             boundary_kind=boundary_kind,  # type: ignore[arg-type]
             task=task,
+            format_ok=format_ok,
         ),
-        prefix_text="prefix",
+        prefix_text=prefix_text,
         token=token,
         token_logprob=None,
     )
@@ -272,3 +275,101 @@ def test_both_policies_satisfy_the_handoff_policy_protocol(tmp_path: Path) -> No
 
     assert isinstance(ProbePolicy(path, threshold=0.5), HandoffPolicy)
     assert isinstance(OraclePolicy(), HandoffPolicy)
+
+
+def test_format_guard_hands_off_on_balanced_invalid_json_at_a_field_boundary() -> None:
+    delegate = OraclePolicy()
+    guard = FormatGuardPolicy(delegate)
+    guard.reset({"expected_format": "json"})
+
+    decision = guard.observe(
+        _step(
+            prefix_tokens=7,
+            boundary_kind="json_field",
+            prefix_text='{"a": 1, "b": }',
+        )
+    )
+
+    assert decision.action == "handoff"
+    assert decision.reason == "format_invalid"
+    assert decision.boundary == "json_field"
+    assert decision.handoff_index == 7
+    assert decision.prefix_trust is None
+
+
+def test_format_guard_hands_off_when_the_step_declares_format_failure() -> None:
+    guard = FormatGuardPolicy(OraclePolicy())
+    guard.reset({"expected_format": "json"})
+
+    decision = guard.observe(
+        _step(
+            prefix_tokens=2,
+            boundary_kind="json_field",
+            prefix_text='{"a": 1,',
+            format_ok=0.0,
+        )
+    )
+
+    assert decision.action == "handoff"
+    assert decision.reason == "format_invalid"
+
+
+def test_format_guard_delegates_for_valid_balanced_json() -> None:
+    guard = FormatGuardPolicy(OraclePolicy())
+    guard.reset({"expected_format": "json", "gold_handoff_index": 3})
+
+    decision = guard.observe(
+        _step(
+            prefix_tokens=3,
+            boundary_kind="json_field",
+            prefix_text='{"a": 1}',
+        )
+    )
+
+    # The valid JSON does not trigger the guard; the oracle delegate does.
+    assert decision.action == "handoff"
+    assert decision.reason == "low_prefix_trust"
+
+
+def test_format_guard_delegates_for_unbalanced_json_prefixes() -> None:
+    guard = FormatGuardPolicy(OraclePolicy())
+    guard.reset({"expected_format": "json"})
+
+    decision = guard.observe(
+        _step(
+            prefix_tokens=2,
+            boundary_kind="json_field",
+            prefix_text='{"a": 1,',
+        )
+    )
+
+    assert decision.action == "continue"
+    assert decision.reason is None
+
+
+def test_format_guard_never_fabricates_format_failures_for_other_formats() -> None:
+    guard = FormatGuardPolicy(OraclePolicy())
+    guard.reset({"expected_format": "number"})
+
+    decision = guard.observe(
+        _step(
+            prefix_tokens=2,
+            boundary_kind="sentence",
+            prefix_text="标准答案 42。",
+            format_ok=0.0,
+        )
+    )
+
+    assert decision.action == "continue"
+
+
+def test_format_guard_delegates_reset_and_availability_to_the_wrapped_policy(
+    tmp_path: Path,
+) -> None:
+    probe = ProbePolicy(tmp_path / "missing.json", threshold=0.5)
+    guard = FormatGuardPolicy(probe)
+
+    assert guard.available is False
+    assert guard.unavailable_reason.startswith("probe_file_missing")
+    guard.reset({"expected_format": None})
+    assert guard.observe(_step()).action == "continue"

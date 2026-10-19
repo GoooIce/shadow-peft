@@ -17,6 +17,10 @@ artifact is intentionally dependency-free (no numpy/sklearn) and stable:
                      and trained_at), so identical fits share a fingerprint
     required_features features that must be present at scoring time
     trained_at       ISO-8601 UTC timestamp (informational; not fingerprinted)
+    training_fingerprint
+                     SHA-256 of the exact ``rows`` and ``labels`` used for the
+                     fit (stable sorted JSON); legacy artifacts written before
+                     this field load with an empty value
 
 Score direction: ``ProbeModel.score`` returns **prefix trust**, so a high score
 means "keep generating on the edge" and a low score means "this prefix should
@@ -98,6 +102,23 @@ def _canonical_json(payload: Mapping[str, Any]) -> str:
         ensure_ascii=False,
         allow_nan=False,
     )
+
+
+def training_data_fingerprint(
+    rows: Sequence[Mapping[str, Any]], labels: Sequence[Any]
+) -> str:
+    """Return the SHA-256 of the stable JSON form of ``(rows, labels)``.
+
+    ``rows`` keep their full feature mappings and ``labels`` are the normalized
+    0/1 handoff labels, so a relabelled or re-rowed fit gets a different
+    fingerprint while a refit of identical data at another time does not.
+    """
+
+    body = {
+        "rows": [dict(row) for row in rows],
+        "labels": [int(_label_value(label, index=index)) for index, label in enumerate(labels)],
+    }
+    return hashlib.sha256(_canonical_json(body).encode("utf-8")).hexdigest()
 
 
 def probe_fingerprint(payload: Mapping[str, Any]) -> str:
@@ -237,6 +258,7 @@ class ProbeModel:
     fingerprint: str
     required_features: tuple[str, ...]
     trained_at: str
+    training_fingerprint: str = ""
 
     @classmethod
     def from_dict(
@@ -283,6 +305,9 @@ class ProbeModel:
 
         calibration = _validate_calibration(data.get("calibration"))
         trained_at = _require_str(data, "trained_at")
+        training_fingerprint = data.get("training_fingerprint", "")
+        if not isinstance(training_fingerprint, str):
+            raise ProbeFormatError("probe 字段 training_fingerprint 必须是字符串")
 
         fingerprint = _require_str(data, "fingerprint")
         if verify_fingerprint:
@@ -304,6 +329,7 @@ class ProbeModel:
             fingerprint=fingerprint,
             required_features=tuple(required_features),
             trained_at=trained_at,
+            training_fingerprint=training_fingerprint,
         )
 
     @classmethod
@@ -639,6 +665,7 @@ def fit_probe(
         "required_features": [name for name in names if name in required],
         "trained_at": trained_at
         or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "training_fingerprint": training_data_fingerprint(row_list, label_values),
     }
     payload["fingerprint"] = probe_fingerprint(payload)
     return payload

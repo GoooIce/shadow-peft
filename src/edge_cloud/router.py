@@ -22,14 +22,14 @@ from dataclasses import fields as dataclass_fields
 from typing import Any
 
 from .backends import Backend, Generation, StreamingBackend
-from .confidence import ConfidenceEstimator, _format_ok
+from .confidence import ConfidenceEstimator, format_ok
 from .config import EdgeConfig
 from .continuation import assemble_continuation, looks_like_duplicate_prefix
 from .cost import CostEstimate, CostModel
 from .handoff import HandoffFeatures, HandoffOutcome, HandoffPolicy
 from .metrics import Metrics
 from .outbox import Outbox
-from .policies import OraclePolicy, ProbePolicy
+from .policies import FormatGuardPolicy, OraclePolicy, ProbePolicy
 from .protocol import CloudRequest, CloudResponse, ConfidenceReport, InferRequest, InferResponse
 
 # The probe artifact names its features with ``HandoffFeatures`` field names, so
@@ -79,7 +79,9 @@ class CloudClient:
         timeout_ms: int | None = None,
     ) -> Any:
         url = f"{self.base_url}{path}"
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+        data = None
+        if payload is not None:
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self.api_token:
             headers["Authorization"] = f"Bearer {self.api_token}"
@@ -303,10 +305,10 @@ class Router:
         )
 
     def infer(self, request: InferRequest) -> InferResponse:
-        started = time.perf_counter()
+        started = time.monotonic()
         trace: list[str] = []
-        expected_format = request.metadata.get("expected_format") or self.config.expected_format_by_task.get(
-            request.task
+        expected_format = request.metadata.get("expected_format") or (
+            self.config.expected_format_by_task.get(request.task)
         )
 
         # Read the mode on every request: #13 hot-switches it through config.
@@ -329,7 +331,7 @@ class Router:
         trace: list[str],
         expected_format: str | None,
     ) -> InferResponse:
-        edge_started = time.perf_counter()
+        edge_started = time.monotonic()
         edge_generation: Generation | None = None
         edge_error: str | None = None
         try:
@@ -338,7 +340,7 @@ class Router:
             edge_error = str(exc)
             self.metrics.incr("edge_failures_total")
             trace.append(f"端侧推理失败：{exc}")
-        edge_wall_ms = (time.perf_counter() - edge_started) * 1000
+        edge_wall_ms = (time.monotonic() - edge_started) * 1000
         return self._finish_whole(
             request,
             started,
@@ -358,8 +360,6 @@ class Router:
         edge_generation: Generation | None,
         edge_error: str | None,
         edge_wall_ms: float,
-        *,
-        attach_cost: bool = False,
     ) -> InferResponse:
         """Existing whole-segment escalation path (legacy and fallbacks)."""
 
@@ -387,8 +387,7 @@ class Router:
             response = self._edge_response(
                 request, edge_generation, edge_report, started, trace, expected_format
             )
-            if attach_cost:
-                self._attach_edge_cost(response, edge_generation)
+            self._attach_edge_cost(response, edge_generation)
             return response
 
         self.metrics.incr("escalation_total")
@@ -408,14 +407,25 @@ class Router:
             trace.append("未配置云端客户端，保留端侧结果")
             return self._degrade(request, edge_response, reason, started, trace, queued=True)
 
-        remaining_ms = request.deadline_ms - (time.perf_counter() - started) * 1000
+        remaining_ms = request.deadline_ms - (time.monotonic() - started) * 1000
+        cost_model = self._cost_model()
+        edge_tokens = self._edge_token_count(edge_generation)
+        prompt_tokens = self._prompt_tokens(edge_generation) if edge_generation else 0
+        estimated = cost_model.estimate(
+            edge_tokens=edge_tokens,
+            cloud_prefill_tokens=prompt_tokens + edge_tokens,
+            cloud_decode_tokens_expected=request.max_tokens,
+            cloud_calls=1,
+        )
         skip_reason = ""
         if remaining_ms < 150:
             skip_reason = "deadline_exceeded"
         elif not self.breaker.allow():
             skip_reason = "circuit_open"
         else:
-            allowed, budget_reason = self.budget.allow()
+            allowed, budget_reason = self.budget.allow(
+                estimated_cost=estimated.estimated_cost
+            )
             if not allowed:
                 skip_reason = f"budget_{budget_reason}"
         if skip_reason:
@@ -424,7 +434,7 @@ class Router:
             return self._degrade(request, edge_response, reason, started, trace, queued=True)
 
         self.metrics.incr("cloud_attempt_total")
-        self.budget.record(True)
+        self.budget.record(True, cost=estimated.estimated_cost)
         cloud_request = CloudRequest(
             prompt=request.prompt,
             request_id=request.request_id,
@@ -433,7 +443,10 @@ class Router:
             max_tokens=request.max_tokens,
             temperature=request.temperature,
             deadline_ms=int(min(self.config.cloud_timeout_ms, max(150, remaining_ms))),
-            metadata={**request.metadata, "edge_confidence": edge_report.score if edge_report else None},
+            metadata={
+                **request.metadata,
+                "edge_confidence": edge_report.score if edge_report else None,
+            },
         )
         try:
             cloud_response = self.cloud_client.enhance(cloud_request, timeout_ms=int(remaining_ms))
@@ -447,7 +460,7 @@ class Router:
         self.metrics.incr("cloud_success_total")
         self.metrics.incr("requests_total")
         self.metrics.observe("cloud_latency_ms", cloud_response.latency_ms)
-        self.metrics.observe("request_latency_ms", (time.perf_counter() - started) * 1000)
+        self.metrics.observe("request_latency_ms", (time.monotonic() - started) * 1000)
         cloud_report = ConfidenceReport(
             score=cloud_response.confidence,
             method="cloud_reported",
@@ -463,7 +476,7 @@ class Router:
             text=cloud_response.text,
             source="cloud",
             confidence=cloud_report.score,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=(time.monotonic() - started) * 1000,
             model_id=cloud_response.model_id,
             adapter_version=self.config.adapter_version,
             escalated=True,
@@ -479,14 +492,12 @@ class Router:
             cloud_output_tokens=cloud_response.output_tokens,
             metadata={"edge_model": edge_generation.model_id if edge_generation else None},
         )
-        if attach_cost and edge_generation is not None:
-            edge_tokens = self._edge_token_count(edge_generation)
-            response.cost_estimate = self._cost_model().estimate(
-                edge_tokens=edge_tokens,
-                cloud_prefill_tokens=self._prompt_tokens(edge_generation) + edge_tokens,
-                cloud_decode_tokens_expected=cloud_response.output_tokens,
-                cloud_calls=1,
-            ).to_dict()
+        response.cost_estimate = cost_model.estimate(
+            edge_tokens=edge_tokens,
+            cloud_prefill_tokens=prompt_tokens + edge_tokens,
+            cloud_decode_tokens_expected=cloud_response.output_tokens,
+            cloud_calls=1,
+        ).to_dict()
         return response
 
     # ------------------------------------------------------------------ handoff
@@ -537,6 +548,11 @@ class Router:
             "task": request.task,
             "deadline_ms": request.deadline_ms,
             "expected_format": expected_format,
+            "deadline_at": started + request.deadline_ms / 1000.0,
+            "min_remaining_ms": max(
+                _MIN_HANDOFF_REMAINING_MS, float(self.config.cloud_rtt_ms)
+            ),
+            "clock": time.monotonic,
         }
         gold = request.metadata.get("gold_handoff_index")
         if (
@@ -549,13 +565,13 @@ class Router:
             # instead of failing the request.
             context["gold_handoff_index"] = gold
 
-        edge_started = time.perf_counter()
+        edge_started = time.monotonic()
         edge_generation: Generation | None = None
         edge_error: str | None = None
         try:
             edge_generation = self.edge_backend.generate_until(
                 request,
-                policy,
+                self._format_guarded(policy),
                 max_boundary_wait_tokens=self.config.max_boundary_wait_tokens,
                 expected_format=expected_format,
                 context=context,
@@ -564,9 +580,16 @@ class Router:
             edge_error = str(exc)
             self.metrics.incr("edge_failures_total")
             trace.append(f"端侧流式推理失败：{exc}")
-        edge_wall_ms = (time.perf_counter() - edge_started) * 1000
+        edge_wall_ms = (time.monotonic() - edge_started) * 1000
 
         if edge_generation is None or not self._handed_off(edge_generation):
+            if isinstance(policy, ProbePolicy) and not policy.available:
+                self.metrics.incr("probe_unavailable_total")
+                self.metrics.incr("legacy_fallback_total")
+                trace.append(
+                    "probe 运行期不可用，回退整段升级路径："
+                    f"{policy.unavailable_reason}"
+                )
             # No handoff: the generation is a complete answer, so reuse the whole
             # escalation path exactly (including ConfidenceEstimator scoring).
             return self._finish_whole(
@@ -577,11 +600,22 @@ class Router:
                 edge_generation,
                 edge_error,
                 edge_wall_ms,
-                attach_cost=True,
             )
         return self._infer_handoff(
             request, started, trace, expected_format, edge_generation, edge_wall_ms
         )
+
+    @staticmethod
+    def _format_guarded(policy: HandoffPolicy) -> HandoffPolicy:
+        """Wrap the configured probe/oracle policy with the JSON format guard.
+
+        Injected test/eval policies are returned unchanged: the guard is a
+        serving-path rule for the two shipped policies, not a policy rewriter.
+        """
+
+        if isinstance(policy, (ProbePolicy, OraclePolicy)):
+            return FormatGuardPolicy(policy)
+        return policy
 
     @staticmethod
     def _handed_off(generation: Generation) -> bool:
@@ -625,6 +659,9 @@ class Router:
         self.metrics.incr(f"handoff_reason_{handoff_reason}")
         self.metrics.incr(f"handoff_boundary_{boundary}")
         self.metrics.observe("handoff_index", float(handoff_index))
+        self.metrics.observe_hist(
+            "handoff_index", float(handoff_index), (4, 8, 16, 32, 64, 128)
+        )
         self.metrics.observe("boundary_wait_tokens", float(waited_tokens))
         self.metrics.incr("escalation_total")
         self.metrics.incr(f"escalation_reason_{handoff_reason}")
@@ -655,7 +692,7 @@ class Router:
             cost_model.estimate(edge_tokens=prefix_tokens),
         )
 
-        remaining_ms = request.deadline_ms - (time.perf_counter() - started) * 1000
+        remaining_ms = request.deadline_ms - (time.monotonic() - started) * 1000
         required_ms = max(_MIN_HANDOFF_REMAINING_MS, float(self.config.cloud_rtt_ms))
         skip_reason = ""
         skip_detail = ""
@@ -720,7 +757,7 @@ class Router:
         self.metrics.incr("cloud_success_total")
         self.metrics.incr("requests_total")
         self.metrics.observe("cloud_latency_ms", cloud_response.latency_ms)
-        self.metrics.observe("request_latency_ms", (time.perf_counter() - started) * 1000)
+        self.metrics.observe("request_latency_ms", (time.monotonic() - started) * 1000)
         self.metrics.incr("cloud_prefill_tokens", float(prompt_tokens + prefix_tokens))
         self.metrics.observe("cloud_decode_tokens", float(cloud_response.output_tokens))
         cloud_report = ConfidenceReport(
@@ -733,23 +770,29 @@ class Router:
             f"置信度 {cloud_report.score:.2f}"
         )
 
-        rewrite = bool(
-            cloud_response.corrected_prefix or self.config.allow_prefix_rewrite
-        )
+        rewrite = bool(cloud_response.corrected_prefix)
+        mismatch = False
         if rewrite:
             final_text = cloud_response.text
             trace.append("云端纠正了端侧前缀，采用云端完整答案")
         else:
+            if not cloud_response.continued_from_prefix:
+                mismatch = True
+                trace.append("云端未声明续写（continued_from_prefix=false）")
             if bool(cloud_response.metadata.get("continuation_mismatch")) or (
                 looks_like_duplicate_prefix(prefix, cloud_response.text)
             ):
-                self.metrics.incr("continuation_mismatch_total")
+                mismatch = True
                 trace.append("云端重述了端侧前缀，按安全拼接处理")
+            if mismatch:
+                self.metrics.incr("continuation_mismatch_total")
+            if self.config.allow_prefix_rewrite:
+                trace.append("云端未声明纠正，按续写处理")
             final_text = assemble_continuation(prefix, cloud_response.text)
             trace.append("最终答案由端侧前缀与云端续写拼接而成")
 
         degraded = False
-        if _format_ok(final_text, expected_format) == 0.0:
+        if format_ok(final_text, expected_format) == 0.0:
             degraded = True
             self.metrics.incr("final_format_invalid_total")
             trace.append(f"最终答案未通过 {expected_format} 格式校验，仍保留云端结果")
@@ -765,7 +808,7 @@ class Router:
             text=final_text,
             source="cloud",
             confidence=cloud_report.score,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=(time.monotonic() - started) * 1000,
             model_id=cloud_response.model_id,
             adapter_version=self.config.adapter_version,
             escalated=True,
@@ -782,6 +825,8 @@ class Router:
                 "edge_model": generation.model_id,
                 "expected_format": expected_format,
                 "handoff_policy_version": self.config.handoff_policy_version,
+                "continued_from_prefix": bool(cloud_response.continued_from_prefix),
+                "corrected_prefix": bool(cloud_response.corrected_prefix),
             },
             handoff_index=handoff_index,
             edge_tokens_before_handoff=prefix_tokens,
@@ -811,7 +856,7 @@ class Router:
             text=prefix,
             source="edge",
             confidence=report.score,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=(time.monotonic() - started) * 1000,
             model_id=generation.model_id,
             adapter_version=self.config.adapter_version,
             escalated=False,
@@ -910,7 +955,7 @@ class Router:
                 text="",
                 source="none",
                 confidence=0.0,
-                latency_ms=(time.perf_counter() - started) * 1000,
+                latency_ms=(time.monotonic() - started) * 1000,
                 model_id="none",
                 adapter_version=self.config.adapter_version,
                 degraded=True,
@@ -922,7 +967,7 @@ class Router:
             text=generation.text,
             source="edge",
             confidence=report.score if report else 0.0,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=(time.monotonic() - started) * 1000,
             model_id=generation.model_id,
             adapter_version=self.config.adapter_version,
             escalated=False,
@@ -951,7 +996,7 @@ class Router:
         edge_response.degraded = True
         edge_response.escalation_reason = reason
         edge_response.trace = list(trace)
-        edge_response.latency_ms = (time.perf_counter() - started) * 1000
+        edge_response.latency_ms = (time.monotonic() - started) * 1000
         if queued and self.outbox is not None:
             try:
                 self.outbox.enqueue(request, edge_response, reason)
@@ -1037,7 +1082,9 @@ class OutboxFlusher(threading.Thread):
                 self.metrics.incr("outbox_flush_corrupt_total")
                 continue
             try:
-                response = self.cloud_client.enhance(cloud_request, timeout_ms=self.cloud_timeout_ms)
+                response = self.cloud_client.enhance(
+                    cloud_request, timeout_ms=self.cloud_timeout_ms
+                )
             except Exception as exc:  # noqa: BLE001 - keep the item pending
                 self.outbox.update(
                     item["item_id"], attempts=attempts + 1, last_error=str(exc)[:300]

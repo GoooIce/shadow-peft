@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from edge_cloud.protocol import CloudRequest, CloudResponse, InferResponse, ProtocolError
+from edge_cloud.protocol import (
+    CloudRequest,
+    CloudResponse,
+    FeedbackRequest,
+    InferResponse,
+    ProtocolError,
+)
 
 
 def test_cloud_request_parses_legacy_payload_without_handoff_fields() -> None:
@@ -56,6 +62,21 @@ def test_cloud_request_rejects_invalid_handoff_index() -> None:
         CloudRequest.from_dict({"prompt": "x", "handoff_index": "abc"})
 
 
+@pytest.mark.parametrize("value", [1.5, 3.0, True, False, "3"])
+def test_cloud_request_handoff_index_rejects_non_integer_json_values(value: object) -> None:
+    with pytest.raises(ProtocolError):
+        CloudRequest(prompt="x", handoff_index=value)
+    with pytest.raises(ProtocolError):
+        CloudRequest.from_dict({"prompt": "x", "handoff_index": value})
+
+
+def test_cloud_request_edge_token_count_is_strict_too() -> None:
+    with pytest.raises(ProtocolError):
+        CloudRequest(prompt="x", edge_tokens_before_handoff=2.5)
+    with pytest.raises(ProtocolError):
+        CloudRequest.from_dict({"prompt": "x", "edge_tokens_before_handoff": True})
+
+
 def test_cloud_request_rejects_prefix_trust_outside_unit_interval() -> None:
     for value in (-0.01, 1.01):
         with pytest.raises(ProtocolError):
@@ -64,6 +85,86 @@ def test_cloud_request_rejects_prefix_trust_outside_unit_interval() -> None:
             CloudRequest.from_dict({"prompt": "x", "prefix_trust": value})
     with pytest.raises(ProtocolError):
         CloudRequest.from_dict({"prompt": "x", "prefix_trust": "high"})
+
+
+@pytest.mark.parametrize("value", [True, False, "0.5", float("nan"), float("inf")])
+def test_cloud_request_prefix_trust_rejects_non_real_or_non_finite_values(
+    value: object,
+) -> None:
+    with pytest.raises(ProtocolError):
+        CloudRequest(prompt="x", prefix_trust=value)
+    with pytest.raises(ProtocolError):
+        CloudRequest.from_dict({"prompt": "x", "prefix_trust": value})
+
+
+def test_feedback_request_parses_legacy_payload_with_handoff_defaults() -> None:
+    feedback = FeedbackRequest.from_dict({"request_id": "r1", "accepted": True})
+
+    assert feedback.handoff_index is None
+    assert feedback.handoff_reason is None
+    assert feedback.prefix_trust is None
+    assert feedback.continued_from_prefix is False
+    assert feedback.corrected_prefix is False
+    assert feedback.cost_estimate is None
+
+    restored = FeedbackRequest.from_dict(feedback.to_dict())
+    assert restored == feedback
+
+    null_flags = FeedbackRequest.from_dict(
+        {
+            "request_id": "r1",
+            "accepted": True,
+            "continued_from_prefix": None,
+            "corrected_prefix": None,
+        }
+    )
+    assert null_flags.continued_from_prefix is False
+    assert null_flags.corrected_prefix is False
+
+
+def test_feedback_request_roundtrips_handoff_fields() -> None:
+    cost = {
+        "edge_tokens": 6,
+        "cloud_prefill_tokens": 23,
+        "cloud_decode_tokens_expected": 5,
+        "cloud_calls": 1,
+        "rtt_ms": 40.0,
+        "estimated_cost": 0.602,
+    }
+    feedback = FeedbackRequest.from_dict(
+        {
+            "request_id": "r2",
+            "accepted": True,
+            "handoff_index": 6,
+            "handoff_reason": "low_prefix_trust",
+            "prefix_trust": 0.2,
+            "continued_from_prefix": True,
+            "corrected_prefix": False,
+            "cost_estimate": cost,
+        }
+    )
+
+    assert feedback.handoff_index == 6
+    assert feedback.handoff_reason == "low_prefix_trust"
+    assert feedback.prefix_trust == pytest.approx(0.2)
+    assert feedback.continued_from_prefix is True
+    assert feedback.cost_estimate == cost
+    assert FeedbackRequest.from_dict(feedback.to_dict()) == feedback
+
+
+def test_feedback_request_rejects_invalid_handoff_field_types() -> None:
+    with pytest.raises(ProtocolError):
+        FeedbackRequest.from_dict(
+            {"request_id": "r1", "accepted": True, "handoff_index": "6"}
+        )
+    with pytest.raises(ProtocolError):
+        FeedbackRequest.from_dict(
+            {"request_id": "r1", "accepted": True, "prefix_trust": "high"}
+        )
+    with pytest.raises(ProtocolError):
+        FeedbackRequest.from_dict(
+            {"request_id": "r1", "accepted": True, "cost_estimate": "cheap"}
+        )
 
 
 def test_cloud_request_accepts_handoff_boundary_values() -> None:

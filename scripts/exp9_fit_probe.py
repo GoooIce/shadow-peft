@@ -60,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"features   : {len(payload['feature_names'])}")
     print(f"threshold  : {payload['threshold']:.3f}")
     print(f"fingerprint: {payload['fingerprint']}")
+    print(f"training fp: {payload['training_fingerprint']}")
     print(f"probe      : {target}")
     return 0
 

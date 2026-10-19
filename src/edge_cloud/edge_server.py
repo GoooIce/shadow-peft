@@ -176,7 +176,9 @@ class EdgeService:
             if not request.cloud_text and cached_response.get("source") == "cloud":
                 request.cloud_text = str(cached_response.get("text") or "")
             request.source = request.source or str(cached_response.get("source") or "")
-            request.confidence = request.confidence or float(cached_response.get("confidence") or 0.0)
+            request.confidence = request.confidence or float(
+                cached_response.get("confidence") or 0.0
+            )
             request.escalation_reason = request.escalation_reason or cached_response.get(
                 "escalation_reason"
             )
@@ -184,6 +186,30 @@ class EdgeService:
                 cached_response.get("adapter_version") or ""
             )
             request.final_text = request.final_text or str(cached_response.get("text") or "")
+            request.handoff_index = (
+                request.handoff_index
+                if request.handoff_index is not None
+                else cached_response.get("handoff_index")
+            )
+            request.handoff_reason = request.handoff_reason or cached_response.get(
+                "handoff_reason"
+            )
+            request.prefix_trust = (
+                request.prefix_trust
+                if request.prefix_trust is not None
+                else cached_response.get("prefix_trust")
+            )
+            request.cost_estimate = request.cost_estimate or cached_response.get(
+                "cost_estimate"
+            )
+            cached_metadata = cached_response.get("metadata")
+            if isinstance(cached_metadata, dict):
+                request.continued_from_prefix = request.continued_from_prefix or bool(
+                    cached_metadata.get("continued_from_prefix")
+                )
+                request.corrected_prefix = request.corrected_prefix or bool(
+                    cached_metadata.get("corrected_prefix")
+                )
         if request.corrected_text.strip():
             request.final_text = request.corrected_text.strip()
         elif not request.final_text.strip():
@@ -240,7 +266,10 @@ class EdgeService:
         if path == "/v1/stats":
             return self.stats()
         if path == "/metrics":
-            return RawResponse(self.metrics.prometheus(), "text/plain; version=0.0.4; charset=utf-8")
+            return RawResponse(
+                self.metrics.prometheus(),
+                "text/plain; version=0.0.4; charset=utf-8",
+            )
         if path == "/v1/outbox":
             items = self.outbox.items()
             return {"items": items[-50:], "stats": self.outbox.stats()}
@@ -303,16 +332,13 @@ class EdgeService:
             if not 0.0 <= value <= 1.0:
                 raise HttpError(400, "escalation_threshold 必须在 [0, 1] 内")
             self.config.escalation_threshold = value
-            self.router.config.escalation_threshold = value
         if "offline" in payload:
             self.config.offline = bool(payload["offline"])
-            self.router.config.offline = self.config.offline
         if "require_cloud_tasks" in payload:
             tasks = payload["require_cloud_tasks"]
             if not isinstance(tasks, list):
                 raise HttpError(400, "require_cloud_tasks 必须是数组")
             self.config.require_cloud_tasks = [str(task) for task in tasks]
-            self.router.config.require_cloud_tasks = list(self.config.require_cloud_tasks)
         if "max_cloud_calls_per_min" in payload:
             value = max(1, int(payload["max_cloud_calls_per_min"]))
             self.config.max_cloud_calls_per_min = value
@@ -337,8 +363,6 @@ class EdgeService:
                 raise HttpError(400, f"交接配置不合法：{exc}") from exc
             self.config.handoff_mode = validated.handoff_mode
             self.config.handoff_threshold = validated.handoff_threshold
-            self.router.config.handoff_mode = validated.handoff_mode
-            self.router.config.handoff_threshold = validated.handoff_threshold
         return {"ok": True, "config": self.config.to_dict()}
 
     def _with_handoff_metrics(self, payload: dict[str, Any]) -> dict[str, Any]:

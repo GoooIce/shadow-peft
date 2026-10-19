@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -207,6 +208,29 @@ def write_trigger_probe(
     return str(path)
 
 
+def write_feature_probe(
+    tmp_path: Path, feature_name: str, *, name: str = "feature-probe.json"
+) -> str:
+    """Probe that requires a feature some streaming backends cannot provide."""
+
+    payload = {
+        "version": PROBE_VERSION,
+        "feature_names": [feature_name],
+        "means": [0.0],
+        "stds": [1.0],
+        "coefs": [1.0],
+        "intercept": 0.0,
+        "threshold": 0.5,
+        "calibration": [],
+        "fingerprint": "",
+        "required_features": [feature_name],
+        "trained_at": _FIXED_TRAINED_AT,
+    }
+    path = tmp_path / name
+    write_probe(payload, path)
+    return str(path)
+
+
 def test_probe_confident_prefix_stays_on_edge_with_router_context(
     tmp_path: Path,
 ) -> None:
@@ -226,9 +250,14 @@ def test_probe_confident_prefix_stays_on_edge_with_router_context(
     assert response.text == "安全完成。"
     assert backend.generate_until_calls == 1
     assert backend.generate_calls == 0
-    assert backend.contexts == [
-        {"task": "process_qa", "deadline_ms": 3000, "expected_format": None}
-    ]
+    context = backend.contexts[0]
+    assert context is not None
+    assert context["task"] == "process_qa"
+    assert context["deadline_ms"] == 3000
+    assert context["expected_format"] is None
+    assert context["min_remaining_ms"] == 150.0
+    assert context["clock"] is time.monotonic
+    assert context["deadline_at"] > context["clock"]()
     assert backend.boundary_waits == [7]
     assert cloud.calls == []
     counters = router.metrics.snapshot()["counters"]
@@ -279,6 +308,7 @@ def test_probe_handoff_waits_for_sentence_boundary_and_sends_partial_trace(
     assert counters["handoff_total"] == 1
     assert counters["handoff_reason_low_prefix_trust"] == 1
     assert counters["handoff_boundary_sentence"] == 1
+    assert counters["handoff_index_bucket_lt_8"] == 1
     assert metrics["latency_ms"]["handoff_index"]["count"] == 1
     assert metrics["latency_ms"]["handoff_index"]["max"] == 6
     assert metrics["latency_ms"]["boundary_wait_tokens"]["max"] == 4
@@ -370,12 +400,15 @@ def test_handoff_skips_cloud_when_the_remaining_deadline_is_too_short(
     assert response.source == "edge"
     assert response.degraded is True
     assert response.escalation_reason == "deadline"
-    assert response.text == "判定：返修。"
-    assert response.handoff_index == 6
+    # The deadline is already shorter than the cloud RTT, so the streaming loop
+    # stops at the first token boundary instead of emitting the full prefix.
+    assert response.text == ""
+    assert response.handoff_index == 0
     assert cloud.calls == []
     assert len(outbox.pending()) == 1
     counters = router.metrics.snapshot()["counters"]
     assert counters["handoff_total"] == 1
+    assert counters["handoff_reason_deadline"] == 1
     assert "cloud_attempt_total" not in counters
 
 
@@ -672,6 +705,107 @@ def test_cloud_restating_the_prefix_is_recorded_without_duplication(
     assert router.metrics.snapshot()["counters"]["continuation_mismatch_total"] == 1
 
 
+def test_allowed_prefix_rewrite_without_a_declared_correction_is_a_continuation(
+    tmp_path: Path,
+) -> None:
+    backend = ScriptedStreamingBackend(["判", "定", "：", "返", "修", "。"])
+    cloud = FakeCloud(
+        text="后续。",
+        output_tokens=3,
+        corrected_prefix=False,
+        continued_from_prefix=True,
+    )
+    config = edge_config(tmp_path, handoff_mode="oracle", allow_prefix_rewrite=True)
+    router = Router(backend, config, cloud_client=cloud)
+    request = InferRequest(
+        prompt="焊点空洞 25%",
+        max_tokens=64,
+        deadline_ms=3000,
+        metadata={"gold_handoff_index": 1},
+    )
+
+    response = router.infer(request)
+
+    assert response.source == "cloud"
+    assert response.text == "判定：返修。后续。"
+    assert "云端未声明纠正，按续写处理" in " ".join(response.trace)
+    counters = router.metrics.snapshot()["counters"]
+    assert "continuation_mismatch_total" not in counters
+
+
+def test_undeclared_full_answer_records_a_continuation_mismatch(tmp_path: Path) -> None:
+    backend = ScriptedStreamingBackend(["判", "定", "：", "返", "修", "。"])
+    cloud = FakeCloud(
+        text="云端整段答案。",
+        output_tokens=6,
+        continued_from_prefix=False,
+    )
+    config = edge_config(tmp_path, handoff_mode="oracle")
+    router = Router(backend, config, cloud_client=cloud)
+    request = InferRequest(
+        prompt="焊点空洞 25%",
+        max_tokens=64,
+        deadline_ms=3000,
+        metadata={"gold_handoff_index": 1},
+    )
+
+    response = router.infer(request)
+
+    assert response.text == "判定：返修。云端整段答案。"
+    counters = router.metrics.snapshot()["counters"]
+    assert counters["continuation_mismatch_total"] == 1
+    assert "未声明续写" in " ".join(response.trace)
+
+
+def test_probe_losing_a_required_feature_falls_back_to_whole_segment(tmp_path: Path) -> None:
+    backend = ScriptedStreamingBackend(["安全", "完成。"])
+    cloud = FakeCloud()
+    config = edge_config(
+        tmp_path,
+        probe_path=write_feature_probe(tmp_path, "kl_base_shadow"),
+    )
+    router = Router(backend, config, cloud_client=cloud)
+    request = InferRequest(prompt="安全操作规范", deadline_ms=3000)
+
+    response = router.infer(request)
+
+    assert backend.generate_until_calls == 1
+    assert backend.generate_calls == 0
+    assert cloud.calls == []
+    assert response.source == "edge"
+    assert response.text == "安全完成。"
+    counters = router.metrics.snapshot()["counters"]
+    assert counters["probe_unavailable_total"] == 1
+    assert counters["legacy_fallback_total"] == 1
+    assert counters["edge_success_total"] == 1
+    assert "probe" in " ".join(response.trace)
+
+
+def test_format_guard_triggers_a_format_invalid_handoff_for_invalid_json(
+    tmp_path: Path,
+) -> None:
+    backend = ScriptedStreamingBackend(['{"a": 1,', ' "b":', " }", "x"])
+    cloud = FakeCloud(text="后续", output_tokens=2)
+    config = edge_config(tmp_path, handoff_mode="oracle")
+    router = Router(backend, config, cloud_client=cloud)
+    request = InferRequest(
+        prompt="输出 JSON",
+        max_tokens=64,
+        deadline_ms=3000,
+        metadata={"expected_format": "json"},
+    )
+
+    response = router.infer(request)
+
+    assert len(cloud.calls) == 1
+    cloud_request, _ = cloud.calls[0]
+    assert cloud_request.partial_trace == '{"a": 1, "b": }'
+    assert cloud_request.handoff_reason == "format_invalid"
+    assert response.handoff_reason == "format_invalid"
+    counters = router.metrics.snapshot()["counters"]
+    assert counters["handoff_reason_format_invalid"] == 1
+
+
 def test_prefix_rewrite_uses_the_full_cloud_answer_without_mismatch(
     tmp_path: Path,
 ) -> None:
@@ -721,6 +855,85 @@ def test_invalid_final_format_is_flagged_but_the_cloud_answer_is_kept(
     assert response.degraded is True
     counters = router.metrics.snapshot()["counters"]
     assert counters["final_format_invalid_total"] == 1
+
+
+def test_legacy_cloud_path_prices_actual_tokens_and_records_the_estimate(
+    tmp_path: Path,
+) -> None:
+    backend = ScriptedStreamingBackend([], full_text="端侧完整答案。", prompt_tokens=17)
+    cloud = FakeCloud(text="云端完整答案", output_tokens=5)
+    config = edge_config(
+        tmp_path,
+        handoff_mode="legacy",
+        cost_per_edge_token=0.001,
+        cost_per_cloud_input_token=0.002,
+        cost_per_cloud_output_token=0.01,
+        cost_per_cloud_call=0.5,
+        cloud_rtt_ms=40.0,
+    )
+    router = Router(backend, config, cloud_client=cloud)
+    request = InferRequest(
+        prompt="这批焊点是否放行", require_cloud=True, max_tokens=64, deadline_ms=3000
+    )
+
+    response = router.infer(request)
+
+    assert response.cost_estimate == {
+        "edge_tokens": 40,
+        "cloud_prefill_tokens": 57,
+        "cloud_decode_tokens_expected": 5,
+        "cloud_calls": 1,
+        "rtt_ms": 40.0,
+        "estimated_cost": 0.704,
+        "edge_cost": 0.04,
+        "cloud_prefill_cost": 0.114,
+        "cloud_decode_cost": 0.05,
+        "cloud_call_cost": 0.5,
+    }
+    # The budget gate uses the pre-call estimate (max_tokens of cloud decode).
+    budget = router.budget.snapshot()
+    assert budget["cloud_calls"] == 1
+    assert budget["window_cost"] == pytest.approx(1.294)
+
+
+@pytest.mark.parametrize("mode", ["legacy", "off"])
+def test_legacy_edge_only_path_attaches_a_zero_cloud_cost(
+    tmp_path: Path, mode: str
+) -> None:
+    backend = ScriptedStreamingBackend([], full_text="端侧完整答案。")
+    config = edge_config(tmp_path, handoff_mode=mode, cost_per_edge_token=0.001)
+    router = Router(backend, config, cloud_client=FakeCloud())
+
+    response = router.infer(InferRequest(prompt="安全操作规范", deadline_ms=3000))
+
+    assert response.source == "edge"
+    assert response.cost_estimate is not None
+    assert response.cost_estimate["cloud_calls"] == 0
+    assert response.cost_estimate["rtt_ms"] == 0.0
+    assert response.cost_estimate["edge_tokens"] == 40
+    assert response.cost_estimate["estimated_cost"] == pytest.approx(0.04)
+
+
+def test_legacy_cost_budget_denial_skips_the_cloud_call(tmp_path: Path) -> None:
+    backend = ScriptedStreamingBackend([], full_text="端侧完整答案。")
+    cloud = FakeCloud()
+    config = edge_config(
+        tmp_path,
+        handoff_mode="legacy",
+        cost_per_cloud_call=1.0,
+        max_cost_per_min=0.5,
+    )
+    router = Router(backend, config, cloud_client=cloud)
+
+    response = router.infer(
+        InferRequest(prompt="这批焊点是否放行", require_cloud=True, deadline_ms=3000)
+    )
+
+    assert cloud.calls == []
+    assert response.source == "edge"
+    assert response.degraded is True
+    assert "跳过云端增强：budget_max_cost" in " ".join(response.trace)
+    assert router.budget.snapshot()["window_cost"] == 0.0
 
 
 def test_cloud_budget_cost_window_and_legacy_semantics() -> None:

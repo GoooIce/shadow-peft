@@ -349,3 +349,64 @@ def test_transformers_decode_loop_is_injectable_without_torch() -> None:
     assert outcome.finish_reason == "stop"
     assert outcome.output_tokens == 2
     assert outcome.handoff is None
+
+
+def test_deadline_forces_a_handoff_at_the_current_token_boundary() -> None:
+    policy = _RecordingPolicy()
+    times = iter([0.0, 1.0])
+    steps = [_step("a"), _step("b"), _step("c")]
+
+    outcome = _decode_until(
+        steps,
+        policy,
+        max_tokens=8,
+        context={
+            "deadline_at": 0.5,
+            "min_remaining_ms": 150,
+            "clock": lambda: next(times),
+        },
+    )
+
+    assert outcome.text == "a"
+    assert outcome.finish_reason == "handoff"
+    assert outcome.output_tokens == 1
+    assert outcome.handoff is not None
+    assert outcome.handoff.handed_off is True
+    assert outcome.handoff.reason == "deadline"
+    assert outcome.handoff.boundary == "token"
+    assert outcome.handoff.handoff_index == 1
+    assert outcome.handoff.partial_trace == "a"
+    assert len(policy.steps) == 1
+
+
+def test_deadline_leaves_enough_time_when_the_clock_has_not_run_out() -> None:
+    policy = _RecordingPolicy()
+
+    outcome = _decode_until(
+        [_step("a"), _step("。")],
+        policy,
+        max_tokens=4,
+        context={
+            "deadline_at": 10.0,
+            "min_remaining_ms": 150,
+            "clock": lambda: 0.0,
+        },
+    )
+
+    assert outcome.finish_reason == "stop"
+    assert outcome.handoff is None
+    assert len(policy.steps) == 2
+
+
+def test_decode_until_ignores_a_malformed_deadline_context() -> None:
+    policy = _RecordingPolicy()
+
+    outcome = _decode_until(
+        [_step("a")],
+        policy,
+        max_tokens=2,
+        context={"deadline_at": "soon", "min_remaining_ms": None},
+    )
+
+    assert outcome.text == "a"
+    assert outcome.handoff is None

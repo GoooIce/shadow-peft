@@ -87,6 +87,28 @@ StepSource = Iterable[
 ]
 
 
+def _handoff_outcome(
+    reason: str,
+    boundary: str,
+    *,
+    committed: int,
+    text: str,
+    prefix_trust: float | None = None,
+    estimated_cost: Any = None,
+) -> HandoffOutcome:
+    """Build a handed-off outcome at the current committed token boundary."""
+
+    return HandoffOutcome(
+        handed_off=True,
+        reason=reason,  # type: ignore[arg-type]
+        boundary=boundary,  # type: ignore[arg-type]
+        handoff_index=committed,
+        partial_trace=text,
+        prefix_trust=prefix_trust,
+        estimated_cost=estimated_cost,
+    )
+
+
 def _context_task(context: Any, fallback: str = "general") -> str:
     if isinstance(context, Mapping):
         task = context.get("task")
@@ -152,6 +174,25 @@ def _decode_until(
 
     policy.reset(context)
     default_task = _context_task(context)
+    deadline_at: float | None = None
+    min_remaining_s = 0.15
+    clock: Any = time.monotonic
+    if isinstance(context, Mapping):
+        raw_deadline = context.get("deadline_at")
+        if (
+            isinstance(raw_deadline, (int, float))
+            and not isinstance(raw_deadline, bool)
+            and math.isfinite(float(raw_deadline))
+        ):
+            deadline_at = float(raw_deadline)
+        raw_min_remaining = context.get("min_remaining_ms", 150.0)
+        try:
+            min_remaining_s = max(0.0, float(raw_min_remaining)) / 1000.0
+        except (TypeError, ValueError):
+            min_remaining_s = 0.15
+        raw_clock = context.get("clock")
+        if callable(raw_clock):
+            clock = raw_clock
 
     text = ""
     output_logprobs: list[float] = []
@@ -168,6 +209,12 @@ def _decode_until(
     for token_text, token_logprob, base_logits, shadow_logits, boundary_context in islice(
         step_source, max_tokens
     ):
+        if deadline_at is not None and deadline_at - float(clock()) < min_remaining_s:
+            # The remaining budget cannot cover the cloud round trip: stop now
+            # at the token boundary so the router can degrade without waiting.
+            handoff = _handoff_outcome("deadline", "token", committed=committed, text=text)
+            finish_reason = "handoff"
+            break
         token_text = "" if token_text is None else str(token_text)
         step_format = _step_expected_format(expected_format, boundary_context)
         boundary_kind = detect_boundary(text, expected_format=step_format)
@@ -200,12 +247,11 @@ def _decode_until(
             pending_cost = decision.estimated_cost
             if boundary_kind is not None:
                 # The sampled token is risky: stop before emitting it.
-                handoff = HandoffOutcome(
-                    handed_off=True,
-                    reason=pending_reason,
-                    boundary=boundary_kind,
-                    handoff_index=committed,
-                    partial_trace=text,
+                handoff = _handoff_outcome(
+                    pending_reason,
+                    boundary_kind,
+                    committed=committed,
+                    text=text,
                     prefix_trust=pending_trust,
                     estimated_cost=pending_cost,
                 )
@@ -213,12 +259,11 @@ def _decode_until(
                 break
             if max_boundary_wait_tokens == 0:
                 # Zero budget: the sampled token is never emitted either.
-                handoff = HandoffOutcome(
-                    handed_off=True,
-                    reason=pending_reason,
-                    boundary="token",
-                    handoff_index=committed,
-                    partial_trace=text,
+                handoff = _handoff_outcome(
+                    pending_reason,
+                    "token",
+                    committed=committed,
+                    text=text,
                     prefix_trust=pending_trust,
                     estimated_cost=pending_cost,
                 )
@@ -241,22 +286,20 @@ def _decode_until(
         waited += 1
         post_boundary = detect_boundary(text, expected_format=step_format)
         if post_boundary is not None:
-            handoff = HandoffOutcome(
-                handed_off=True,
-                reason=pending_reason,
-                boundary=post_boundary,
-                handoff_index=committed,
-                partial_trace=text,
+            handoff = _handoff_outcome(
+                pending_reason,
+                post_boundary,
+                committed=committed,
+                text=text,
                 prefix_trust=pending_trust,
                 estimated_cost=pending_cost,
             )
         elif waited >= max_boundary_wait_tokens:
-            handoff = HandoffOutcome(
-                handed_off=True,
-                reason=pending_reason,
-                boundary="token",
-                handoff_index=committed,
-                partial_trace=text,
+            handoff = _handoff_outcome(
+                pending_reason,
+                "token",
+                committed=committed,
+                text=text,
                 prefix_trust=pending_trust,
                 estimated_cost=pending_cost,
             )
@@ -267,12 +310,11 @@ def _decode_until(
     if handoff is None and pending:
         # Generation ended before a semantic boundary (max_tokens or EOS): the
         # requested handoff still resolves at the last committed token.
-        handoff = HandoffOutcome(
-            handed_off=True,
-            reason=pending_reason,
-            boundary="token",
-            handoff_index=committed,
-            partial_trace=text,
+        handoff = _handoff_outcome(
+            pending_reason,
+            "token",
+            committed=committed,
+            text=text,
             prefix_trust=pending_trust,
             estimated_cost=pending_cost,
         )
@@ -677,7 +719,9 @@ class TransformersBackend:
             messages.append({"role": "system", "content": self.system_prompt})
         messages.append({"role": "user", "content": prompt})
         if getattr(tokenizer, "chat_template", None):
-            return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            return tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
         return prompt
 
     def generate(self, request: InferRequest, *, draft: str | None = None) -> Generation:
@@ -920,7 +964,14 @@ class TransformersBackend:
             ids = torch.cat([ids, next_tensor], dim=1)
             if attention_mask is not None:
                 attention_mask = torch.cat(
-                    [attention_mask, torch.ones((1, 1), device=ids.device, dtype=attention_mask.dtype)],
+                    [
+                        attention_mask,
+                        torch.ones(
+                            (1, 1),
+                            device=ids.device,
+                            dtype=attention_mask.dtype,
+                        ),
+                    ],
                     dim=1,
                 )
             if len(generated) >= request.max_tokens:
