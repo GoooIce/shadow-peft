@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from collections import OrderedDict
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +13,79 @@ from .config import EdgeConfig
 from .flywheel import FeedbackStore
 from .http_utils import BaseJsonHandler, HttpError, RawResponse, ServiceServer
 from .metrics import Metrics
-from .outbox import Outbox
-from .protocol import FeedbackRequest, InferRequest
+from .outbox import Outbox, OutboxItem
+from .protocol import (
+    CloudRequest,
+    CloudResponse,
+    FeedbackRequest,
+    InferRequest,
+    InferResponse,
+)
 from .router import CloudClient, CloudError, OutboxFlusher, Router
 
 _CONSOLE_PATH = Path(__file__).parent / "web" / "console.html"
+
+
+class _HandoffPolicyOutbox(Outbox):
+    """Outbox that records the handoff policy active when an item is queued.
+
+    ``OutboxFlusher`` (router.py) rebuilds the cloud request from the stored
+    item alone, so it cannot know which policy the edge was running. Stamping
+    both the request and the cached response keeps replay auditable and lets the
+    replay client below restore ``allow_prefix_rewrite`` without touching
+    router.py.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        policy_version: str,
+        allow_prefix_rewrite: bool,
+    ) -> None:
+        super().__init__(path)
+        self.policy_version = str(policy_version)
+        self.allow_prefix_rewrite = bool(allow_prefix_rewrite)
+
+    def enqueue(
+        self,
+        request: InferRequest,
+        edge_response: InferResponse,
+        reason: str,
+    ) -> OutboxItem:
+        request_metadata = dict(request.metadata)
+        request_metadata.setdefault("handoff_policy_version", self.policy_version)
+        request_metadata.setdefault("allow_prefix_rewrite", self.allow_prefix_rewrite)
+        response_metadata = dict(edge_response.metadata)
+        response_metadata.setdefault("handoff_policy_version", self.policy_version)
+        response_metadata.setdefault("allow_prefix_rewrite", self.allow_prefix_rewrite)
+        return super().enqueue(
+            replace(request, metadata=request_metadata),
+            replace(edge_response, metadata=response_metadata),
+            reason,
+        )
+
+
+class _ReplayPolicyCloudClient:
+    """Restore the enqueue-time handoff policy on replayed cloud requests.
+
+    ``OutboxFlusher`` copies the stored request metadata into
+    ``CloudRequest.metadata`` but always builds the request with the protocol
+    default ``allow_prefix_rewrite=False``. This adapter reads the value
+    recorded at enqueue time so replay keeps the original continuation
+    semantics; entries queued by older versions keep the default.
+    """
+
+    def __init__(self, inner: CloudClient) -> None:
+        self._inner = inner
+
+    def enhance(
+        self, request: CloudRequest, *, timeout_ms: int | None = None
+    ) -> CloudResponse:
+        rewrite = request.metadata.get("allow_prefix_rewrite")
+        if isinstance(rewrite, bool):
+            request.allow_prefix_rewrite = rewrite
+        return self._inner.enhance(request, timeout_ms=timeout_ms)
 
 
 class EdgeService:
@@ -32,7 +101,11 @@ class EdgeService:
         self.backend = backend or build_backend(config.backend)
         self.cloud = cloud_client or CloudClient(config.cloud_url)
         self.metrics = metrics or Metrics()
-        self.outbox = Outbox(config.outbox_path)
+        self.outbox = _HandoffPolicyOutbox(
+            config.outbox_path,
+            policy_version=config.handoff_policy_version,
+            allow_prefix_rewrite=config.allow_prefix_rewrite,
+        )
         self.feedback = FeedbackStore(config.feedback_path)
         self.router = Router(
             self.backend,
@@ -48,7 +121,7 @@ class EdgeService:
         if config.enable_outbox_flusher:
             self.flusher = OutboxFlusher(
                 self.outbox,
-                self.cloud,
+                _ReplayPolicyCloudClient(self.cloud),
                 interval_s=config.outbox_interval_s,
                 metrics=self.metrics,
                 cloud_timeout_ms=config.cloud_timeout_ms,
@@ -160,6 +233,9 @@ class EdgeService:
                 "adapter_channel": self.adapter_channel,
                 "offline": self.config.offline,
                 "cloud_url": self.config.cloud_url,
+                "handoff_mode": self.config.handoff_mode,
+                "handoff_policy_version": self.config.handoff_policy_version,
+                "handoff_threshold": self.config.handoff_threshold,
             }
         if path == "/v1/stats":
             return self.stats()
@@ -194,7 +270,9 @@ class EdgeService:
         if path == "/v1/cloud/dataset/export":
             return self._proxy("POST", "/v1/dataset/export", payload)
         if path == "/v1/cloud/registry/publish":
-            return self._proxy("POST", "/v1/registry/publish", payload)
+            return self._proxy(
+                "POST", "/v1/registry/publish", self._with_handoff_metrics(payload)
+            )
         if path == "/v1/cloud/registry/promote":
             return self._proxy("POST", "/v1/registry/promote", payload)
         if path == "/v1/cloud/registry/rollback":
@@ -208,6 +286,10 @@ class EdgeService:
             "adapter_channel": self.adapter_channel,
             "offline": self.config.offline,
             "threshold": self.config.escalation_threshold,
+            "handoff_mode": self.config.handoff_mode,
+            "handoff_policy_version": self.config.handoff_policy_version,
+            "handoff_threshold": self.config.handoff_threshold,
+            "allow_prefix_rewrite": self.config.allow_prefix_rewrite,
             "metrics": self.metrics.snapshot(),
             "outbox": self.outbox.stats(),
             "budget": self.router.budget.snapshot(),
@@ -241,7 +323,41 @@ class EdgeService:
                 raise HttpError(400, "max_cloud_ratio 必须在 [0, 1] 内")
             self.config.max_cloud_ratio = value
             self.router.budget.max_ratio = value
+        if "handoff_mode" in payload or "handoff_threshold" in payload:
+            # Validate both values together so a rejected payload never leaves
+            # the service half-updated.
+            try:
+                validated = EdgeConfig(
+                    handoff_mode=payload.get("handoff_mode", self.config.handoff_mode),
+                    handoff_threshold=payload.get(
+                        "handoff_threshold", self.config.handoff_threshold
+                    ),
+                )
+            except (TypeError, ValueError) as exc:
+                raise HttpError(400, f"交接配置不合法：{exc}") from exc
+            self.config.handoff_mode = validated.handoff_mode
+            self.config.handoff_threshold = validated.handoff_threshold
+            self.router.config.handoff_mode = validated.handoff_mode
+            self.router.config.handoff_threshold = validated.handoff_threshold
         return {"ok": True, "config": self.config.to_dict()}
+
+    def _with_handoff_metrics(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Attach the active handoff policy to registry metrics.
+
+        Adapter metrics then distinguish "the model got better" from "the
+        handoff policy changed" without requiring a registry schema change.
+        """
+        enriched = dict(payload)
+        metrics = enriched.get("metrics")
+        if metrics is None:
+            metrics = {}
+        if not isinstance(metrics, dict):
+            return enriched
+        metrics = dict(metrics)
+        metrics.setdefault("handoff_policy_version", self.config.handoff_policy_version)
+        metrics.setdefault("handoff_mode", self.config.handoff_mode)
+        enriched["metrics"] = metrics
+        return enriched
 
     def _proxy(self, method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
         try:

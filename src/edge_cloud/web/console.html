@@ -439,6 +439,13 @@ function renderScenarios() {
   });
 }
 
+function handoffNote(response) {
+  if (response.handoff_index == null) return "";
+  const reason = response.handoff_reason || "handoff";
+  const trust = response.prefix_trust == null ? "—" : Number(response.prefix_trust).toFixed(2);
+  return "；第 " + response.handoff_index + " token 交接（" + reason + "，prefix trust " + trust + "）";
+}
+
 function render(response) {
   const isCloud = response.source === "cloud";
   const edgeText = response.edge_text || (response.source === "edge" ? response.text : "");
@@ -470,9 +477,9 @@ function render(response) {
   }
 
   if (response.degraded) {
-    setDecision("degraded", "降级兜底", "端侧结果已返回；" + (REASONS[response.escalation_reason] || response.escalation_reason || "云端不可用"), "!");
+    setDecision("degraded", "降级兜底", "端侧结果已返回；" + (REASONS[response.escalation_reason] || response.escalation_reason || "云端不可用") + handoffNote(response), "!");
   } else if (isCloud) {
-    setDecision("cloud", "云端增强", "触发原因：" + (REASONS[response.escalation_reason] || response.escalation_reason || "低置信度"), "↗");
+    setDecision("cloud", "云端增强", "触发原因：" + (REASONS[response.escalation_reason] || response.escalation_reason || "低置信度") + handoffNote(response), "↗");
   } else {
     setDecision("edge", "端侧直出", "本地完成推理，未产生云端调用", "✓");
   }
