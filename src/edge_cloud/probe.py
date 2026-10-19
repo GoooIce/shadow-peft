@@ -10,11 +10,20 @@ artifact is intentionally dependency-free (no numpy/sklearn) and stable:
     means, stds      standardization statistics per feature
     coefs, intercept logistic weights on the standardized features
     threshold        calibrated operating point stored with the model
-    calibration      score bins with observed positive rates
+    calibration      trust bins; ``positive_rate`` is the observed handoff
+                     rate in that bin (mean of the original labels), kept under
+                     its historical name for schema compatibility
     fingerprint      SHA-256 of the canonical payload (excluding fingerprint
                      and trained_at), so identical fits share a fingerprint
     required_features features that must be present at scoring time
     trained_at       ISO-8601 UTC timestamp (informational; not fingerprinted)
+
+Score direction: ``ProbeModel.score`` returns **prefix trust**, so a high score
+means "keep generating on the edge" and a low score means "this prefix should
+hand off". Candidate labels keep the spec convention ``1 =
+prefix_should_handoff``; ``fit_probe`` therefore fits against ``1 - label`` and
+never against the raw label. ``ProbePolicy`` requests a handoff when trust
+falls below its threshold.
 
 Missing-value semantics: a required feature that is ``None``/absent makes
 ``ProbeModel.score`` raise ``ProbeFeatureError``; it is never read as 0. An
@@ -153,6 +162,12 @@ def _require_float_list(
 
 
 def _validate_calibration(value: Any) -> list[dict[str, Any]]:
+    """Validate calibration bins.
+
+    ``positive_rate`` (and ``positives``) count rows labelled
+    ``prefix_should_handoff=1`` inside the trust bin, so the value is the
+    observed handoff rate, not a probability that the prefix is trustworthy.
+    """
     if not isinstance(value, (list, tuple)):
         raise ProbeFormatError("probe 字段 calibration 必须是列表")
     entries: list[dict[str, Any]] = []
@@ -201,11 +216,14 @@ def _validate_calibration(value: Any) -> list[dict[str, Any]]:
 class ProbeModel:
     """A loaded probe artifact; ``score`` returns prefix trust in [0, 1].
 
-    ``score`` accepts a mapping of feature name to value or any object exposing
-    the feature names as attributes (``HandoffFeatures``). Booleans are encoded
-    as 1/0. A required feature that is missing, ``None`` or non-finite raises
-    ``ProbeFeatureError`` — missing information is never treated as 0. An
-    optional missing feature is mean-imputed (standardized value 0).
+    The score is **trust**, not handoff probability: values near 1 mean the
+    prefix is likely safe to keep on the edge, values near 0 mean it should be
+    handed off. ``score`` accepts a mapping of feature name to value or any
+    object exposing the feature names as attributes (``HandoffFeatures``).
+    Booleans are encoded as 1/0. A required feature that is missing, ``None`` or
+    non-finite raises ``ProbeFeatureError`` — missing information is never
+    treated as 0. An optional missing feature is mean-imputed (standardized
+    value 0).
     """
 
     version: str
@@ -310,7 +328,11 @@ class ProbeModel:
         return getattr(features, name, _MISSING)
 
     def score(self, features: Any) -> float:
-        """Return ``sigmoid(w·z + b)`` for one feature observation.
+        """Return ``sigmoid(w·z + b)``: the prefix trust for one observation.
+
+        High trust (near 1) means the prefix looks safe to continue on the edge;
+        low trust (near 0) means it should hand off. The model is fitted against
+        ``1 - prefix_should_handoff``, so this is never a handoff probability.
 
         Args:
             features: Mapping or object with attributes named by
@@ -410,6 +432,12 @@ def _fit_irls(
 def _calibration_table(
     probabilities: Sequence[float], labels: Sequence[float], bins: int
 ) -> list[dict[str, Any]]:
+    """Bin trust scores and report the observed handoff rate per bin.
+
+    ``labels`` are the original ``prefix_should_handoff`` labels, so
+    ``positive_rate`` is the fraction of rows in that trust bin that should
+    hand off. The field name is kept for schema compatibility.
+    """
     table: list[dict[str, Any]] = []
     for index in range(bins):
         lower = index / bins
@@ -465,10 +493,16 @@ def fit_probe(
     zeros, feature order defaults to sorted names, and repeating the same call
     yields identical parameters and fingerprint.
 
+    Labels use the candidate-export convention ``1 = prefix_should_handoff``,
+    but the model is fitted against ``1 - label`` because it predicts **prefix
+    trust**: high score = safe to continue on the edge, low score = should hand
+    off. ``ProbePolicy`` then hands off when trust is below its threshold.
+
     Args:
         rows: Feature mappings. ``None`` values are mean-imputed; a feature that
             is ``None`` in every row is unusable and raises ``ValueError``.
-        labels: Binary labels, one per row (``True``/``False`` or 0/1).
+        labels: Binary ``prefix_should_handoff`` labels, one per row
+            (``True``/``False`` or 0/1); the fit target is ``1 - label``.
         version: Artifact schema version to record. Only values in
             ``SUPPORTED_PROBE_VERSIONS`` can be loaded back; use the default
             unless a newer schema exists.
@@ -476,13 +510,16 @@ def fit_probe(
         feature_names: Feature order; defaults to the sorted keys of row 0.
         required_features: Features required at scoring time; defaults to every
             fitted feature.
-        calibration_bins: Number of equal-width score bins (at least 1).
+        calibration_bins: Number of equal-width trust bins (at least 1); each
+            reports ``positive_rate`` = observed handoff rate in that bin.
         trained_at: ISO timestamp override for deterministic artifacts; defaults
             to the current UTC time.
 
     Returns:
-        The artifact dict documented at module level. Write it with
-        ``write_probe`` to keep the fingerprint and JSON formatting consistent.
+        The artifact dict documented at module level. ``score`` on this model
+        returns trust, not the probability of the input label. Write the
+        artifact with ``write_probe`` to keep the fingerprint and JSON
+        formatting consistent.
 
     Raises:
         ValueError: empty/ragged/malformed training data, no usable feature, or
@@ -518,7 +555,10 @@ def fit_probe(
             raise ValueError(f"required_features 包含未知特征: {', '.join(unknown)}")
 
     label_values = [_label_value(value, index=index) for index, value in enumerate(labels)]
-    positive_count = sum(label_values)
+    # Candidate labels are 1 = should_handoff; trust is the opposite.
+    handoff_count = sum(label_values)
+    continue_count = len(row_list) - handoff_count
+    trust_labels = [1.0 - value for value in label_values]
 
     means: list[float] = []
     stds: list[float] = []
@@ -559,15 +599,14 @@ def fit_probe(
         raw_rows.append(raw)
         standardized.append(z_row)
 
-    if positive_count == 0 or positive_count == len(row_list):
-        # One-class data has no identifiable slope; record a smoothed base rate
-        # instead of letting the intercept diverge.
-        intercept = math.log(
-            (positive_count + 0.5) / (len(row_list) - positive_count + 0.5)
-        )
+    if continue_count == 0 or handoff_count == 0:
+        # One-class data has no identifiable slope; record a smoothed trust base
+        # rate instead of letting the intercept diverge. All-handoff rows must
+        # land near 0 trust and all-continue rows near 1.
+        intercept = math.log((continue_count + 0.5) / (handoff_count + 0.5))
         coefs = [0.0] * len(names)
     else:
-        coefs, intercept = _fit_irls(standardized, label_values, ridge=_RIDGE)
+        coefs, intercept = _fit_irls(standardized, trust_labels, ridge=_RIDGE)
 
     rounded_coefs = [round(coef, 12) for coef in coefs]
     rounded_intercept = round(intercept, 12)
