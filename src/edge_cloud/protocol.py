@@ -39,6 +39,30 @@ def _bounded_float(value: Any, *, default: float, low: float, high: float, name:
     return parsed
 
 
+def _optional_non_negative_int(value: Any, *, name: str) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ProtocolError(f"{name} 必须是整数") from exc
+    if parsed < 0:
+        raise ProtocolError(f"{name} 必须非负")
+    return parsed
+
+
+def _optional_unit_float(value: Any, *, name: str) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ProtocolError(f"{name} 必须是数字") from exc
+    if not 0.0 <= parsed <= 1.0:
+        raise ProtocolError(f"{name} 必须在 [0, 1] 内")
+    return parsed
+
+
 @dataclass(slots=True)
 class InferRequest:
     """A production-line inference request handled first by the edge model."""
@@ -126,6 +150,12 @@ class InferResponse:
     finish_reason: str = "stop"
     created_at: float = field(default_factory=time.time)
     metadata: dict[str, Any] = field(default_factory=dict)
+    handoff_index: int | None = None
+    edge_tokens_before_handoff: int | None = None
+    handoff_reason: str | None = None
+    prefix_trust: float | None = None
+    cloud_output_tokens: int = 0
+    cost_estimate: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -143,6 +173,12 @@ class CloudRequest:
     temperature: float = 0.0
     deadline_ms: int = 15000
     metadata: dict[str, Any] = field(default_factory=dict)
+    partial_trace: str = ""
+    handoff_index: int | None = None
+    edge_tokens_before_handoff: int | None = None
+    handoff_reason: str | None = None
+    prefix_trust: float | None = None
+    allow_prefix_rewrite: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.prompt, str) or not self.prompt.strip():
@@ -158,6 +194,16 @@ class CloudRequest:
         )
         if not isinstance(self.metadata, dict):
             raise ProtocolError("metadata 必须是对象")
+        if not isinstance(self.partial_trace, str):
+            self.partial_trace = str(self.partial_trace)
+        self.handoff_index = _optional_non_negative_int(self.handoff_index, name="handoff_index")
+        self.edge_tokens_before_handoff = _optional_non_negative_int(
+            self.edge_tokens_before_handoff, name="edge_tokens_before_handoff"
+        )
+        self.prefix_trust = _optional_unit_float(self.prefix_trust, name="prefix_trust")
+        if self.handoff_reason is not None and not isinstance(self.handoff_reason, str):
+            self.handoff_reason = str(self.handoff_reason)
+        self.allow_prefix_rewrite = bool(self.allow_prefix_rewrite)
 
     @classmethod
     def from_dict(cls, payload: Any) -> CloudRequest:
@@ -172,6 +218,12 @@ class CloudRequest:
             temperature=payload.get("temperature", 0.0),
             deadline_ms=payload.get("deadline_ms", 15000),
             metadata=payload.get("metadata") or {},
+            partial_trace=str(payload.get("partial_trace", "") or ""),
+            handoff_index=payload.get("handoff_index"),
+            edge_tokens_before_handoff=payload.get("edge_tokens_before_handoff"),
+            handoff_reason=payload.get("handoff_reason"),
+            prefix_trust=payload.get("prefix_trust"),
+            allow_prefix_rewrite=bool(payload.get("allow_prefix_rewrite", False)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -191,6 +243,9 @@ class CloudResponse:
     finish_reason: str = "stop"
     trace: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    continued_from_prefix: bool = False
+    corrected_prefix: bool = False
+    output_tokens: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
