@@ -633,6 +633,7 @@ This repository also ships a runnable reference implementation for **edge-cloud 
 
 - Design: [docs/edge-cloud-system.md](docs/edge-cloud-system.md)
 - Requirements draft: [docs/edge-cloud-srs.md](docs/edge-cloud-srs.md)
+- exp9 token-level handoff evaluation: [docs/exp9-handoff-eval.md](docs/exp9-handoff-eval.md)
 - Code: `src/edge_cloud/`
 
 ```bash
@@ -641,6 +642,30 @@ PYTHONPATH=src python -m pytest tests/edge_cloud -q
 ```
 
 The demo uses deterministic mock models. Swap in `transformers`（端侧，可选 ShadowPEFT 适配器）or an OpenAI-compatible cloud endpoint via `configs/edge-cloud/example.json`.
+
+### Token-level handoff
+
+`edge.handoff_mode` selects the escalation path: `legacy` (default, whole-answer escalation), `off`, `probe` (stream tokens, hand the prefix to the cloud at a semantic boundary when the calibrated prefix trust drops), or `oracle` (evaluation only). The legacy path stays the default and the rollback target; old configs without handoff fields keep loading unchanged. See [docs/edge-cloud-system.md §5.7](docs/edge-cloud-system.md) for the protocol fields, boundary wait budget, cost model, and rollback.
+
+Calibrate and evaluate the probe offline (synthetic/mock by default; use `--backend transformers|openai` plus `--dataset` for real models):
+
+```bash
+# four strategies + probe training candidates
+PYTHONPATH=src python scripts/exp9_handoff_eval.py --backend synthetic \
+  --n 1000 --seed 7 --bootstrap 1000 --out runs/exp9/handoff_eval \
+  --export-candidates runs/exp9/handoff_eval/candidates.jsonl
+
+# fit the offline probe (candidate label 1 = should_handoff)
+PYTHONPATH=src python scripts/exp9_fit_probe.py \
+  runs/exp9/handoff_eval/candidates.jsonl --out runs/exp9/handoff_eval/probe.json
+
+# rerun with the probe
+PYTHONPATH=src python scripts/exp9_handoff_eval.py --backend synthetic \
+  --n 1000 --seed 7 --bootstrap 1000 --probe runs/exp9/handoff_eval/probe.json \
+  --out runs/exp9/handoff_eval/probe_run
+```
+
+The synthetic round is archived in [docs/exp9-handoff-eval.md](docs/exp9-handoff-eval.md): probe matched legacy accuracy (1.000) with −21.5% cloud decode tokens, −24.6% total cloud tokens, −17.3% cost, and −34.6% P95. Real transformers/OpenAI backends and a customer-labelled evaluation set are still pending.
 
 ---
 
