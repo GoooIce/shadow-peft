@@ -33,7 +33,23 @@
     "expected_format_by_task": {
       "quality_verdict": "verdict",
       "process_calc": "number"
-    }
+    },
+    "handoff_mode": "legacy",
+    "handoff_threshold": 0.5,
+    "handoff_threshold_by_task": {
+      "quality_verdict": 0.35,
+      "process_calc": 0.45
+    },
+    "max_boundary_wait_tokens": 12,
+    "allow_prefix_rewrite": false,
+    "probe_path": "/opt/models/handoff_probe.json",
+    "handoff_policy_version": "v1",
+    "cost_per_edge_token": 0.000002,
+    "cost_per_cloud_input_token": 0.000004,
+    "cost_per_cloud_output_token": 0.000012,
+    "cost_per_cloud_call": 0.0005,
+    "cloud_rtt_ms": 120.0,
+    "max_cost_per_min": 0.05
   },
   "cloud": {
     "cloud_id": "cloud-prod",

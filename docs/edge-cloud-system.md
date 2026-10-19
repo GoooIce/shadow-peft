@@ -160,6 +160,106 @@
 
 端侧启动时与转正后拉取当前版本；生产环境应增加定时轮询与签名校验。
 
+### 5.7 token/span 级交接
+
+整段升级路径之外，系统提供一条**成本感知的 token/span 级交接**路径：端侧流式生成时按 token 观察前缀可信度，判定不可信后等到最近的语义边界停止，把 prompt + partial trace + 交接位置交给云端，云端只续写剩余部分，每个请求最多一次交接。整段升级路径仍是默认与回退。
+
+#### 模式
+
+`edge.handoff_mode` 控制路径，默认 `legacy`：
+
+| 模式 | 行为 | 适用 |
+| --- | --- | --- |
+| `off` | 完全禁用 token 级路径，按整段升级处理 | 应急关闭 |
+| `legacy` | 现有整段升级：端侧生成完整答案，`ConfidenceEstimator` 阈值决定是否把整段草稿送云端 | 默认、回滚 |
+| `probe` | 逐 token 流式生成，`ProbePolicy` 用离线校准的 probe 打分；可信度低于阈值时到边界交接 | 灰度、生产候选 |
+| `oracle` | 与 `probe` 相同的控制流，但用请求 metadata 里的 `gold_handoff_index` 驱动 | 仅离线评测 |
+
+`off` 与 `legacy` 都走整段路径（`off` 用于显式声明关闭）。`probe` 要求端侧后端支持流式生成（`generate_until`）；后端不支持、probe 文件缺失/版本不匹配/特征不可用时，自动回退整段路径，并分别累计 `streaming_unavailable_total`、`probe_unavailable_total`、`legacy_fallback_total`。`probe_path` 按字面路径读取（不做 `~` 展开），生产配置应使用绝对路径。`require_cloud=true` 或任务在 `require_cloud_tasks` 中时，跳过流式路径，保持整段云端语义。
+
+#### HandoffPolicy 与单次交接
+
+`HandoffPolicy` 是 Router 可注入的策略接口：
+
+- `reset(context)`：每个请求调用一次，context 包含 task、deadline、expected_format；`oracle` 另读 `gold_handoff_index`。
+- `observe(step) -> HandoffDecision`：每生成一个 token 调用一次。`step` 包含 `HandoffFeatures`（base/shadow 分歧、熵、margin、top-1 一致、低概率 token 占比、已生成 token 数、边界类型、任务、格式状态）与当前 token/logprob。
+- `HandoffDecision.action="handoff"` 的语义是「到下一个合格边界再交接」，不是立刻截断；`reason` 取 `legacy_threshold`、`low_prefix_trust`、`format_invalid`、`task_requires_cloud`、`deadline`、`budget` 之一。
+
+没有 shadow checkpoint 时，`kl_base_shadow`、`top1_agreement`、`shadow_entropy`、`shadow_margin`、`base_top1_in_shadow_topk` 为 `None` 而非 0；probe 若把这些列为必需特征，会在流式开始前标记不可用并回退 `legacy`。
+
+策略只负责决策，不直接调用云端；云端调用、预算、熔断、截止时间、离线队列仍由 `Router` 统一负责。因此同一个 Router 可以替换 `probe`、`oracle` 策略或回退 `legacy` 路径，而不改控制流。
+
+单次交接由 Router 强制执行：策略反复触发也只调用云端一次，之后由云端完成剩余生成；`InferResponse` 的 `handoff_index` 是最终切分位置，`edge_tokens_before_handoff` 是端侧已提交 token 数。交接后云端失败、剩余时延不足、预算不足、熔断打开或离线时，保留端侧前缀并标记 `degraded=true`，按原离线队列语义入队。
+
+#### 边界等待
+
+`max_boundary_wait_tokens`（默认 12）限制策略触发后最多再生成多少 token 去找语义边界。边界检测是纯函数，按优先级识别：
+
+1. `json_field`：`expected_format="json"` 且文本以 `,`、`}`、`]` 结尾；
+2. `step`：最后一行只是编号/项目符号（`1.`、`2、`、`-` 等）；
+3. `sentence`：中英文句号、问号、感叹号、省略号（可跟收尾引号/括号）；
+4. `newline`：换行。
+
+等待预算用尽或截止时间不足时，允许在 `token` 边界强制切分。边界检测只读已生成文本，不依赖 tokenizer 特殊 token；半句不产生边界。
+
+#### 协议字段
+
+新增字段全部可选，缺省时与旧版完全一致：
+
+| 方向 | 字段 | 含义 |
+| --- | --- | --- |
+| `CloudRequest` | `partial_trace` | 交接前缀全文；非空时云端优先按续写处理，不再看 `draft` |
+| `CloudRequest` | `handoff_index` / `edge_tokens_before_handoff` | 交接 token 位置 / 端侧已生成 token 数 |
+| `CloudRequest` | `handoff_reason` / `prefix_trust` | 触发原因 / 前缀可信度 |
+| `CloudRequest` | `allow_prefix_rewrite` | 是否允许云端先纠正前缀再续写 |
+| `CloudResponse` | `continued_from_prefix` / `corrected_prefix` | 云端是否按续写返回 / 是否纠正了前缀 |
+| `CloudResponse` | `output_tokens` | 云端实际输出 token 数，用于成本估算 |
+| `InferResponse` | `handoff_index` / `edge_tokens_before_handoff` / `handoff_reason` / `prefix_trust` | 端侧可见的交接元数据 |
+| `InferResponse` | `cloud_output_tokens` / `cost_estimate` | 云端输出 token / 成本分解 |
+
+`allow_prefix_rewrite=false` 时，云端返回文本按续写拼接为 `partial_trace + continuation`；云端重述前缀会被识别为 `continuation_mismatch`，按安全拼接处理。`allow_prefix_rewrite=true` 时以云端完整文本替换前缀，并标记 `corrected_prefix`。旧客户端忽略未知字段即可；旧 payload 不带新字段仍可解析。
+
+#### 成本口径
+
+配置新增四项单价与 RTT 估算：
+
+- `cost_per_edge_token`
+- `cost_per_cloud_input_token`
+- `cost_per_cloud_output_token`
+- `cost_per_cloud_call`
+- `cloud_rtt_ms`
+
+`CostEstimate` 记录 `edge_tokens`、`cloud_prefill_tokens`、`cloud_decode_tokens_expected`、`cloud_calls`、`rtt_ms`、`estimated_cost`，并给出 `edge_cost` / `cloud_prefill_cost` / `cloud_decode_cost` / `cloud_call_cost` 分解。成本只用于预算与评测门槛，不改变最终响应文本；单价全为 0 时退化为按调用次数计价，与旧预算一致。预算窗口在原有「绝对调用数 + 升级比例」之上增加 `max_cost_per_min`（滑动窗口成本上限，窗口长度由 `cloud_window_s` 决定，默认 60s；0 表示不启用）。
+
+#### 回滚到 legacy
+
+- 配置回滚：把 `handoff_mode` 设为 `"legacy"`（或 `"off"`），或将 `probe_path` 清空；旧配置文件不带任何 handoff 字段时默认就是 `legacy`。
+- 自动回退：端侧后端不支持流式、probe 不可用、特征缺失时，Router 自动走整段路径，不需要改配置。
+- 生产灰度建议：评测台 → 离线校准 probe → 小流量 `probe` → 逐步扩大；每一步都保留 `legacy` 回滚点。
+
+#### 评测与校准入口
+
+```bash
+# 四策略评测（合成/mock 或 --dataset 指定 prompt 集）
+PYTHONPATH=src .venv/bin/python scripts/exp9_handoff_eval.py \
+  --backend synthetic --n 1000 --seed 7 --bootstrap 1000 \
+  --out runs/exp9/handoff_eval \
+  --export-candidates runs/exp9/handoff_eval/candidates.jsonl
+
+# 离线拟合 probe（候选 label 1 = should_handoff，产物 score 是 prefix trust）
+PYTHONPATH=src .venv/bin/python scripts/exp9_fit_probe.py \
+  runs/exp9/handoff_eval/candidates.jsonl \
+  --out runs/exp9/handoff_eval/probe.json --threshold 0.5
+
+# 带 probe 复跑
+PYTHONPATH=src .venv/bin/python scripts/exp9_handoff_eval.py \
+  --backend synthetic --n 1000 --seed 7 --bootstrap 1000 \
+  --probe runs/exp9/handoff_eval/probe.json \
+  --out runs/exp9/handoff_eval/probe_run
+```
+
+评测产物（`results.json`、`summary.csv`、`curves.csv`、`per_prompt.jsonl`）的 schema 与 mock/真实后端共用；真实后端需用 `--backend transformers|openai --backend-config <json>` 并额外提供 `--dataset`，云端答案仍由数据集脚本提供，真实模型数字不能由 synthetic 结果替代。已完成的合成轮结论与限制见 [exp9 交接评测档案](exp9-handoff-eval.md)。
+
 ## 6. 接口
 
 ### 6.1 端侧
@@ -326,15 +426,28 @@
 src/edge_cloud/
   protocol.py       # 请求/响应/反馈协议
   confidence.py     # 置信度评估
-  backends.py       # 模拟模型 / HF / OpenAI 兼容后端
+  backends.py       # 模拟模型 / HF / OpenAI 兼容后端（含流式交接）
   router.py         # 升级路由、预算、熔断、离线队列重放
+  handoff.py        # 交接原语：特征 / 决策 / 结果
+  policies.py       # probe / oracle 交接策略
+  probe.py          # probe 产物加载、拟合与打分
+  features.py       # 逐 token base/shadow 特征提取
+  boundaries.py     # 语义边界检测
+  continuation.py   # 续写拼接与重复前缀检测
+  cost.py           # 端侧 / 云端 token 与调用成本估算
+  handoff_eval.py   # exp9 四策略评测台与曲线
   outbox.py         # 断网续传
   flywheel.py       # 反馈库与 SFT 导出
   registry.py       # 适配器灰度与回滚
   edge_server.py    # 端侧 HTTP 服务
   cloud_server.py   # 云端增强服务
+  metrics.py        # 指标与 Prometheus 文本
   web/console.html  # 产线控制台
   __main__.py       # CLI
+
+scripts/
+  exp9_handoff_eval.py  # exp9 四策略评测与候选导出
+  exp9_fit_probe.py     # 离线校准 probe
 ```
 
 运行演示（无需 GPU，使用模拟模型）：
