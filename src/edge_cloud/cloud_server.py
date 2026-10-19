@@ -4,14 +4,79 @@ from __future__ import annotations
 
 from typing import Any
 
-from .backends import Backend, BackendError, build_backend
+from .backends import Backend, BackendError, Generation, build_backend
 from .confidence import ConfidenceEstimator
 from .config import CloudConfig
+from .continuation import assemble_continuation, looks_like_duplicate_prefix
 from .flywheel import FeedbackStore
 from .http_utils import BaseJsonHandler, HttpError, RawResponse, ServiceServer
 from .metrics import Metrics
 from .protocol import CloudRequest, CloudResponse, FeedbackRequest, InferRequest
 from .registry import AdapterRegistry, RegistryError
+
+_CONTINUATION_INSTRUCTION = (
+    "端侧模型已经生成了下面的推理前缀。必须从此前缀继续，不要重复已有步骤；"
+    "不要重写前缀，只输出剩余部分。"
+)
+_REWRITE_INSTRUCTION = (
+    "端侧模型在交接点之前生成了下面的推理前缀，它可能不完整或有误。"
+    "请先纠正前缀，再给出完整、自包含的最终答案。"
+)
+
+
+def _continuation_prompt(prompt: str, partial_trace: str) -> str:
+    return (
+        f"{prompt}\n\n{_CONTINUATION_INSTRUCTION}\n\n"
+        f"端侧前缀：\n{partial_trace}\n\n续写："
+    )
+
+
+def _rewrite_prompt(prompt: str, partial_trace: str) -> str:
+    return (
+        f"{prompt}\n\n{_REWRITE_INSTRUCTION}\n\n"
+        f"端侧前缀：\n{partial_trace}\n\n完整答案："
+    )
+
+
+def _usage_output_tokens(raw: dict[str, Any]) -> int | None:
+    usage = raw.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    for key in ("completion_tokens", "output_tokens"):
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return None
+
+
+def _estimate_output_tokens(text: str) -> int:
+    """Deterministic fallback when the backend reports no token usage.
+
+    Uses three characters per token (the same heuristic as the mock backends),
+    rounded up, and zero for empty text; the result only depends on the text.
+    """
+
+    stripped = text.strip()
+    if not stripped:
+        return 0
+    return (len(stripped) + 2) // 3
+
+
+def _output_token_count(generation: Generation) -> int:
+    """Output token count, preferring backend usage over local estimates.
+
+    Order: backend usage (``completion_tokens``/``output_tokens``), then the
+    number of token logprobs the backend generated, then
+    ``_estimate_output_tokens``.
+    """
+
+    raw = generation.raw if isinstance(generation.raw, dict) else {}
+    usage_tokens = _usage_output_tokens(raw)
+    if usage_tokens is not None:
+        return usage_tokens
+    if generation.token_logprobs:
+        return len(generation.token_logprobs)
+    return _estimate_output_tokens(generation.text)
 
 
 class CloudService:
@@ -48,8 +113,19 @@ class CloudService:
 
     # ------------------------------------------------------------------ inference
     def enhance(self, request: CloudRequest) -> dict[str, Any]:
+        partial_trace = request.partial_trace.strip()
+        continuing = bool(partial_trace)
+        rewriting = continuing and request.allow_prefix_rewrite
+
+        if rewriting:
+            prompt = _rewrite_prompt(request.prompt, partial_trace)
+        elif continuing:
+            prompt = _continuation_prompt(request.prompt, partial_trace)
+        else:
+            prompt = request.prompt
+
         infer_request = InferRequest(
-            prompt=request.prompt,
+            prompt=prompt,
             request_id=request.request_id,
             task=request.task,
             max_tokens=request.max_tokens,
@@ -60,7 +136,10 @@ class CloudService:
         )
         expected_format = request.metadata.get("expected_format")
         try:
-            generation = self.backend.generate(infer_request, draft=request.draft or None)
+            generation = self.backend.generate(
+                infer_request,
+                draft=None if continuing else (request.draft or None),
+            )
         except BackendError as exc:
             self.metrics.incr("cloud_backend_failure_total")
             raise HttpError(502, f"云端模型调用失败：{exc}") from exc
@@ -70,11 +149,31 @@ class CloudService:
             finish_reason=generation.finish_reason,
             expected_format=expected_format,
         )
+
+        text = generation.text
+        continued_from_prefix = False
+        corrected_prefix = False
+        metadata: dict[str, Any] = {"flags": generation.raw}
+        if rewriting:
+            text = assemble_continuation(partial_trace, generation.text, corrected=True)
+            corrected_prefix = True
+            draft_note = "已按续写契约纠正端侧前缀"
+        elif continuing:
+            if looks_like_duplicate_prefix(partial_trace, generation.text):
+                text = assemble_continuation(partial_trace, generation.text)
+                metadata["continuation_mismatch"] = True
+                draft_note = "云端重述了端侧前缀，按整段答案返回"
+            else:
+                continued_from_prefix = True
+                draft_note = "已从端侧前缀续写"
+        else:
+            draft_note = "已复核端侧草稿" if request.draft else "无端侧草稿"
+
         self.metrics.incr("requests_total")
         self.metrics.observe("cloud_generation_latency_ms", generation.latency_ms)
         response = CloudResponse(
             request_id=request.request_id,
-            text=generation.text,
+            text=text,
             confidence=report.score,
             model_id=generation.model_id,
             latency_ms=generation.latency_ms,
@@ -83,9 +182,12 @@ class CloudService:
             trace=[
                 f"云端 {generation.model_id} 用时 {generation.latency_ms:.1f}ms",
                 f"置信度 {report.score:.2f}（{report.method}）",
-                "已复核端侧草稿" if request.draft else "无端侧草稿",
+                draft_note,
             ],
-            metadata={"flags": generation.raw},
+            metadata=metadata,
+            continued_from_prefix=continued_from_prefix,
+            corrected_prefix=corrected_prefix,
+            output_tokens=_output_token_count(generation),
         )
         return response.to_dict()
 
