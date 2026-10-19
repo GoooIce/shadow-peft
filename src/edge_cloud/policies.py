@@ -20,6 +20,7 @@ budgets, deadlines and the single-handoff rule. Two policies are provided:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -159,6 +160,95 @@ class ProbePolicy:
             boundary=features.boundary_kind,
             prefix_trust=trust,
         )
+
+
+def _json_braces_balanced(text: str) -> bool:
+    """Return whether braces/brackets and string literals are balanced."""
+
+    stack: list[str] = []
+    opening = {"}": "{", "]": "["}
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]" and (not stack or stack.pop() != opening[char]):
+            return False
+    return not stack and not in_string
+
+
+def _json_prefix_invalid(text: str) -> bool:
+    """A balanced prefix that no longer parses is structurally broken JSON."""
+
+    if not text.strip() or not _json_braces_balanced(text):
+        return False
+    try:
+        json.loads(text)
+    except json.JSONDecodeError:
+        return True
+    return False
+
+
+class FormatGuardPolicy:
+    """Conservative mid-stream format gate around Probe/Oracle policies.
+
+    Only JSON is checked mid-generation, and only at a ``json_field`` boundary
+    (the prefix already ends with ``,``, ``}`` or ``]``). The guard triggers
+    ``format_invalid`` when the backend's step context declares
+    ``format_ok == 0.0`` or when the prefix is balanced but ``json.loads``
+    fails; an unbalanced prefix is left alone because the object is still being
+    written. Every other format is validated once on the final answer by the
+    router, never mid-stream, and the guard never fabricates a format failure
+    for non-JSON tasks. When the guard does not trigger, the wrapped policy
+    decides as usual.
+    """
+
+    policy_name = "format_guard"
+
+    def __init__(self, delegate: Any) -> None:
+        if not callable(getattr(delegate, "observe", None)):
+            raise ValueError("delegate 必须实现 observe")
+        self.delegate = delegate
+        self._expected_format: str | None = None
+
+    @property
+    def available(self) -> bool:
+        return bool(getattr(self.delegate, "available", True))
+
+    @property
+    def unavailable_reason(self) -> str:
+        return str(getattr(self.delegate, "unavailable_reason", ""))
+
+    def reset(self, context: dict[str, Any] | None = None) -> None:
+        expected = context.get("expected_format") if isinstance(context, Mapping) else None
+        self._expected_format = expected if isinstance(expected, str) and expected else None
+        self.delegate.reset(context)
+
+    def observe(self, step: HandoffStep) -> HandoffDecision:
+        features = step.features
+        if (
+            self._expected_format == "json"
+            and features.boundary_kind == "json_field"
+            and (features.format_ok == 0.0 or _json_prefix_invalid(step.prefix_text))
+        ):
+            return HandoffDecision(
+                action="handoff",
+                reason="format_invalid",
+                boundary="json_field",
+                handoff_index=features.prefix_tokens,
+                prefix_trust=None,
+            )
+        return self.delegate.observe(step)
 
 
 class OraclePolicy:

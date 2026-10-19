@@ -37,6 +37,12 @@ class FeedbackRecord:
     note: str
     created_at: float = field(default_factory=time.time)
     metadata: dict[str, Any] = field(default_factory=dict)
+    handoff_index: int | None = None
+    handoff_reason: str | None = None
+    prefix_trust: float | None = None
+    continued_from_prefix: bool = False
+    corrected_prefix: bool = False
+    cost_estimate: dict[str, Any] | None = None
 
     @classmethod
     def from_request(cls, request: FeedbackRequest) -> FeedbackRecord:
@@ -55,6 +61,12 @@ class FeedbackRecord:
             adapter_version=request.adapter_version,
             note=request.note,
             metadata=request.metadata,
+            handoff_index=request.handoff_index,
+            handoff_reason=request.handoff_reason,
+            prefix_trust=request.prefix_trust,
+            continued_from_prefix=request.continued_from_prefix,
+            corrected_prefix=request.corrected_prefix,
+            cost_estimate=request.cost_estimate,
         )
 
     @property

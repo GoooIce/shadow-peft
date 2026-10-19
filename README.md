@@ -665,7 +665,7 @@ PYTHONPATH=src python scripts/exp9_handoff_eval.py --backend synthetic \
   --out runs/exp9/handoff_eval/probe_run
 ```
 
-The synthetic round is archived in [docs/exp9-handoff-eval.md](docs/exp9-handoff-eval.md): probe matched legacy accuracy (1.000) with −21.5% cloud decode tokens, −24.6% total cloud tokens, −17.3% cost, and −34.6% P95. Real transformers/OpenAI backends and a customer-labelled evaluation set are still pending.
+The synthetic round, its numbers, curves, bootstrap intervals and known limitations are archived in [docs/exp9-handoff-eval.md](docs/exp9-handoff-eval.md). Real transformers/OpenAI backends and a customer-labelled evaluation set are still pending.
 
 ---
 

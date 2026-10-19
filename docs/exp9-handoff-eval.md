@@ -17,7 +17,7 @@
 | 后端 | `synthetic`：`MockStreamingEdgeBackend` 逐 token 流式端侧 + 数据集脚本化的云端答案；不调用 GPU、不访问网络 |
 | 数据 | synthetic，n=1000，seed=7；300 条 easy（30%）+ 700 条 hard（70%） |
 | 采样参数 | legacy 阈值 0.62，bootstrap 1,000 次，seed=7 |
-| probe | `probe_fixed.json`，fingerprint `5979e146b4dc934c739ccaaa41f6e43e09c5386570309c8551c276b8806478b2` |
+| probe | `probe_fixed.json`，fingerprint 见 `runs-local/exp9/goooinext-synthetic/probe_fixed.json` 的 `fingerprint` 字段；#16 增加 `training_fingerprint` 后需在 goooinext 重新 fit 生成 |
 
 成本模型与延迟模型（评测台固定值，来自 `results.json` 的 `config`）：
 
@@ -139,7 +139,7 @@ legacy 与 probe 的成本区间不重叠（probe 上界 0.001198 < legacy 下�
 - **现象**：第一版 `fit_probe` 把候选 `label=1 (should_handoff)` 直接当作 `prefix_trust` 拟合。`ProbePolicy` 的语义是「信任低于阈值才交接」，标签方向相反导致决策整体反转：所有本应继续的前缀得分接近 0，easy 样本也 100% 交接。
 - **旧产物证据**（`probe.json` / `probe_run/`，仅用于记录 bug，不用于结论）：probe 升级率 1.000、handoff 率 0.933、云端 decode 80,590、总成本 1.640462，反而高于 legacy 的 1.397942。
 - **修复**：提交 `44d9790`（merge `478ddc4`）让 `fit_probe` 对 `1 - label` 拟合，并修正单类基率与校准表语义；补了分数方向、fit→load、校准语义与 `ProbePolicy` 触发条件的回归测试。
-- **修复后**：`probe_fixed.json`（fingerprint `5979e146…`）+ `probe_run_fixed/results.json` 为本文所有 probe 结论的来源。
+- **修复后**：`probe_fixed.json`（fingerprint 见产物文件的 `fingerprint` 字段）+ `probe_run_fixed/results.json` 为本文所有 probe 结论的来源。
 
 注意：顶层 `results.json` 是**未带 `--probe`** 的第一轮四策略产出，其中 `probe` 行因 `probe_path=null` 回退 legacy（`probe_fallback_rate=1.0`），不能当作 probe 结果；probe 结论只取 `probe_run_fixed/results.json`。
 
@@ -150,10 +150,10 @@ legacy 与 probe 的成本区间不重叠（probe 上界 0.001198 < legacy 下�
 | # | 验收口径 | 结论 | 证据 |
 |---|---|---|---|
 | 1 | 同准确率下，云端输出 token 减少 ≥30%，端到端 P95 不劣化超过 10% | **未通过（token 目标）/ 通过（P95 目标）** | 准确率同为 1.000；云端 decode −21.5%、总 token −24.6%，未到 30%；P95 从 3,812.0ms 降到 2,492.8ms（−34.6%），远好于「不劣化 10%」 |
-| 2 | 同成本下准确率提升 ≥2 pp；或同升级率下 AURC 相对提升 ≥5% | **部分通过 / 未验证** | probe 与 legacy 准确率同为 1.000（合成集已到上限，+2 pp 不可能）；同升级率 70% 下成本低 17.3%；AURC 未计算，曲线虽已导出但没有 AURC 字段，需在真实标注集上补 |
+| 2 | 同成本下准确率提升 ≥2 pp；或同升级率下 AURC 相对提升 ≥5% | **未通过 / 未验证** | 同成本 +2 pp **未达成且在该合成集上不可能**：probe 与 legacy 准确率同为 1.000（已到上限）；同升级率 70% 下成本低 17.3% 只是成本差异，不是准确率提升。AURC 相对提升 ≥5% **未计算**：曲线虽已导出但没有 AURC 字段，需在真实标注集上补。因此不能写「部分通过」 |
 | 3 | 单次交接约束在 100% 请求上成立 | **通过** | `tests/edge_cloud/test_router_handoff.py::test_single_handoff_calls_cloud_once_even_when_the_policy_keeps_triggering`；评测中 700 次 handoff 对应 700 次云端调用，无重复调用 |
 | 4 | 离线模式下 100% 请求可本地返回并入队 | **通过（测试级证据）** | `test_router_handoff.py::test_offline_handoff_queues_partial_trace_and_replays_it`、`tests/edge_cloud/test_outbox_handoff.py` 的 partial trace/元数据 round-trip；本轮未在 goooinext 做断网演练 |
-| 5 | 旧配置、旧客户端、无 shadow 后端三类兼容场景全部通过现有测试与新增回归 | **通过** | 本 worktree 全量 `pytest` 实测 992 passed / 18 skipped；`test_handoff_config.py::test_legacy_config_defaults_to_legacy_handoff`、`test_handoff_protocol.py::test_cloud_request_parses_legacy_payload_without_handoff_fields`、`test_router_handoff.py::test_non_streaming_backend_falls_back_with_streaming_unavailable_metric` |
+| 5 | 旧配置、旧客户端、无 shadow 后端三类兼容场景全部通过现有测试与新增回归 | **通过** | 本 worktree 全量 `pytest` 实测 1032 passed / 18 skipped（#16 修复后）；`test_handoff_config.py::test_legacy_config_defaults_to_legacy_handoff`、`test_handoff_protocol.py::test_cloud_request_parses_legacy_payload_without_handoff_fields`、`test_router_handoff.py::test_non_streaming_backend_falls_back_with_streaming_unavailable_metric` |
 | — | 不得伪造真实后端结论 | **遵守** | 本轮只跑 `--backend synthetic`；真实 `transformers` / `openai` 后端未运行，缺甲方标注评测集，本文不给出真实模型数字 |
 
 ### 关于 token 目标的差距
@@ -173,6 +173,7 @@ legacy 与 probe 的成本区间不重叠（probe 上界 0.001198 < legacy 下�
 - **没有 AURC**：本轮只导出 risk–coverage 曲线，未计算 AURC 或相对提升。
 - **没有真实账单与网络抖动**：成本是配置单价乘以 token 数；RTT 固定 120ms，degraded 率为 0，未覆盖超时、熔断、断网和离线队列的真实演练。
 - **无 shadow 后端只做了单元测试**：没有在真实 `shadow_ckpt` 上验证 `kl_base_shadow`、`top1_agreement` 等特征的数值行为。
+- **shadow-only / joint `base_shadow` 指标缺失**：spec User story 11 要求同时报告 shadow-only、joint `base_shadow` 与交接后最终答案的指标。本轮 synthetic/mock 只有 base/shadow 分布差（`shadow_gap` 特征），没有独立的 shadow 答案，`edge_only` 行只是端侧 base 答案，**不能当作 shadow-only**；本文不给出 shadow-only 或 joint `base_shadow` 的准确率数字，也不把 `edge_only` 冒充 shadow-only。该指标需要真实 `shadow_ckpt` + `ShadowForCausalLM` 的 `shadow_only` 运行，当前 goooinext 评测未提供。代码现状：`TransformersBackend` 仅在 `shadow_ckpt` 存在时以 `inference_mode="base_shadow"` 加载（`src/edge_cloud/backends.py`），尚未暴露 `shadow_only` 推理入口；补该入口与真实评测应另立 ticket。
 - **单 seed、单数据集**：没有跨 seed 或跨任务分布的方差估计；bootstrap 只反映 prompt 抽样噪声。
 - **离线验收是测试级**：没有在 goooinext 上做断网/恢复的端到端演练。
 
@@ -183,6 +184,7 @@ legacy 与 probe 的成本区间不重叠（probe 上界 0.001198 < legacy 下�
 3. 在远端依次执行「三条运行命令」。同一 seed、同一代码下，`results.json`、`summary.csv`、`curves.csv`、`per_prompt.jsonl` 应逐位一致；`results.json["config"]["probe_path"]` 会随输出目录不同而不同。
 4. 断言 `probe_run_fixed/results.json` 的 `strategies.probe` 与本文表格一致：accuracy 1.000、escalation_rate 0.700、handoff_rate 0.700、cloud_prefill_tokens 32,319、cloud_decode_tokens 49,633、total_cost 1.156106、latency.p95 2,492.8。
 5. 检查 `ci.probe.cost` 为 `[0.001116, 0.001198]`，`ci.probe.accuracy` 为 `[1.0, 1.0]`。
+6. #16 之后 `fit_probe` 会写入 `training_fingerprint`，probe 产物的顶层 `fingerprint` 随之变化；复现本文数字前需重新执行第 2 步的 fit，并以新产物的 `fingerprint` 字段为准。`fit_probe` 的评分逻辑未变，四策略数字应保持一致；`per_prompt.jsonl` 因 #16 去掉与 `exact_match` 重复的 `correct` 字段而字段集略有变化（数值不变）。若数字不一致，先核对代码版本，不要修改本文数字。
 
 复现时不要复用旧的 `probe.json` / `probe_run/`；它们是方向反转 bug 的现场，只作审计用途。
 
@@ -195,7 +197,7 @@ legacy 与 probe 的成本区间不重叠（probe 上界 0.001198 < legacy 下�
 | 最终四策略结果 | `probe_run_fixed/results.json`、`probe_run_fixed/summary.csv`、`probe_run_fixed/curves.csv`、`probe_run_fixed/per_prompt.jsonl` |
 | 第一轮四策略结果（无 probe） | `results.json`、`summary.csv`、`curves.csv`、`per_prompt.jsonl`（probe 行是 legacy 回退，不作结论） |
 | probe 候选 | `candidates.jsonl`（53,767 行，正例 20,314） |
-| 修复后 probe | `probe_fixed.json`（fingerprint `5979e146…`） |
+| 修复后 probe | `probe_fixed.json`（fingerprint 字段见文件；#16 后需在 goooinext 重新 fit 生成） |
 | 旧 bug 现场（仅审计） | `probe.json`、`probe_run/` |
 | 评测脚本 | `scripts/exp9_handoff_eval.py`、`scripts/exp9_fit_probe.py` |
 | 评测台实现 | `src/edge_cloud/handoff_eval.py` |

@@ -499,7 +499,9 @@ def _evaluate_sample(
             cloud_calls = 1
             if handoff_taken:
                 partial = handoff.partial_trace if handoff is not None else generation.text
-                final_text, continuation, mismatch = apply_cloud_answer(partial, sample.cloud_answer)
+                final_text, continuation, mismatch = apply_cloud_answer(
+                    partial, sample.cloud_answer
+                )
                 prefill_tokens = prompt_tokens + count_tokens(partial)
                 decode_tokens = count_tokens(continuation)
             else:
@@ -552,7 +554,6 @@ def _evaluate_sample(
         "edge_text": generation.text,
         "final_text": final_text,
         "cloud_answer": sample.cloud_answer,
-        "correct": _matches_expected(final_text, sample.expected),
         "exact_match": _matches_expected(final_text, sample.expected),
         "contains_expected": _contains_expected(final_text, sample.expected),
         "edge_correct": _matches_expected(generation.text, sample.expected),
@@ -599,7 +600,7 @@ def _strategy_metrics(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     latencies = sorted(float(record["latency_ms"]) for record in records)
     return {
         "n": n,
-        "accuracy": _round(_mean([1.0 if r["correct"] else 0.0 for r in records])),
+        "accuracy": _round(_mean([1.0 if r["exact_match"] else 0.0 for r in records])),
         "exact_match_rate": _round(_mean([1.0 if r["exact_match"] else 0.0 for r in records])),
         "contains_expected_rate": _round(
             _mean([1.0 if r["contains_expected"] else 0.0 for r in records])
@@ -640,7 +641,7 @@ def _risk_coverage_curve(records: Sequence[Mapping[str, Any]]) -> list[dict[str,
     points: list[dict[str, Any]] = []
     errors = 0
     for index, record in enumerate(ordered, start=1):
-        errors += 0 if record["correct"] else 1
+        errors += 0 if record["exact_match"] else 1
         points.append(
             {
                 "coverage": _round(index / len(ordered)),
@@ -677,7 +678,7 @@ def _cost_accuracy_curve(
         return [
             {
                 "threshold": None,
-                "accuracy": _round(_mean([1.0 if r["correct"] else 0.0 for r in records])),
+                "accuracy": _round(_mean([1.0 if r["exact_match"] else 0.0 for r in records])),
                 "cost": _round(_mean([_edge_only_cost(r, cost_model) for r in records])),
             }
         ]
@@ -724,7 +725,7 @@ def _cost_accuracy_curve(
                 if record["cloud_calls"]:
                     # Reuse the measured cloud path (including a mid-stream cut).
                     total_cost += float(record["cost"])
-                    correct += 1 if record["correct"] else 0
+                    correct += 1 if record["exact_match"] else 0
                 else:
                     total_cost += _full_cloud_cost(record, cost_model)
                     correct += 1 if record["cloud_reference_correct"] else 0
@@ -861,7 +862,7 @@ def run_evaluation(
     ci = {
         strategy: {
             "accuracy": bootstrap_ci(
-                [1.0 if record["correct"] else 0.0 for record in per_strategy[strategy]],
+                [1.0 if record["exact_match"] else 0.0 for record in per_strategy[strategy]],
                 n_boot=n_boot,
                 seed=seed,
             ),
@@ -1053,7 +1054,9 @@ def write_outputs(run: EvaluationRun, out_dir: str | Path) -> dict[str, Path]:
     }
 
 
-_RESULTS_REQUIRED = frozenset({"schema_version", "backend", "seed", "n", "strategies", "curves", "ci"})
+_RESULTS_REQUIRED = frozenset(
+    {"schema_version", "backend", "seed", "n", "strategies", "curves", "ci"}
+)
 _METRIC_REQUIRED = frozenset(
     {
         "n",

@@ -72,8 +72,19 @@ def test_empty_estimate_is_zero() -> None:
 def test_rtt_is_reported_and_can_be_overridden() -> None:
     model = CostModel(cloud_rtt_ms=85.0)
 
-    assert model.estimate().rtt_ms == 85.0
-    assert model.estimate(rtt_ms=40.0).rtt_ms == 40.0
+    assert model.estimate(cloud_calls=1).rtt_ms == 85.0
+    assert model.estimate(cloud_calls=1, rtt_ms=40.0).rtt_ms == 40.0
+
+
+def test_no_cloud_call_reports_zero_rtt() -> None:
+    model = CostModel(cloud_rtt_ms=85.0)
+
+    edge_only = model.estimate(edge_tokens=100)
+    explicit = model.estimate(edge_tokens=100, rtt_ms=40.0)
+
+    assert edge_only.cloud_calls == 0
+    assert edge_only.rtt_ms == 0.0
+    assert explicit.rtt_ms == 0.0
 
 
 def test_to_dict_round_trips_every_field() -> None:
@@ -106,8 +117,14 @@ def test_estimation_is_deterministic() -> None:
         cost_per_cloud_call=0.05,
         cloud_rtt_ms=30.0,
     )
-    first = model.estimate(edge_tokens=7, cloud_prefill_tokens=11, cloud_decode_tokens_expected=13, cloud_calls=2)
-    second = model.estimate(edge_tokens=7, cloud_prefill_tokens=11, cloud_decode_tokens_expected=13, cloud_calls=2)
+    kwargs = dict(
+        edge_tokens=7,
+        cloud_prefill_tokens=11,
+        cloud_decode_tokens_expected=13,
+        cloud_calls=2,
+    )
+    first = model.estimate(**kwargs)
+    second = model.estimate(**kwargs)
 
     assert first == second
 

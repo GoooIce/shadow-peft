@@ -188,6 +188,7 @@ def test_fit_probe_returns_the_documented_artifact_schema() -> None:
         "fingerprint",
         "required_features",
         "trained_at",
+        "training_fingerprint",
     }
     assert payload["version"] == PROBE_VERSION
     assert payload["feature_names"] == ["base_margin", "low_prob_frac"]
@@ -196,6 +197,49 @@ def test_fit_probe_returns_the_documented_artifact_schema() -> None:
     assert all(std > 0.0 for std in payload["stds"])
     assert payload["trained_at"] == _FIXED_TRAINED_AT
     assert isinstance(payload["fingerprint"], str) and len(payload["fingerprint"]) == 64
+    assert (
+        isinstance(payload["training_fingerprint"], str)
+        and len(payload["training_fingerprint"]) == 64
+    )
+
+
+def test_training_fingerprint_tracks_the_fit_inputs_not_the_clock() -> None:
+    rows = [
+        {"base_margin": 0.9, "low_prob_frac": 0.0},
+        {"base_margin": 0.2, "low_prob_frac": 0.8},
+        {"base_margin": 0.6, "low_prob_frac": 0.3},
+        {"base_margin": 0.3, "low_prob_frac": 0.7},
+    ]
+    labels = [1, 0, 1, 0]
+
+    first = fit_probe(rows, labels, trained_at=_FIXED_TRAINED_AT)
+    repeated = fit_probe(rows, labels, trained_at="2026-06-01T00:00:00+00:00")
+    relabelled = fit_probe(rows, [1, 1, 1, 0], trained_at=_FIXED_TRAINED_AT)
+    extra_row = fit_probe(
+        [*rows, {"base_margin": 0.5, "low_prob_frac": 0.5}],
+        [*labels, 0],
+        trained_at=_FIXED_TRAINED_AT,
+    )
+
+    assert first["training_fingerprint"] == repeated["training_fingerprint"]
+    assert first["training_fingerprint"] != relabelled["training_fingerprint"]
+    assert first["training_fingerprint"] != extra_row["training_fingerprint"]
+    assert (
+        ProbeModel.from_dict(first).training_fingerprint
+        == first["training_fingerprint"]
+    )
+
+
+def test_legacy_probe_without_training_fingerprint_still_loads(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.json"
+    write_probe(_one_feature_payload(), path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert "training_fingerprint" not in payload
+
+    model = ProbeModel.load(path)
+
+    assert model.training_fingerprint == ""
+    assert model.score({"base_margin": 0.5}) == pytest.approx(0.7310585786, abs=1e-9)
 
 
 def test_fit_load_score_round_trip_preserves_scores(tmp_path: Path) -> None:

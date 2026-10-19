@@ -9,6 +9,7 @@ field names and validation rules.
 from __future__ import annotations
 
 import json
+import math
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -40,27 +41,50 @@ def _bounded_float(value: Any, *, default: float, low: float, high: float, name:
 
 
 def _optional_non_negative_int(value: Any, *, name: str) -> int | None:
+    """Accept only a JSON integer: not a bool, a float or a string.
+
+    ``bool`` is an ``int`` subclass and JSON parsers turn ``1.5`` into a float;
+    silently truncating either hides a producer bug, so both are rejected.
+    """
+
     if value is None:
         return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ProtocolError(f"{name} 必须是整数") from exc
-    if parsed < 0:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ProtocolError(f"{name} 必须是整数（不接受布尔值、小数或字符串）")
+    if value < 0:
         raise ProtocolError(f"{name} 必须非负")
-    return parsed
+    return value
 
 
 def _optional_unit_float(value: Any, *, name: str) -> float | None:
+    """Accept a finite real number in [0, 1]; bools and strings are rejected."""
+
     if value is None:
         return None
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ProtocolError(f"{name} 必须是数字") from exc
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ProtocolError(f"{name} 必须是数字（不接受布尔值或字符串）")
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ProtocolError(f"{name} 必须是有限数字")
     if not 0.0 <= parsed <= 1.0:
         raise ProtocolError(f"{name} 必须在 [0, 1] 内")
     return parsed
+
+
+def _optional_bool(value: Any, *, name: str) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise ProtocolError(f"{name} 必须是布尔值")
+    return value
+
+
+def _optional_cost_estimate(value: Any, *, name: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ProtocolError(f"{name} 必须是对象")
+    return dict(value)
 
 
 @dataclass(slots=True)
@@ -86,7 +110,9 @@ class InferRequest:
         if not isinstance(self.task, str) or not self.task.strip():
             self.task = "general"
         self.task = self.task.strip()[:64]
-        self.max_tokens = _bounded_int(self.max_tokens, default=256, low=1, high=4096, name="max_tokens")
+        self.max_tokens = _bounded_int(
+            self.max_tokens, default=256, low=1, high=4096, name="max_tokens"
+        )
         self.temperature = _bounded_float(
             self.temperature, default=0.0, low=0.0, high=2.0, name="temperature"
         )
@@ -185,7 +211,9 @@ class CloudRequest:
             raise ProtocolError("prompt 不能为空")
         if not self.request_id:
             self.request_id = uuid.uuid4().hex
-        self.max_tokens = _bounded_int(self.max_tokens, default=256, low=1, high=4096, name="max_tokens")
+        self.max_tokens = _bounded_int(
+            self.max_tokens, default=256, low=1, high=4096, name="max_tokens"
+        )
         self.temperature = _bounded_float(
             self.temperature, default=0.0, low=0.0, high=2.0, name="temperature"
         )
@@ -269,6 +297,12 @@ class FeedbackRequest:
     adapter_version: str = ""
     note: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    handoff_index: int | None = None
+    handoff_reason: str | None = None
+    prefix_trust: float | None = None
+    continued_from_prefix: bool = False
+    corrected_prefix: bool = False
+    cost_estimate: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, payload: Any) -> FeedbackRequest:
@@ -283,6 +317,9 @@ class FeedbackRequest:
         metadata = payload.get("metadata") or {}
         if not isinstance(metadata, dict):
             raise ProtocolError("metadata 必须是对象")
+        handoff_reason = payload.get("handoff_reason")
+        if handoff_reason is not None and not isinstance(handoff_reason, str):
+            raise ProtocolError("handoff_reason 必须是字符串")
         return cls(
             request_id=request_id,
             accepted=accepted,
@@ -298,6 +335,23 @@ class FeedbackRequest:
             adapter_version=str(payload.get("adapter_version", "") or ""),
             note=str(payload.get("note", "") or ""),
             metadata=metadata,
+            handoff_index=_optional_non_negative_int(
+                payload.get("handoff_index"), name="handoff_index"
+            ),
+            handoff_reason=handoff_reason,
+            prefix_trust=_optional_unit_float(
+                payload.get("prefix_trust"), name="prefix_trust"
+            ),
+            continued_from_prefix=_optional_bool(
+                payload.get("continued_from_prefix", False),
+                name="continued_from_prefix",
+            ),
+            corrected_prefix=_optional_bool(
+                payload.get("corrected_prefix", False), name="corrected_prefix"
+            ),
+            cost_estimate=_optional_cost_estimate(
+                payload.get("cost_estimate"), name="cost_estimate"
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:

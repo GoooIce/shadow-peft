@@ -225,7 +225,10 @@ class CloudService:
         if path == "/v1/stats":
             return self.stats()
         if path == "/metrics":
-            return RawResponse(self.metrics.prometheus(), "text/plain; version=0.0.4; charset=utf-8")
+            return RawResponse(
+                self.metrics.prometheus(),
+                "text/plain; version=0.0.4; charset=utf-8",
+            )
         if path == "/v1/registry":
             return self.registry.state()
         if path.startswith("/v1/registry/current/"):

@@ -100,8 +100,9 @@ class CostModel:
         """Price one request; ``rtt_ms=None`` uses the configured ``cloud_rtt_ms``.
 
         With every token price at zero the token components are zero and the
-        total equals ``cloud_calls * cost_per_cloud_call``. Negative counts or a
-        negative RTT raise ``ValueError``.
+        total equals ``cloud_calls * cost_per_cloud_call``. A request without a
+        cloud call reports ``rtt_ms=0``: no round trip happens. Negative counts
+        or a negative RTT raise ``ValueError``.
         """
         edge_tokens = _check_count(edge_tokens, "edge_tokens")
         cloud_prefill_tokens = _check_count(cloud_prefill_tokens, "cloud_prefill_tokens")
@@ -109,7 +110,11 @@ class CostModel:
             cloud_decode_tokens_expected, "cloud_decode_tokens_expected"
         )
         cloud_calls = _check_count(cloud_calls, "cloud_calls")
-        rtt_ms = self.cloud_rtt_ms if rtt_ms is None else _check_price(rtt_ms, "rtt_ms")
+        override_rtt = None if rtt_ms is None else _check_price(rtt_ms, "rtt_ms")
+        if cloud_calls == 0:
+            rtt_ms = 0.0
+        else:
+            rtt_ms = self.cloud_rtt_ms if override_rtt is None else override_rtt
 
         edge_cost = _round(edge_tokens * self.cost_per_edge_token)
         prefill_cost = _round(cloud_prefill_tokens * self.cost_per_cloud_input_token)

@@ -65,7 +65,13 @@ def _length_ok(text: str) -> float:
     return 1.0
 
 
-def _format_ok(text: str, expected_format: str | None) -> float:
+def format_ok(text: str, expected_format: str | None) -> float:
+    """Return 1.0 when *text* satisfies *expected_format*, else 0.0.
+
+    Public because the router applies the same final-answer rule after a
+    token-level handoff; unknown formats are not checked and score 1.0.
+    """
+
     if not expected_format:
         return 1.0
     stripped = text.strip()
@@ -82,6 +88,10 @@ def _format_ok(text: str, expected_format: str | None) -> float:
     if expected_format == "verdict":
         return 1.0 if re.search(r"(判定|结论|放行|拦截|合格|不合格|返修)", stripped) else 0.0
     return 1.0
+
+
+# Backwards-compatible private alias for callers written before the rename.
+_format_ok = format_ok
 
 
 @dataclass(slots=True)
@@ -101,11 +111,11 @@ class ConfidenceEstimator:
     ) -> ConfidenceReport:
         repetition_ok = _repetition_ok(text)
         length_ok = _length_ok(text)
-        format_ok = _format_ok(text, expected_format)
+        format_ok_value = format_ok(text, expected_format)
         signals: dict[str, float] = {
             "repetition_ok": round(repetition_ok, 4),
             "length_ok": round(length_ok, 4),
-            "format_ok": round(format_ok, 4),
+            "format_ok": round(format_ok_value, 4),
         }
         weights = self.weights
 
@@ -131,14 +141,14 @@ class ConfidenceEstimator:
                     + weights["low_prob_ok"] * _clip(1.0 - low_frac)
                     + weights["repetition_ok"] * repetition_ok
                     + weights["length_ok"] * length_ok
-                    + weights["format_ok"] * format_ok
+                    + weights["format_ok"] * format_ok_value
                 )
                 method = "logprob+heuristic"
             else:
-                score = self._heuristic_score(repetition_ok, length_ok, format_ok)
+                score = self._heuristic_score(repetition_ok, length_ok, format_ok_value)
                 method = "heuristic"
         else:
-            score = self._heuristic_score(repetition_ok, length_ok, format_ok)
+            score = self._heuristic_score(repetition_ok, length_ok, format_ok_value)
             method = "heuristic"
 
         # A truncated answer is usable but should not be treated as complete.

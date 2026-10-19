@@ -125,7 +125,10 @@ def test_load_dataset_defaults_optional_fields_and_preserves_order(tmp_path: Pat
             "shadow_gap": 0.2,
         },
     ]
-    path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+    path.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
 
     samples = load_dataset(path)
 
@@ -209,6 +212,8 @@ def test_all_strategies_share_the_result_schema_and_artifacts(tmp_path: Path) ->
     first = json.loads(rows[0])
     assert first["strategy"] == "edge_only"
     assert first["sample_id"] == "s0000"
+    assert "exact_match" in first
+    assert "correct" not in first
 
     with paths["summary"].open("r", encoding="utf-8", newline="") as handle:
         summary = list(csv.DictReader(handle))

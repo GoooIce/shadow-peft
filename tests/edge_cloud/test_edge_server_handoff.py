@@ -5,11 +5,17 @@ from typing import Any
 
 import pytest
 
-from edge_cloud.backends import Generation, MockEdgeBackend
+from edge_cloud.backends import Generation, MockEdgeBackend, MockStreamingEdgeBackend
 from edge_cloud.config import EdgeConfig
 from edge_cloud.edge_server import EdgeService
 from edge_cloud.http_utils import HttpError
-from edge_cloud.protocol import CloudRequest, CloudResponse, InferRequest, InferResponse
+from edge_cloud.protocol import (
+    CloudRequest,
+    CloudResponse,
+    FeedbackRequest,
+    InferRequest,
+    InferResponse,
+)
 
 
 class FakeCloud:
@@ -260,3 +266,66 @@ def test_non_streaming_backend_counts_the_fallback_once(tmp_path: Path) -> None:
     assert counters["legacy_fallback_total"] == 1
     assert "probe_unavailable_total" not in counters
     assert "handoff_total" not in counters
+
+
+def test_feedback_fills_handoff_fields_from_the_cached_response(tmp_path: Path) -> None:
+    service = edge_service(
+        tmp_path,
+        backend=MockStreamingEdgeBackend(),
+        handoff_mode="oracle",
+    )
+    request = InferRequest(
+        prompt="焊点空洞 25% 如何判定",
+        task="fault_diagnosis",
+        max_tokens=64,
+        deadline_ms=3000,
+        metadata={"gold_handoff_index": 1},
+    )
+    response = service.infer(request)
+    assert response["handoff_index"] == 6
+
+    record = service.record_feedback(
+        FeedbackRequest.from_dict({"request_id": request.request_id, "accepted": True})
+    )
+
+    assert record["handoff_index"] == 6
+    assert record["handoff_reason"] == "low_prefix_trust"
+    assert record["prefix_trust"] is None
+    assert record["continued_from_prefix"] is True
+    assert record["corrected_prefix"] is False
+    assert record["cost_estimate"]["cloud_calls"] == 1
+
+
+def test_feedback_keeps_explicit_handoff_fields_over_the_cached_response(
+    tmp_path: Path,
+) -> None:
+    service = edge_service(
+        tmp_path,
+        backend=MockStreamingEdgeBackend(),
+        handoff_mode="oracle",
+    )
+    request = InferRequest(
+        prompt="焊点空洞 25% 如何判定",
+        task="fault_diagnosis",
+        max_tokens=64,
+        deadline_ms=3000,
+        metadata={"gold_handoff_index": 1},
+    )
+    service.infer(request)
+
+    record = service.record_feedback(
+        FeedbackRequest.from_dict(
+            {
+                "request_id": request.request_id,
+                "accepted": True,
+                "handoff_index": 2,
+                "handoff_reason": "low_prefix_trust",
+                "prefix_trust": 0.4,
+                "corrected_prefix": True,
+            }
+        )
+    )
+
+    assert record["handoff_index"] == 2
+    assert record["prefix_trust"] == pytest.approx(0.4)
+    assert record["corrected_prefix"] is True
