@@ -25,12 +25,12 @@ resampling uses ``random.Random(seed)``. Running the same command twice writes
 byte-identical ``results.json``, ``summary.csv``, ``curves.csv`` and
 ``per_prompt.jsonl``.
 
-Accuracy semantics: a final answer is correct when its whitespace-normalized
-form equals the expected cloud answer or ends with it. The second case covers a
-handoff whose edge prefix is kept in front of the authoritative cloud answer;
-``exact_match_rate`` reports the stricter equality separately. Whether a prefix
-actually anchors the cloud continuation is visible through
-``continuation_mismatch_rate`` and the per-prompt records.
+Accuracy semantics: a final answer is correct only when its whitespace-normalized
+form equals the expected cloud answer. A truncated edge prefix continued by the
+cloud is exact because the synthetic edge answer is itself a prefix of the cloud
+answer. ``contains_expected_rate`` is a diagnostic that also counts a non-prefix
+draft joined with the full cloud answer; it never drives the main accuracy, the
+risk-coverage curve or the cost-accuracy curve.
 """
 
 from __future__ import annotations
@@ -123,10 +123,23 @@ def _normalize(text: str) -> str:
     return " ".join(str(text).split())
 
 
-def _is_correct(final_text: str, expected: str) -> bool:
-    final = _normalize(final_text)
+def _matches_expected(final_text: str, expected: str) -> bool:
+    """Strict answer match after whitespace normalization."""
+
     want = _normalize(expected)
-    return bool(want) and (final == want or final.endswith(want))
+    return bool(want) and _normalize(final_text) == want
+
+
+def _contains_expected(final_text: str, expected: str) -> bool:
+    """Diagnostic-only match: the expected answer appears at the end.
+
+    A non-prefix edge draft joined with a full cloud answer satisfies this but
+    not ``_matches_expected``; the main accuracy and every curve use the strict
+    form, so a bad prefix can never be counted as a correct answer.
+    """
+
+    want = _normalize(expected)
+    return bool(want) and _normalize(final_text).endswith(want)
 
 
 @dataclass(slots=True, frozen=True)
@@ -172,34 +185,70 @@ def _optional_float(value: Any, *, name: str) -> float | None:
     return number
 
 
+_TRUNCATION_BOUNDARIES = "。！？\n"
+
+
+def _boundary_prefix(text: str, target_fraction: float) -> str:
+    """Return a proper prefix of *text* cut at a punctuation/newline boundary.
+
+    The cut closest to ``target_fraction`` of the text is chosen. When the
+    knowledge-base answer has no interior boundary inside the requested band,
+    the nearest interior boundary is used instead, so the result is always a
+    non-empty, non-full prefix ending on a semantic edge.
+    """
+
+    n = len(text)
+    positions = [
+        index + 1
+        for index, char in enumerate(text)
+        if char in _TRUNCATION_BOUNDARIES and 0 < index + 1 < n
+    ]
+    if not positions:
+        raise ValueError("无法为样本找到可截断的边界")
+    target = target_fraction * n
+    cut = min(positions, key=lambda position: (abs(position - target), position))
+    return text[:cut]
+
+
 def synthetic_dataset(n: int = 32, seed: int = 9) -> list[EvalSample]:
     """Build a deterministic prompt set from the mock knowledge base.
 
-    Prompts keep an original KB keyword so ``MockStreamingEdgeBackend`` streams
-    the matching entry. ``risk_at`` is early for hard entries and late for easy
-    ones, ``cloud_better_from`` equals ``risk_at``, and every sample carries a
-    shadow gap so probe features are always observable.
+    Prompts keep an original KB keyword so ``MockStreamingEdgeBackend`` matches
+    the intended entry. About 30% of the samples are *easy*: the edge answer
+    equals the full cloud answer, with no risk point and no handoff label. The
+    rest are *hard*: the edge answer is a boundary-truncated prefix of the cloud
+    answer, ``risk_at`` sits before the cut, and ``cloud_better_from`` equals
+    ``risk_at``. Every sample carries a shadow gap so probe features are always
+    observable.
     """
 
     if n < 0:
         raise ValueError("n 不能为负数")
     rng = random.Random(seed)
+    easy_count = round(n * 0.3)
+    difficulty_flags = [True] * easy_count + [False] * (n - easy_count)
+    rng.shuffle(difficulty_flags)
     samples: list[EvalSample] = []
-    for index in range(n):
+    for index, easy in enumerate(difficulty_flags):
         entry = knowledge.ENTRIES[index % len(knowledge.ENTRIES)]
         keyword = rng.choice(entry.keywords)
         template = rng.choice(_PROMPT_TEMPLATES)
         prompt = template.format(tag=f"E9-{index:03d}", keyword=keyword)
-        token_count = max(1, count_tokens(entry.edge_answer))
-        if entry.difficulty == "hard":
-            risk_at = rng.randint(0, min(4, token_count - 1))
+        if easy:
+            edge_answer = entry.cloud_answer
+            risk_at = None
+            edge_quality = round(
+                min(0.98, max(0.92, entry.edge_quality + rng.uniform(0.01, 0.04))), 4
+            )
         else:
-            low = max(1, token_count // 2)
-            high = max(low, token_count - 1)
-            risk_at = rng.randint(low, high)
-        edge_quality = round(
-            max(0.05, min(0.98, entry.edge_quality + rng.uniform(-0.04, 0.04))), 4
-        )
+            edge_answer = _boundary_prefix(entry.cloud_answer, rng.uniform(0.4, 0.7))
+            token_count = max(1, count_tokens(edge_answer))
+            # Keep the risky stretch long enough that the legacy confidence
+            # estimator escalates on the truncated answer.
+            risk_at = rng.randint(0, token_count // 2)
+            edge_quality = round(
+                max(0.05, min(0.98, entry.edge_quality + rng.uniform(-0.04, 0.04))), 4
+            )
         shadow_gap = rng.choice((0.1, 0.2, 0.3, 0.4))
         samples.append(
             EvalSample(
@@ -207,7 +256,7 @@ def synthetic_dataset(n: int = 32, seed: int = 9) -> list[EvalSample]:
                 prompt=prompt,
                 task=entry.task,
                 expected=entry.cloud_answer,
-                edge_answer=entry.edge_answer,
+                edge_answer=edge_answer,
                 cloud_answer=entry.cloud_answer,
                 cloud_better_from=risk_at,
                 risk_at=risk_at,
@@ -328,6 +377,7 @@ def _mock_backend_factory(sample: EvalSample) -> Backend:
         risk_at=sample.risk_at,
         edge_quality=sample.edge_quality,
         shadow_gap=sample.shadow_gap,
+        answer=sample.edge_answer,
     )
 
 
@@ -502,11 +552,12 @@ def _evaluate_sample(
         "edge_text": generation.text,
         "final_text": final_text,
         "cloud_answer": sample.cloud_answer,
-        "correct": _is_correct(final_text, sample.expected),
-        "exact_match": _normalize(final_text) == _normalize(sample.expected),
-        "edge_correct": _is_correct(generation.text, sample.expected),
+        "correct": _matches_expected(final_text, sample.expected),
+        "exact_match": _matches_expected(final_text, sample.expected),
+        "contains_expected": _contains_expected(final_text, sample.expected),
+        "edge_correct": _matches_expected(generation.text, sample.expected),
         "cloud_reference_correct": bool(sample.cloud_answer.strip())
-        and _is_correct(sample.cloud_answer, sample.expected),
+        and _matches_expected(sample.cloud_answer, sample.expected),
         "confidence": confidence.score,
         "score": _round(score),
         "escalated": bool(escalate),
@@ -550,6 +601,9 @@ def _strategy_metrics(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "n": n,
         "accuracy": _round(_mean([1.0 if r["correct"] else 0.0 for r in records])),
         "exact_match_rate": _round(_mean([1.0 if r["exact_match"] else 0.0 for r in records])),
+        "contains_expected_rate": _round(
+            _mean([1.0 if r["contains_expected"] else 0.0 for r in records])
+        ),
         "escalation_rate": _round(
             _mean([1.0 if r["escalated"] else 0.0 for r in records])
         ),
@@ -853,6 +907,7 @@ _STRATEGY_COLUMNS: tuple[str, ...] = (
     "n",
     "accuracy",
     "exact_match_rate",
+    "contains_expected_rate",
     "escalation_rate",
     "handoff_rate",
     "handoff_mean_index",
@@ -903,6 +958,7 @@ def _summary_rows(results: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "n": metrics["n"],
                 "accuracy": metrics["accuracy"],
                 "exact_match_rate": metrics["exact_match_rate"],
+                "contains_expected_rate": metrics["contains_expected_rate"],
                 "escalation_rate": metrics["escalation_rate"],
                 "handoff_rate": metrics["handoff_rate"],
                 "handoff_mean_index": position["mean"],
@@ -1003,6 +1059,7 @@ _METRIC_REQUIRED = frozenset(
         "n",
         "accuracy",
         "exact_match_rate",
+        "contains_expected_rate",
         "escalation_rate",
         "handoff_rate",
         "handoff_position",

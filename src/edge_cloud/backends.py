@@ -352,7 +352,9 @@ class MockStreamingEdgeBackend(MockEdgeBackend):
     """Deterministic token-streaming edge model for tests and the eval bench.
 
     The answer comes from the same knowledge base as ``MockEdgeBackend`` and is
-    split into Chinese characters, English words and whitespace runs. Each step
+    split into Chinese characters, English words and whitespace runs. An optional
+    ``answer`` overrides the knowledge-base text, which lets offline datasets
+    script their own (for example truncated-prefix) edge answer. Each step
     exposes a two-token base distribution whose top probability is
     ``edge_quality`` (or ``_RISK_QUALITY`` from ``risk_at`` onwards). With
     ``shadow_gap`` set, a shadow distribution moves that mass towards the
@@ -369,6 +371,7 @@ class MockStreamingEdgeBackend(MockEdgeBackend):
         risk_at: int | None = None,
         edge_quality: float | None = None,
         shadow_gap: float | None = None,
+        answer: str | None = None,
     ) -> None:
         super().__init__(latency_ms=latency_ms)
         if risk_at is not None:
@@ -386,6 +389,9 @@ class MockStreamingEdgeBackend(MockEdgeBackend):
             if not math.isfinite(shadow_gap) or shadow_gap < 0.0:
                 raise ValueError("shadow_gap 必须是非负有限数值")
         self.shadow_gap = shadow_gap
+        if answer is not None and (not isinstance(answer, str) or not answer.strip()):
+            raise ValueError("answer 必须是非空字符串或 None")
+        self.answer = answer
 
     def _quality_at(self, index: int, base_quality: float) -> float:
         quality = base_quality
@@ -430,7 +436,8 @@ class MockStreamingEdgeBackend(MockEdgeBackend):
         base_quality = (
             entry.edge_quality if self.edge_quality is None else self.edge_quality
         )
-        tokens = _tokenize_answer(entry.edge_answer)
+        answer = entry.edge_answer if self.answer is None else self.answer
+        tokens = _tokenize_answer(answer)
         task = _context_task(context, request.task)
         outcome = _decode_until(
             self._steps(tokens, base_quality, task),
