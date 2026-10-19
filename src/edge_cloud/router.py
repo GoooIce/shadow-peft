@@ -92,6 +92,14 @@ class CloudClient:
             raise CloudError(f"云端响应字段不合法: {data}", retryable=False)
 
         try:
+            raw_output_tokens = data.get("output_tokens", 0)
+            if raw_output_tokens is None:
+                raw_output_tokens = 0
+            if isinstance(raw_output_tokens, bool):
+                raise ValueError("output_tokens 必须是整数")
+            output_tokens = int(raw_output_tokens)
+            if output_tokens < 0:
+                raise ValueError("output_tokens 必须非负")
             response = CloudResponse(
                 request_id=str(data.get("request_id") or request.request_id),
                 text=str(data.get("text") or ""),
@@ -102,6 +110,9 @@ class CloudClient:
                 finish_reason=str(data.get("finish_reason", "stop")),
                 trace=list(data.get("trace") or []),
                 metadata=dict(data.get("metadata") or {}),
+                continued_from_prefix=bool(data.get("continued_from_prefix", False)),
+                corrected_prefix=bool(data.get("corrected_prefix", False)),
+                output_tokens=output_tokens,
             )
         except (TypeError, ValueError) as exc:
             raise CloudError(f"云端响应字段不合法: {data}", retryable=False) from exc
