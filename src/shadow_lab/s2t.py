@@ -1,7 +1,7 @@
 """S2T-Local diagnostic core: Hit@K, Agree@1, rank, and go/no-go.
 
 The diagnostic decides whether a shadow model's top-K candidates cover the
-base model's top-1 *before* any selector head is trained (spec
+base model's top-1 *before* any selector head is trained (spec issue #3,
 ``docs/specs/s2t-local-shadow-selector.md``). This module is deliberately
 dependency-free — it does **not** import torch. Callers pass plain sequences
 (or any duck-typed tensor exposing ``tolist()``), which keeps the diagnostic
@@ -18,6 +18,13 @@ Metric contract
     descending logit, ties broken toward the lower token id. The rank is also
     reported when the token falls outside top-K. Ties therefore have distinct
     ordinal ranks, and ``rank <= K`` is exactly ``Hit@K``.
+
+    Reports expose two rank views. ``rank_all_*`` uses every token's exact
+    ``base_top1_rank_in_shadow`` (records written by the diagnostic runner
+    carry it), including tokens outside the captured top-K. ``rank_hit_*``
+    keeps the older hit-position view: it only knows ranks from the captured
+    candidate list, so a miss outside that list is absent. ``rank_p50`` …
+    ``rank_p99`` remain as deprecated aliases of ``rank_hit_*``.
 
 Degenerate inputs never produce NaNs:
 - empty candidate lists and empty logit vectors are misses with ``rank=None``;
@@ -70,6 +77,15 @@ REPORT_FIELDS: tuple[str, ...] = (
     "hit_at_16",
     "agree_at_1",
     "n_rank_known",
+    "n_rank_known_all",
+    "rank_hit_p50",
+    "rank_hit_p90",
+    "rank_hit_p95",
+    "rank_hit_p99",
+    "rank_all_p50",
+    "rank_all_p90",
+    "rank_all_p95",
+    "rank_all_p99",
     "rank_p50",
     "rank_p90",
     "rank_p95",
@@ -99,11 +115,20 @@ CSV_FIELDS: tuple[str, ...] = (
     "hit_at_8",
     "hit_at_16",
     "agree_at_1",
+    "rank_hit_p50",
+    "rank_hit_p90",
+    "rank_hit_p95",
+    "rank_hit_p99",
+    "rank_all_p50",
+    "rank_all_p90",
+    "rank_all_p95",
+    "rank_all_p99",
     "rank_p50",
     "rank_p90",
     "rank_p95",
     "rank_p99",
     "n_rank_known",
+    "n_rank_known_all",
     "n_empty_candidates",
     "n_all_neg_inf",
     "hit_at_8_ci_low",
@@ -339,6 +364,27 @@ def _task_label(record: Any) -> str:
     return "unspecified" if task is None or task == "" else str(task)
 
 
+def _exact_rank(record: Any) -> int | None:
+    """Read the runner's exact ``base_top1_rank_in_shadow`` when present."""
+
+    value = _field(record, "base_top1_rank_in_shadow")
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(
+            f"base_top1_rank_in_shadow must be a positive integer, got {value!r}"
+        )
+    try:
+        rank = operator.index(value)
+    except TypeError as error:
+        raise ValueError(
+            f"base_top1_rank_in_shadow must be a positive integer, got {value!r}"
+        ) from error
+    if rank < 1:
+        raise ValueError(f"base_top1_rank_in_shadow must be >= 1, got {rank}")
+    return rank
+
+
 def _score_record(record: Any, ks: Sequence[int]) -> dict[str, Any]:
     """Normalize one record into per-K hits plus the shared token facts."""
 
@@ -352,9 +398,10 @@ def _score_record(record: Any, ks: Sequence[int]) -> dict[str, Any]:
         if empty or all_neg_inf:
             hits = {k: False for k in ks}
             agree = False
-            rank = None
+            rank = rank_hit = None
         else:
             rank = _shadow_rank(logits, base)
+            rank_hit = rank
             agree = _shadow_top1(logits) == base
             hits = {k: rank <= min(k, len(logits)) for k in ks}
     else:
@@ -370,12 +417,18 @@ def _score_record(record: Any, ks: Sequence[int]) -> dict[str, Any]:
         all_neg_inf = False
         hits = {k: (not empty and base in ids[: min(k, len(ids))]) for k in ks}
         agree = bool(ids) and ids[0] == base
-        rank = (ids.index(base) + 1) if base in ids else None
+        if base in ids:
+            rank = rank_hit = ids.index(base) + 1
+        else:
+            exact = _exact_rank(record)
+            rank = exact
+            rank_hit = None
 
     return {
         "hits": hits,
         "agree": agree,
         "rank": rank,
+        "rank_hit": rank_hit,
         "empty": empty,
         "all_neg_inf": all_neg_inf,
         "prompt_id": _record_prompt_id(record),
@@ -409,13 +462,15 @@ def summarize_hits(
     Each record is a mapping (or object) with ``base_top1`` or ``base_logits``
     and either ``shadow_logits`` (full distribution; preferred) or
     ``shadow_topk_ids`` (candidate list, already ordered by the shadow model).
-    With only top-K ids a token outside the list has ``rank=None`` — the true
-    rank beyond K is unknowable; with full logits every rank is reported.
+    The runner's ``base_top1_rank_in_shadow`` supplies the exact rank for a
+    token outside the captured candidate list; without it such a token has
+    ``rank=None``.
 
     Returned flat schema (stable key order):
     ``n``, ``n_prompts``, ``hit_at_<K>``..., ``agree_at_1``,
-    ``n_rank_known``, ``rank_p50``, ``rank_p90``, ``rank_p95``, ``rank_p99``,
-    ``n_empty_candidates``, ``n_all_neg_inf``.
+    ``n_rank_known``, ``n_rank_known_all``, ``rank_hit_p50/p90/p95/p99``,
+    ``rank_all_p50/p90/p95/p99``, deprecated ``rank_p50/p90/p95/p99``
+    aliases, ``n_empty_candidates``, ``n_all_neg_inf``.
     """
 
     record_list = list(records)
@@ -426,15 +481,21 @@ def summarize_hits(
     n = len(rows)
 
     prompt_ids = {row["prompt_id"] for row in rows if row["prompt_id"] is not None}
-    ranks = sorted(row["rank"] for row in rows if row["rank"] is not None)
+    ranks_hit = sorted(row["rank_hit"] for row in rows if row["rank_hit"] is not None)
+    ranks_all = sorted(row["rank"] for row in rows if row["rank"] is not None)
 
     summary: dict[str, Any] = {"n": n, "n_prompts": len(prompt_ids)}
     for k in ks_tuple:
         summary[f"hit_at_{k}"] = sum(1 for row in rows if row["hits"][k]) / n
     summary["agree_at_1"] = sum(1 for row in rows if row["agree"]) / n
-    summary["n_rank_known"] = len(ranks)
+    summary["n_rank_known"] = len(ranks_hit)
+    summary["n_rank_known_all"] = len(ranks_all)
     for label, quantile in (("p50", 0.50), ("p90", 0.90), ("p95", 0.95), ("p99", 0.99)):
-        summary[f"rank_{label}"] = _percentile(ranks, quantile) if ranks else None
+        hit_value = _percentile(ranks_hit, quantile) if ranks_hit else None
+        all_value = _percentile(ranks_all, quantile) if ranks_all else None
+        summary[f"rank_hit_{label}"] = hit_value
+        summary[f"rank_all_{label}"] = all_value
+        summary[f"rank_{label}"] = hit_value
     summary["n_empty_candidates"] = sum(1 for row in rows if row["empty"])
     summary["n_all_neg_inf"] = sum(1 for row in rows if row["all_neg_inf"])
     return summary
@@ -841,6 +902,15 @@ def build_report(
         "hit_at_16": summary["hit_at_16"],
         "agree_at_1": summary["agree_at_1"],
         "n_rank_known": summary["n_rank_known"],
+        "n_rank_known_all": summary["n_rank_known_all"],
+        "rank_hit_p50": summary["rank_hit_p50"],
+        "rank_hit_p90": summary["rank_hit_p90"],
+        "rank_hit_p95": summary["rank_hit_p95"],
+        "rank_hit_p99": summary["rank_hit_p99"],
+        "rank_all_p50": summary["rank_all_p50"],
+        "rank_all_p90": summary["rank_all_p90"],
+        "rank_all_p95": summary["rank_all_p95"],
+        "rank_all_p99": summary["rank_all_p99"],
         "rank_p50": summary["rank_p50"],
         "rank_p90": summary["rank_p90"],
         "rank_p95": summary["rank_p95"],
@@ -859,7 +929,9 @@ def build_report(
         "by_position_bucket": by_position,
         "notes": [
             "Hit@K is base top-1 membership in the shadow top-K; Agree@1 is exact top-1 agreement.",
-            "Rank is 1-based in descending shadow order with ties broken toward the lower token id; full shadow logits also give ranks outside top-K.",
+            "Rank is 1-based in descending shadow order with ties broken toward the lower token id.",
+            "rank_all_* uses each token's exact base_top1_rank_in_shadow, including ranks outside the captured top-K; n_rank_known_all counts them.",
+            "rank_hit_* keeps the older hit-position view (ranks known from the captured top-K list) while rank_all_* covers every exact rank; rank_p50..p99 are deprecated aliases of rank_hit_p50..p99.",
             "Empty and all -inf candidate sets are misses with rank=None; K > vocab truncates to vocab.",
         ],
     }
@@ -932,11 +1004,20 @@ def _csv_row(
         "hit_at_8",
         "hit_at_16",
         "agree_at_1",
+        "rank_hit_p50",
+        "rank_hit_p90",
+        "rank_hit_p95",
+        "rank_hit_p99",
+        "rank_all_p50",
+        "rank_all_p90",
+        "rank_all_p95",
+        "rank_all_p99",
         "rank_p50",
         "rank_p90",
         "rank_p95",
         "rank_p99",
         "n_rank_known",
+        "n_rank_known_all",
         "n_empty_candidates",
         "n_all_neg_inf",
     ):

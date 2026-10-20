@@ -26,6 +26,7 @@ from typing import Any
 from shadow_lab.s2t import build_report, to_csv, to_json
 
 SHADOW_HIDDEN = "initial"
+DEFAULT_CAPTURE_K = 16
 TOKEN_SCHEMA_VERSION = "s2t-local-token/v1"
 REPORT_FILENAME = "s2t_diagnostic.json"
 TOKENS_FILENAME = "s2t_tokens.jsonl"
@@ -223,7 +224,7 @@ def diagnose(
     prompts: Sequence[str | Mapping[str, Any]],
     *,
     max_new_tokens: int,
-    k: int = 8,
+    k: int = DEFAULT_CAPTURE_K,
     seed: int = 0,
     task_key: str = "task",
     use_cache: bool = False,
@@ -303,7 +304,7 @@ def run_diagnostic(
     *,
     out: str | Path | None = None,
     max_new_tokens: int,
-    k: int = 8,
+    k: int = DEFAULT_CAPTURE_K,
     seed: int = 0,
     task_key: str = "task",
     use_cache: bool = False,
@@ -346,8 +347,9 @@ def run_diagnostic(
             "capture width and equals the Hit@K rate."
         )
     notes.append(
-        "Rank percentiles use the captured shadow top-K list, so they are known only "
-        "for hits; s2t_tokens.jsonl keeps the exact base_top1_rank_in_shadow per token."
+        "rank_all_* uses every token's exact base_top1_rank_in_shadow (also in "
+        "s2t_tokens.jsonl), including ranks outside the captured top-K; rank_hit_* "
+        "keeps the hit-position view from the captured candidate list."
     )
     notes.append(SHADOW_HIDDEN_NOTE)
     report["notes"] = notes
@@ -388,6 +390,7 @@ def _skipped_prompt_ids(prompts: Sequence[str | Mapping[str, Any]], *, task_key:
 
 __all__ = [
     "CSV_FILENAME",
+    "DEFAULT_CAPTURE_K",
     "DiagnosticResult",
     "PromptSpec",
     "REPORT_FILENAME",

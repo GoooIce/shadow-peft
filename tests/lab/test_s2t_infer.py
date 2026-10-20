@@ -473,6 +473,88 @@ def _load_eval_module():
     return module
 
 
+class _FakeGeneration:
+    def __init__(self, steps, *, seconds_per_token):
+        self.prompt_ids = (1, 2)
+        self.token_ids = tuple(step.selected_token for step in steps)
+        self.text = " ".join(str(token) for token in self.token_ids)
+        self.steps = steps
+        self.n_tokens = len(steps)
+        self.elapsed_seconds = seconds_per_token * len(steps)
+        self.seconds_per_token = seconds_per_token
+
+
+def test_eval_report_lifts_hit8_selector_gain_and_latency_overhead(
+    monkeypatch, tmp_path
+):
+    module = _load_eval_module()
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text(
+        "\n".join(
+            json.dumps({"prompt": f"p{index}", "task": "quality_verdict"})
+            for index in range(2)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class _FakeRunner:
+        def __init__(self, model, tokenizer, *, selector=None, k=8, use_cache=False, device=None):
+            assert selector is not None
+            self.k = k
+
+        def generate(self, prompt, *, max_new_tokens, use_selector):
+            steps = [
+                SelectionStep(
+                    position=0,
+                    candidates=(10, 11),
+                    candidate_logits=(0.0, -1.0),
+                    greedy_token=10,
+                    selected_token=11 if use_selector else 10,
+                    used_selector=use_selector,
+                    selector_scores=None,
+                ),
+                SelectionStep(
+                    position=1,
+                    candidates=(20, 21),
+                    candidate_logits=(0.0, -1.0),
+                    greedy_token=20,
+                    selected_token=21 if use_selector else 20,
+                    used_selector=use_selector,
+                    selector_scores=None,
+                ),
+            ]
+            return _FakeGeneration(
+                steps, seconds_per_token=0.125 if use_selector else 0.10
+            )
+
+    monkeypatch.setattr(module, "_load_base", lambda args: (object(), object(), torch, "cpu"))
+    monkeypatch.setattr(module, "_load_shadow", lambda args, base, device: object())
+    monkeypatch.setattr(module, "_reference_top1", lambda *args, **kwargs: [10, 99])
+    monkeypatch.setattr("shadow_lab.s2t_infer.SelectorShadowModel", _FakeRunner)
+
+    args = module.build_parser().parse_args(
+        [
+            "--model", "m",
+            "--shadow-ckpt", "c",
+            "--selector", "s",
+            "--prompts", str(prompts),
+            "--mode", "shadow_selector",
+            "--max-new-tokens", "2",
+            "--out", str(tmp_path / "out"),
+        ]
+    )
+
+    report = module._evaluate(args)
+
+    assert report["hit_at_8"] == pytest.approx(0.5)
+    assert report["selector_gain"] == pytest.approx(-0.5)
+    assert report["latency_overhead"] == pytest.approx(0.25)
+    assert report["latency"]["overhead"] == pytest.approx(report["latency_overhead"])
+    assert report["deployable"] is False
+    assert report["latency"]["deployable"] is False
+
+
 def test_eval_prompt_loader_keeps_task_expected_and_prompt_id(tmp_path):
     path = tmp_path / "prompts.jsonl"
     path.write_text(

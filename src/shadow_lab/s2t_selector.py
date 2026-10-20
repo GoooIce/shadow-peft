@@ -6,7 +6,7 @@ top-1 89.8% of the time while its own top-1 agrees only 72.1%.  A selector
 head learns to pick the base-preferred candidate without running the base
 model at inference time.
 
-Design constraints (spec §Implementation Decisions 3/4):
+Design constraints (spec issue #3, §Implementation Decisions 3/4):
 
 - ``score(c) = MLP([h_t ; e_c])`` with ``e_c`` read from the shadow LM head
   weight table (``shadow_lm_head.weight[c]``, or ``lm_head.weight[c]`` for an
@@ -39,7 +39,7 @@ from torch import nn
 IGNORE_INDEX = -100
 DEFAULT_K = 8
 DEFAULT_BETA = 0.1
-DEFAULT_MLP_HIDDEN = 256
+DEFAULT_MLP_HIDDEN = 64
 SELECTOR_WEIGHTS_FILENAME = "selector.safetensors"
 SELECTOR_CONFIG_FILENAME = "selector_config.json"
 SELECTOR_VERSION = "s2t-selector/v1"
@@ -60,8 +60,9 @@ class SelectorHead(nn.Module):
         Width of ``e_c``.  Defaults to ``hidden_size`` (the usual case when
         the LM head input width matches the backbone hidden width).
     mlp_hidden:
-        Hidden width of the two-layer MLP; the default 256 keeps an 896/1024
-        wide shadow at a few hundred thousand parameters.
+        Hidden width of the two-layer MLP; the default 64 keeps the Qwen3-4B
+        case (hidden 2560, candidate input 5120) at ~328k parameters, inside
+        the spec's "few hundred thousand" budget.
     """
 
     def __init__(
