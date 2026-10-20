@@ -363,6 +363,17 @@ class FeedbackStore:
         callbacks with the plain ``(prompt, task)`` contract own their decoding.
         ``kappa`` and ``sigma`` follow ``build_self_train_row``. The JSONL is
         written atomically with sorted keys and a stable field set.
+
+        The report carries two low-consistency rates, both using the
+        ``prompt_weight`` gate (largest cluster < ``kappa``):
+
+        - ``low_consistency_rate``: fraction of exported rows below the gate
+          (the historical, exported-only field).
+        - ``low_consistency_rate_all``: every rolled-out prompt as the
+          denominator (exported rows plus ``skipped_unclusterable``), with
+          each unclusterable prompt counted as low consistency. Blank and
+          unsupported prompts were never rolled out and are excluded because
+          they carry no consistency signal.
         """
 
         if n < 1:
@@ -450,6 +461,8 @@ class FeedbackStore:
         finally:
             temp.unlink(missing_ok=True)
 
+        low_consistency = sum(1 for row in rows if row["prompt_weight"] == 0)
+        rolled_out = len(rows) + skipped_unclusterable
         return {
             "path": str(output),
             "records": len(records),
@@ -461,4 +474,10 @@ class FeedbackStore:
             "rollout_failures": rollout_failures,
             "by_task": dict(task_counts),
             "cluster_methods": dict(method_counts),
+            "low_consistency_rate": low_consistency / len(rows) if rows else 0.0,
+            "low_consistency_rate_all": (
+                (low_consistency + skipped_unclusterable) / rolled_out
+                if rolled_out
+                else 0.0
+            ),
         }

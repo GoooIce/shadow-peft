@@ -1,6 +1,6 @@
 # exp12 RESTRAIN-lite 结构化输出飞轮 smoke（spec #4）
 
-一句话收束：**在 `goooinext` 上用 Qwen3-0.6B + 新建 shadow adapter 跑通了 RESTRAIN-lite 全链路（hard-case → n=4 rollout → 结构化聚类/权重 → `export_self_train` → weighted SFT vs best-answer SFT → held-out 评估），但数据分布不适合：8 条 hard-case 只有 5 条可聚类、低一致性比例 60%（spec 门槛 <30%），weighted 与 baseline 的 held-out 结构化准确率都是 0。按首轮验收口径判 no-go；这是 8 条 prompt/2 步 smoke，不是 RESTRAIN 在大数据上的结论。**
+一句话收束：**在 `goooinext` 上用 Qwen3-0.6B + 新建 shadow adapter 跑通了 RESTRAIN-lite 全链路（hard-case → n=4 rollout → 结构化聚类/权重 → `export_self_train` → weighted SFT vs best-answer SFT → held-out 评估），但数据分布不适合：8 条 hard-case 只有 5 条可聚类、低一致性比例 3/5=0.60（仅 exported）/ 6/8=0.75（含 unclusterable）（spec 门槛 <30%），weighted 与 baseline 的 held-out 结构化准确率都是 0。按首轮验收口径判 no-go；这是 8 条 prompt/2 步 smoke，不是 RESTRAIN 在大数据上的结论。**
 
 状态：**smoke 已跑通（2026-10-20），结论 no-go（当前数据/规模）**；500 prompt、n=8、更长训练与 κ 敏感性未跑。
 
@@ -61,10 +61,12 @@ done
 | skipped_empty / unsupported | 0 / 0 |
 | rollout_failures | 0 |
 | cluster_methods | verdict_label 3 / number_tolerance 2 |
-| **low_consistency_rate** | **0.60**（6/10 可评 prompt，包括被跳过的 unclusterable） |
+| **low_consistency_rate** | **0.60**（3/5，仅 exported 行） |
+| **low_consistency_rate_all** | **0.75**（6/8，分母为已 rollout 的 prompt，3 条 unclusterable 计低一致性） |
 
-- 低一致性 60% 远超 spec 的 `<30%` 门槛：同一 prompt 的 4 条答案多数不一致，说明 0.6B 在结构化 verdict/number 上本身不稳定，RESTRAIN 的“票数”信号很弱。
+- 低一致性 3/5=0.60（exported）/ 6/8=0.75（含 unclusterable）远超 spec 的 `<30%` 门槛：同一 prompt 的 4 条答案多数不一致，说明 0.6B 在结构化 verdict/number 上本身不稳定，RESTRAIN 的“票数”信号很弱。旧字段 `low_consistency_rate` 只看导出的行，会把被跳过的 unclusterable 从分母中抹掉；`low_consistency_rate_all` 把已 rollout 的 prompt 全部计入，用于和 spec 门槛对齐。
 - 3 条 unclusterable 被跳过；如果强行训练，会把噪声当伪标签。
+- `counts=[1]`（只有一个可解析答案）时 `consistency=1.0` 只是“唯一可聚类答案”的假象：Gaussian 在 `f=1` 取最大值，但这不是答案稳定的证据。这类行实际由 `prompt_weight=0`（最大票数 1 < κ=3）门控，不进入加权 loss。本次 6/8 中新增的 3 条低一致性来自被跳过的 unclusterable（没有任何可解析答案），不是 `counts=[1]` 行。
 
 ### 训练
 
@@ -84,7 +86,7 @@ done
 | baseline | 0.0 | [0, 0] | 0.0 | 1.0 | 0.60 | 0.375 | false |
 
 - 两者结构化准确率都是 0：0.6B 的生成没有稳定给出可评的 verdict/number；`--n 1` 的 entropy 为 0 是定义上的（只有一个样本），不是模型塌缩证据。
-- `skip_rate=0.375` 来自 3/8 unclusterable；低一致性 0.60 来自导出报告。
+- `skip_rate=0.375` 来自 3/8 unclusterable；低一致性 0.60（exported）/ 0.75（含 unclusterable）来自导出报告。
 - 升级率/云端调用数未接 edge-cloud，标 `null`；不伪造。
 
 ## 首轮验收口径
@@ -93,13 +95,13 @@ done
 |---|---|---|
 | 同 token 预算 weighted SFT 准确率 +1pp | **未通过** | 两者 accuracy 0；且预算未对齐（4 vs 85 token） |
 | 答案熵 ≥ baseline 80% | **未验证** | n=1 的 entropy=0；需要 n≥4 |
-| 低一致性比例 <30% | **未通过** | 0.60 |
+| 低一致性比例 <30% | **未通过** | 3/5=0.60（exported）/ 6/8=0.75（含 unclusterable） |
 | 升级率/云端调用不上升 | **未验证** | 未接 edge-cloud |
 | 权重全 1 退化为现有 SFT | **通过（单测）** | `WeightedSFTTrainer` 测试 |
 
 ## 结论
 
-- **当前数据/规模下 no-go**：低一致性 60%、可聚类率 5/8、准确率 0；继续在这个数据上加权训练没有意义。
+- **当前数据/规模下 no-go**：低一致性 0.60（exported）/ 0.75（含 unclusterable）、可聚类率 5/8、准确率 0；继续在这个数据上加权训练没有意义。
 - 这不是 RESTRAIN 方法的终审：只有 8 条 prompt、n=4、2 步训练、0.6B 学生；spec 建议 500 prompt、n=8、κ=2/3/5 敏感性。要重试，先换更强的结构化模型/教师或更干净的任务分层，把低一致性降到 30% 以下，再谈 weighted SFT。
 - 本次交付的价值是**管线与可审计性**：`export_self_train`、聚类/权重、`WeightedSFTTrainer`、评测 CLI 都已跑通；结论是数据不满足前提。
 - 下一步优先级：回到 #2 GKD 提升 shadow 表征，或换结构化任务数据；不要用更大 n/κ 硬救。

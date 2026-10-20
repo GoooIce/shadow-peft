@@ -24,7 +24,7 @@ transformers = pytest.importorskip("transformers")
 pytest.importorskip("trl")  # shadow_lab.trainers imports TRL at module load.
 
 import torch.nn.functional as F  # noqa: E402
-from transformers import LlamaConfig, LlamaForCausalLM  # noqa: E402
+from transformers import LlamaConfig, LlamaForCausalLM, Trainer  # noqa: E402
 
 from shadow_lab.eval import _shifted_ce_loss  # noqa: E402
 from shadow_lab.trainers import (  # noqa: E402
@@ -150,6 +150,19 @@ def test_sample_weights_must_be_one_scalar_per_sample(weights):
         weighted_shifted_ce_loss(logits, labels, weights)
 
 
+def test_negative_weights_are_rejected_with_index_and_value():
+    logits, labels = _synthetic_batch(batch=3)
+
+    with pytest.raises(ValueError) as excinfo:
+        weighted_shifted_ce_loss(logits, labels, torch.tensor([1.0, -0.5, 2.0]))
+
+    message = str(excinfo.value)
+    assert "sample_weights" in message
+    assert "non-negative" in message
+    assert "index 1" in message
+    assert "-0.5" in message
+
+
 # ---------------------------------------------------------------------------
 # WeightedSFTTrainer.compute_loss
 # ---------------------------------------------------------------------------
@@ -223,6 +236,66 @@ def test_compute_loss_with_weights_without_labels_raises():
     batch = {"input_ids": torch.zeros(1, 2, dtype=torch.long), "sample_weights": torch.ones(1)}
     with pytest.raises(ValueError, match="labels"):
         trainer.compute_loss(object(), batch)
+
+
+def test_evaluation_loop_strips_sample_weights(monkeypatch):
+    seen: list[dict] = []
+    sentinel = object()
+
+    def record(
+        self,
+        dataloader,
+        description,
+        prediction_loss_only=None,
+        ignore_keys=None,
+        metric_key_prefix="eval",
+    ):
+        for batch in dataloader:
+            seen.append(dict(batch))
+        return sentinel
+
+    monkeypatch.setattr(ShadowSFTTrainer, "evaluation_loop", record)
+
+    batches = [
+        {
+            "input_ids": torch.zeros(1, 2, dtype=torch.long),
+            "labels": torch.zeros(1, 2, dtype=torch.long),
+            "sample_weights": torch.ones(1),
+        },
+        {
+            "input_ids": torch.ones(1, 2, dtype=torch.long),
+            "labels": torch.ones(1, 2, dtype=torch.long),
+        },
+    ]
+
+    result = _bare_trainer().evaluation_loop(batches, "eval")
+
+    assert result is sentinel
+    assert "sample_weights" not in seen[0]
+    assert set(seen[0]) == {"input_ids", "labels"}
+    assert set(seen[1]) == {"input_ids", "labels"}
+
+
+def test_prediction_step_strips_sample_weights(monkeypatch):
+    seen: dict = {}
+    sentinel = object()
+
+    def record(self, model, inputs, prediction_loss_only, ignore_keys=None, **kwargs):
+        seen["inputs"] = dict(inputs)
+        return sentinel
+
+    monkeypatch.setattr(Trainer, "prediction_step", record)
+
+    batch = {
+        "input_ids": torch.zeros(1, 2, dtype=torch.long),
+        "sample_weights": torch.ones(1),
+    }
+
+    result = _bare_trainer().prediction_step(object(), batch, True)
+
+    assert result is sentinel
+    assert "sample_weights" not in seen["inputs"]
+    assert "sample_weights" in batch  # the caller's mapping is not mutated
 
 
 def test_two_weighted_optimizer_steps_stay_finite():
