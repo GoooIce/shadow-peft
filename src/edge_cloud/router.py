@@ -13,11 +13,13 @@ production line keeps answering with the edge model and replays hard cases later
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 import urllib.error
 import urllib.request
 from collections import deque
+from dataclasses import dataclass
 from dataclasses import fields as dataclass_fields
 from typing import Any
 
@@ -27,10 +29,12 @@ from .config import EdgeConfig
 from .continuation import assemble_continuation, looks_like_duplicate_prefix
 from .cost import CostEstimate, CostModel
 from .handoff import HandoffFeatures, HandoffOutcome, HandoffPolicy
+from .memory import ExperienceMemory, MemoryHit
 from .metrics import Metrics
 from .outbox import Outbox
 from .policies import FormatGuardPolicy, OraclePolicy, ProbePolicy
 from .protocol import CloudRequest, CloudResponse, ConfidenceReport, InferRequest, InferResponse
+from .rerank import Candidate, rerank
 
 # The probe artifact names its features with ``HandoffFeatures`` field names, so
 # the router advertises the full theoretical set and lets the policy reject an
@@ -42,6 +46,27 @@ _LEGACY_MODES = frozenset({"off", "legacy"})
 # A streaming handoff must leave enough time for the cloud round trip; the
 # legacy path keeps its historical 150 ms guard.
 _MIN_HANDOFF_REMAINING_MS = 150.0
+
+# Memory reranking is only meaningful with alternatives to choose from; the
+# spec fixes the edge n-best size at 4.
+_NBEST_SIZE = 4
+
+
+@dataclass(frozen=True, slots=True)
+class _MemoryHitSet:
+    """Retrieved hits plus the time the retrieval itself took."""
+
+    hits: list[MemoryHit]
+    retrieve_ms: float
+
+
+@dataclass(frozen=True, slots=True)
+class _MemoryOutcome:
+    """What the memory contributed to one response, for the wire fields."""
+
+    entry_ids: list[str]
+    score: float
+    reranked: bool
 
 
 class CloudError(RuntimeError):
@@ -286,6 +311,7 @@ class Router:
         metrics: Metrics | None = None,
         outbox: Outbox | None = None,
         handoff_policy: HandoffPolicy | None = None,
+        memory: ExperienceMemory | None = None,
     ) -> None:
         self.edge_backend = edge_backend
         self.config = config
@@ -296,6 +322,13 @@ class Router:
         # Test/eval seam: a pre-built policy replaces the configured probe or
         # oracle policy while the router keeps ownership of cloud calls.
         self.handoff_policy = handoff_policy
+        # Test/eval seam: an injected memory replaces the configured JSONL file.
+        # Loading is lazy so a config hot-switched to ``memory_mode=on`` works
+        # without rebuilding the router, and memory stays entirely local
+        # (available in offline mode).
+        self.memory = memory
+        self._memory_loaded = memory is not None
+        self._memory_error: str | None = None
         self.breaker = CircuitBreaker(config.circuit_failures, config.circuit_cooldown_s)
         self.budget = CloudBudget(
             config.max_cloud_calls_per_min,
@@ -334,8 +367,14 @@ class Router:
         edge_started = time.monotonic()
         edge_generation: Generation | None = None
         edge_error: str | None = None
+        memory_outcome: _MemoryOutcome | None = None
         try:
-            edge_generation = self.edge_backend.generate(request)
+            if self._memory_eligible(request):
+                edge_generation, memory_outcome = self._generate_with_memory(
+                    request, trace, expected_format
+                )
+            else:
+                edge_generation = self.edge_backend.generate(request)
         except Exception as exc:  # noqa: BLE001 - any backend failure must degrade, not crash
             edge_error = str(exc)
             self.metrics.incr("edge_failures_total")
@@ -349,7 +388,214 @@ class Router:
             edge_generation,
             edge_error,
             edge_wall_ms,
+            memory=memory_outcome,
         )
+
+    # --------------------------------------------------------------- memory
+    def _memory_eligible(self, request: InferRequest) -> bool:
+        """Memory reranking only applies to successful, non-forced whole answers.
+
+        The streaming handoff path is deliberately excluded: it already chose a
+        token-level handoff after one decode, and reranking would need a second
+        n-best decode that changes the single-handoff semantics.
+        """
+
+        if str(self.config.memory_mode).strip().lower() != "on":
+            return False
+        if request.require_cloud or request.task in set(self.config.require_cloud_tasks):
+            return False
+        return callable(getattr(self.edge_backend, "generate_nbest", None))
+
+    def _get_memory(self) -> ExperienceMemory | None:
+        """Load the configured memory once; ``None`` means it is unavailable."""
+
+        if not self._memory_loaded:
+            self._memory_loaded = True
+            try:
+                if self.config.memory_path:
+                    self.memory = ExperienceMemory.load(
+                        self.config.memory_path,
+                        default_ttl_s=self.config.memory_ttl_s,
+                    )
+                else:
+                    self.memory = ExperienceMemory(
+                        default_ttl_s=self.config.memory_ttl_s
+                    )
+            except Exception as exc:  # noqa: BLE001 - memory must never fail inference
+                self.memory = None
+                self._memory_error = str(exc)
+        if self._memory_error is not None:
+            return None
+        return self.memory
+
+    def _retrieve_memory(
+        self, request: InferRequest, trace: list[str]
+    ) -> _MemoryHitSet | None:
+        """Retrieve top-k hits within the latency budget, or ``None``.
+
+        A miss, an unavailable memory or an over-budget retrieval returns
+        ``None`` so the caller keeps the baseline single-answer path.
+        """
+
+        memory = self._get_memory()
+        if memory is None:
+            self.metrics.incr("memory_fallback_total")
+            detail = self._memory_error or "未初始化"
+            trace.append(f"记忆不可用，回退端侧基线：{detail}")
+            return None
+        started = time.perf_counter()
+        try:
+            hits = memory.retrieve(
+                request.prompt,
+                task=request.task,
+                tenant=self.config.memory_tenant,
+                adapter_version=self.config.adapter_version,
+                k=self.config.memory_top_k,
+                threshold=self.config.memory_threshold,
+            )
+        except Exception as exc:  # noqa: BLE001 - retrieval failures are a silent fallback
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            self.metrics.observe("memory_latency_ms", elapsed_ms)
+            self.metrics.incr("memory_fallback_total")
+            trace.append(f"记忆检索失败，回退端侧基线：{exc}")
+            return None
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        if not hits:
+            self.metrics.observe("memory_latency_ms", elapsed_ms)
+            return None
+        if elapsed_ms > self.config.memory_latency_budget_ms:
+            self.metrics.observe("memory_latency_ms", elapsed_ms)
+            self.metrics.incr("memory_fallback_total")
+            trace.append(
+                f"记忆检索用时 {elapsed_ms:.1f}ms 超过预算 "
+                f"{self.config.memory_latency_budget_ms:.1f}ms，按 no_memory 回退"
+            )
+            return None
+        return _MemoryHitSet(hits=hits, retrieve_ms=elapsed_ms)
+
+    def _generate_with_memory(
+        self,
+        request: InferRequest,
+        trace: list[str],
+        expected_format: str | None,
+    ) -> tuple[Generation, _MemoryOutcome | None]:
+        """Generate n-best and rerank it with memory, falling back to one answer."""
+
+        hit_set = self._retrieve_memory(request, trace)
+        if hit_set is None:
+            return self.edge_backend.generate(request), None
+
+        try:
+            generations = [
+                generation
+                for generation in self.edge_backend.generate_nbest(
+                    request, n=_NBEST_SIZE
+                )
+                if isinstance(generation, Generation) and generation.text.strip()
+            ]
+        except Exception as exc:  # noqa: BLE001 - reranking must not break inference
+            self.metrics.incr("memory_fallback_total")
+            trace.append(f"端侧 n-best 生成失败，回退单答案：{exc}")
+            return self.edge_backend.generate(request), None
+        if not generations:
+            self.metrics.incr("memory_fallback_total")
+            trace.append("端侧 n-best 生成结果为空，回退单答案")
+            return self.edge_backend.generate(request), None
+
+        candidates = [
+            Candidate(
+                text=generation.text,
+                logprob=self._sequence_logprob(generation),
+                finish_reason=generation.finish_reason,
+            )
+            for generation in generations
+        ]
+        rerank_started = time.perf_counter()
+        try:
+            result = rerank(
+                candidates,
+                hit_set.hits,
+                alpha=self.config.memory_alpha,
+                min_support=self.config.memory_min_support,
+            )
+        except Exception as exc:  # noqa: BLE001 - reranking must not break inference
+            elapsed_ms = hit_set.retrieve_ms + (time.perf_counter() - rerank_started) * 1000
+            self.metrics.observe("memory_latency_ms", elapsed_ms)
+            self.metrics.incr("memory_fallback_total")
+            trace.append(f"记忆重排失败，回退端侧基线：{exc}")
+            return generations[self._best_logprob_index(candidates)], None
+
+        memory_ms = hit_set.retrieve_ms + (time.perf_counter() - rerank_started) * 1000
+        self.metrics.observe("memory_latency_ms", memory_ms)
+        baseline_index = self._best_logprob_index(candidates)
+        baseline_generation = generations[baseline_index]
+        if memory_ms > self.config.memory_latency_budget_ms:
+            self.metrics.incr("memory_fallback_total")
+            trace.append(
+                f"记忆检索+重排用时 {memory_ms:.1f}ms 超过预算 "
+                f"{self.config.memory_latency_budget_ms:.1f}ms，按 no_memory 回退"
+            )
+            return baseline_generation, None
+
+        self.metrics.incr("memory_hit_total")
+        entry_ids = [hit.entry.entry_id for hit in hit_set.hits]
+        trace.append(
+            f"记忆命中 {len(hit_set.hits)} 条（最高相似度 "
+            f"{hit_set.hits[0].score:.2f}），重排 {len(candidates)} 个候选"
+        )
+        selected_generation = generations[result.index]
+        reranked = result.reranked and selected_generation.text != baseline_generation.text
+        if reranked and format_ok(selected_generation.text, expected_format) == 0.0:
+            self.metrics.incr("memory_fallback_total")
+            trace.append(
+                f"记忆重排答案未通过 {expected_format} 格式校验，回退端侧原答案"
+            )
+            return baseline_generation, _MemoryOutcome(
+                entry_ids=entry_ids,
+                score=result.memory_score,
+                reranked=False,
+            )
+        if reranked:
+            self.metrics.incr("memory_reranked_total")
+            trace.append(f"记忆重排改写端侧答案：{result.reason}")
+        else:
+            reason = "top1_unchanged" if result.reranked else result.reason
+            trace.append(f"记忆未改写端侧答案：{reason}")
+        return selected_generation, _MemoryOutcome(
+            entry_ids=entry_ids,
+            score=result.memory_score,
+            reranked=reranked,
+        )
+
+    @staticmethod
+    def _sequence_logprob(generation: Generation) -> float:
+        """Length-normalized log probability used as the rerank model term."""
+
+        values = [
+            float(value)
+            for value in (generation.token_logprobs or [])
+            if math.isfinite(value)
+        ]
+        return sum(values) / len(values) if values else 0.0
+
+    @staticmethod
+    def _best_logprob_index(candidates: list[Candidate]) -> int:
+        best = 0
+        for index in range(1, len(candidates)):
+            if candidates[index].logprob > candidates[best].logprob:
+                best = index
+        return best
+
+    @staticmethod
+    def _memory_fields(memory: _MemoryOutcome | None) -> dict[str, Any]:
+        if memory is None:
+            return {}
+        return {
+            "memory_hit": True,
+            "memory_entry_ids": list(memory.entry_ids),
+            "memory_score": memory.score,
+            "memory_reranked": memory.reranked,
+        }
 
     def _finish_whole(
         self,
@@ -360,6 +606,8 @@ class Router:
         edge_generation: Generation | None,
         edge_error: str | None,
         edge_wall_ms: float,
+        *,
+        memory: _MemoryOutcome | None = None,
     ) -> InferResponse:
         """Existing whole-segment escalation path (legacy and fallbacks)."""
 
@@ -385,7 +633,13 @@ class Router:
             self.budget.record(False)
             trace.append("置信度达到阈值，端侧直接返回")
             response = self._edge_response(
-                request, edge_generation, edge_report, started, trace, expected_format
+                request,
+                edge_generation,
+                edge_report,
+                started,
+                trace,
+                expected_format,
+                memory=memory,
             )
             self._attach_edge_cost(response, edge_generation)
             return response
@@ -395,7 +649,13 @@ class Router:
         trace.append(f"触发升级：{reason}（阈值 {self.config.escalation_threshold:.2f}）")
 
         edge_response = self._edge_response(
-            request, edge_generation, edge_report, started, trace, expected_format
+            request,
+            edge_generation,
+            edge_report,
+            started,
+            trace,
+            expected_format,
+            memory=memory,
         )
         if self.config.offline:
             self.budget.record(False)
@@ -491,6 +751,11 @@ class Router:
             finish_reason=cloud_response.finish_reason,
             cloud_output_tokens=cloud_response.output_tokens,
             metadata={"edge_model": edge_generation.model_id if edge_generation else None},
+            memory_hit=memory is not None,
+            memory_entry_ids=list(memory.entry_ids) if memory else [],
+            memory_score=memory.score if memory else None,
+            # The final answer is the cloud one, so it is not a memory rewrite.
+            memory_reranked=False,
         )
         response.cost_estimate = cost_model.estimate(
             edge_tokens=edge_tokens,
@@ -948,6 +1213,8 @@ class Router:
         started: float,
         trace: list[str],
         expected_format: str | None,
+        *,
+        memory: _MemoryOutcome | None = None,
     ) -> InferResponse:
         if generation is None:
             return InferResponse(
@@ -979,6 +1246,7 @@ class Router:
             confidence_signals=report.signals if report else {},
             finish_reason=generation.finish_reason,
             metadata={"expected_format": expected_format},
+            **self._memory_fields(memory),
         )
 
     def _degrade(

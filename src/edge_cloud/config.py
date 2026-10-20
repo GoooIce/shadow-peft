@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 HANDOFF_MODES = ("off", "legacy", "probe", "oracle")
+MEMORY_MODES = ("off", "on")
 
 
 def _unit_interval(value: Any, *, name: str) -> float:
@@ -42,6 +43,15 @@ def _non_negative_int(value: Any, *, name: str) -> int:
 
 @dataclass(slots=True)
 class EdgeConfig:
+    """Edge agent configuration.
+
+    ``memory_threshold`` defaults to 0.45, not the JitRL spec's 0.75: the
+    shipped character n-gram TF-IDF scorer rates a typical synonym rewrite
+    (e.g. "E104 真空报警" vs "E-104 真空压力不足") at ~0.47 and exact repeats
+    at 1.0, so a 0.75 gate would suppress almost every real hit. Deployments
+    can still set 0.75 (or any value in [0, 1]).
+    """
+
     edge_id: str = "edge-01"
     backend: dict[str, Any] = field(default_factory=lambda: {"kind": "mock_edge"})
     cloud_url: str = "http://127.0.0.1:9100"
@@ -77,6 +87,17 @@ class EdgeConfig:
     cost_per_cloud_call: float = 0.0
     cloud_rtt_ms: float = 0.0
     max_cost_per_min: float = 0.0
+    # JitRL-lite experience memory (issue #39); see the class docstring for the
+    # calibrated ``memory_threshold`` default.
+    memory_mode: str = "off"
+    memory_path: str = ""
+    memory_top_k: int = 4
+    memory_threshold: float = 0.45
+    memory_alpha: float = 0.5
+    memory_min_support: int = 2
+    memory_ttl_s: int = 30 * 24 * 60 * 60
+    memory_tenant: str = "default"
+    memory_latency_budget_ms: float = 50.0
 
     def __post_init__(self) -> None:
         self.escalation_threshold = max(0.0, min(1.0, float(self.escalation_threshold)))
@@ -116,6 +137,24 @@ class EdgeConfig:
         self.cloud_rtt_ms = _non_negative_float(self.cloud_rtt_ms, name="cloud_rtt_ms")
         self.max_cost_per_min = _non_negative_float(
             self.max_cost_per_min, name="max_cost_per_min"
+        )
+        memory_mode = str(self.memory_mode).strip().lower()
+        if memory_mode not in MEMORY_MODES:
+            raise ValueError(f"memory_mode 必须是 {'|'.join(MEMORY_MODES)} 之一")
+        self.memory_mode = memory_mode
+        self.memory_path = str(self.memory_path or "")
+        self.memory_top_k = _non_negative_int(self.memory_top_k, name="memory_top_k")
+        self.memory_threshold = _unit_interval(
+            self.memory_threshold, name="memory_threshold"
+        )
+        self.memory_alpha = _non_negative_float(self.memory_alpha, name="memory_alpha")
+        self.memory_min_support = _non_negative_int(
+            self.memory_min_support, name="memory_min_support"
+        )
+        self.memory_ttl_s = _non_negative_int(self.memory_ttl_s, name="memory_ttl_s")
+        self.memory_tenant = str(self.memory_tenant or "default")
+        self.memory_latency_budget_ms = _non_negative_float(
+            self.memory_latency_budget_ms, name="memory_latency_budget_ms"
         )
 
     @classmethod
