@@ -1,8 +1,8 @@
 # exp11 S2T-Local 影子选择器诊断（spec #3）
 
-一句话收束：**在 `goooinext` 上用 exp7 的真实 `Qwen3-4B + H4B` ShadowPEFT checkpoint 做 S2T-Local 诊断：56 条 prompt × 32 token = 1792 token 上，shadow top-8 对 base top-1 的 Hit@8 = 0.898（95% CI [0.884, 0.912]），Agree@1 = 0.721（[0.700, 0.743]）→ 达到 go 门槛（≥0.85），进入 selector 训练。这是 base-prefix 上的诊断；部署 prefix 上 selector 评估的 Hit@8 只有 0.72–0.78（见 `docs/exp11-s2t-selector.md`），覆盖与选择都有失败。**
+一句话收束：**在 `goooinext` 上用 exp7 的真实 `Qwen3-4B + H4B` ShadowPEFT checkpoint 做 S2T-Local 诊断：56 条 prompt × 32 token = 1792 token 上，shadow top-16 对 base top-1 的 Hit@16 = 0.925、Hit@8 = 0.896（95% CI [0.882, 0.910]），Agree@1 = 0.725（[0.705, 0.747]）→ 达到 go 门槛（Hit@8 ≥ 0.85），进入 selector 训练。这是 base-prefix 上的诊断；部署 prefix 上 selector 评估的 Hit@8 只有 0.72–0.79，且全量 rank p99=15581，覆盖与选择都有失败（见 `docs/exp11-s2t-selector.md`，selector 结论 no-go）。**
 
-状态：**诊断已结题（2026-10-20），base-prefix 结论 go**；K=16 / 全量 rank 的修复重跑见下方「待重跑」占位，selector 训练/评估结论见 `docs/exp11-s2t-selector.md`（no-go）。
+状态：**诊断已结题（2026-10-20），base-prefix 结论 go；K=16 / 全量 rank 已重跑**；selector 训练/评估结论见 `docs/exp11-s2t-selector.md`（no-go）。
 
 ## 实验设置
 
@@ -38,42 +38,41 @@ PYTHONPATH=src .venv/bin/python scripts/exp11_s2t_diagnose.py \
 
 | 指标 | 值 | 95% CI |
 |---|---|---|
-| Hit@1 | 0.721 | — |
-| Hit@4 | 0.858 | — |
-| **Hit@8** | **0.898** | [0.884, 0.912] |
-| **Hit@16** | **待重跑**（K=16） | — |
-| **Agree@1** | **0.721** | [0.700, 0.743] |
-| rank_all p50 / p90 / p95 / p99 | 待重跑（全量精确 `base_top1_rank_in_shadow`） | — |
-| rank_hit p50 / p90 / p95 / p99（旧命中位置口径） | 1 / 4.1 / 5.0 / 6.0 | — |
+| Hit@1 | 0.725 | — |
+| Hit@4 | 0.857 | — |
+| **Hit@8** | **0.896** | [0.882, 0.910] |
+| **Hit@16** | **0.925** | — |
+| **Agree@1** | **0.725** | [0.705, 0.747] |
+| rank_all p50 / p90 / p95 / p99 | 1 / 9 / 59 / 15580.7 | — |
+| rank_hit p50 / p90 / p95 / p99（仅命中位置） | 1 / 3 / 6 / 14 | — |
 
-- Hit@1/4/8 预期与旧 K=8 运行一致（扩大捕获宽度只增加尾部候选，重跑后核对）；Hit@16 必须用 K=16 捕获重跑，旧值不可用。
-- `rank_all_*` 用每条 token 的精确 `base_top1_rank_in_shadow`（JSONL 已记录），包括 top-16 之外的 rank；`rank_hit_*` 是旧的「只对命中位置已知」口径，报告里 `rank_p50` 等旧键是它的别名。
-- K=16 重跑后，`hit_at_16` 与 `rank_all_*` 一起由协调者填入；本文件不预填估计值。
+- K=16 捕获已重跑（`runs-local/exp11/diagnostic_k16/`）；Hit@1/4/8 与旧 K=8 运行基本一致（0.896 vs 0.898，差异来自 top-K 并列顺序），Hit@16 是真实值。
+- `rank_all_*` 用每条 token 的精确 `base_top1_rank_in_shadow`（包括 top-16 之外）；`rank_hit_*` 只对命中位置已知。**全量 p99=15581** 说明少数 token 的 base top-1 排在 shadow 分布极尾部，K=8/16 对这些位置无能为力。
 
-按 task：
+按 task（K=16 运行）：
 
 | task | n | Hit@8 | Agree@1 |
 |---|---|---|---|
-| quality_verdict | 256 | 0.934 | 0.797 |
-| fault_diagnosis | 256 | 0.922 | 0.754 |
-| standard_qa | 256 | 0.914 | 0.773 |
-| safety | 256 | 0.895 | 0.664 |
+| quality_verdict | 256 | 0.930 | 0.801 |
+| fault_diagnosis | 256 | 0.922 | 0.758 |
+| standard_qa | 256 | 0.914 | 0.777 |
+| safety | 256 | 0.891 | 0.668 |
 | process_calc | 256 | 0.879 | 0.746 |
-| improvement | 256 | 0.875 | 0.676 |
-| process_qa | 256 | 0.871 | 0.637 |
+| improvement | 256 | 0.875 | 0.680 |
+| process_qa | 256 | 0.859 | 0.645 |
 
-按 position bucket（主结果 1792 token；Hit@8 为 K=16 重跑待填，n 由 56 prompt × 32 token 推出）：
+按 position bucket（1792 token）：
 
-| bucket | n | Hit@8 |
-|---|---|---|
-| 0 | 56 | 待重跑 |
-| 1-3 | 168 | 待重跑 |
-| 4-7 | 224 | 待重跑 |
-| 8-15 | 448 | 待重跑 |
-| 16+ | 896 | 待重跑 |
-| 合计 | 1792 | 0.898（旧 K=8 运行） |
+| bucket | n | Hit@8 | Hit@16 |
+|---|---|---|---|
+| 0（句首） | 56 | 0.071 | 0.071 |
+| 1-3 | 168 | 0.940 | 0.952 |
+| 4-7 | 224 | 0.906 | 0.938 |
+| 8-15 | 448 | 0.897 | 0.940 |
+| 16+ | 896 | 0.935 | 0.963 |
+| 合计 | 1792 | 0.896 | 0.925 |
 
-旧档案里 1–3、4–7、8–15 的约 0.79 / 0.78 / 0.875 与「position 0 没有可评分 token」的说法不再采用：position 0 每 prompt 都有记录，且旧值没有按主结果的完整 bucket 统计。
+句首第一个 token 的 Hit@8 只有 7.1%，是明显的低覆盖位置；中后段 0.90–0.94。
 
 ## Go / no-go
 
