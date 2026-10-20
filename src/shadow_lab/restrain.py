@@ -15,6 +15,13 @@ Conventions
   answer is weighted up while never collapsing to 1/0. ``consistency`` is
   ``g(max_j f_j)`` (Eq. 5) and is kept raw in reports; ``prompt_weight``
   applies the first-version ``max_count < kappa`` gate on top of it.
+- The Gaussian is deliberately consensus-centred: the spec's literal form
+  ``exp(-f^2 / (2 * sigma^2))`` peaks at ``f = 0`` and would give the
+  *smallest* cluster the highest weight. That contradicts the acceptance
+  criterion "tilt toward the majority, not winner-take-all", so the
+  implementation uses ``exp(-(1 - f)^2 / (2 * sigma^2))`` and pins it with
+  tests. Any upstream switch to the literal form must change the documented
+  weighting semantics first.
 - A numeric prompt is ``unclusterable`` when there are no parsed answers or
   when the largest numeric cluster does not strictly lead (a tie means no
   dominant answer). Verdict prompts are unclusterable only when no answer
@@ -321,6 +328,12 @@ def _count_values(counts: Mapping[str, int] | Sequence[int]) -> list[float]:
 
 
 def _gaussian(fraction: float, sigma: float) -> float:
+    """Consensus-centred Gaussian ``exp(-(1 - f)^2 / (2 * sigma^2))``.
+
+    Peaks at ``f = 1`` (unanimous vote) so larger clusters get more weight.
+    The spec's literal ``exp(-f^2 / (2 * sigma^2))`` would peak at ``f = 0``
+    and favour the minority; see the module docstring for why we deviate.
+    """
     return math.exp(-((1.0 - fraction) ** 2) / (2.0 * sigma * sigma))
 
 

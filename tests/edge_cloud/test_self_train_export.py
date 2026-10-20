@@ -116,6 +116,8 @@ def test_export_self_train_clusters_verdict_rollouts(tmp_path: Path) -> None:
         "rollout_failures": 0,
         "by_task": {"quality_verdict": 1},
         "cluster_methods": {"verdict_label": 1},
+        "low_consistency_rate": 0.0,
+        "low_consistency_rate_all": 0.0,
     }
     assert generate.calls == [(prompt, "quality_verdict")] * 8
 
@@ -267,6 +269,8 @@ def test_export_self_train_keeps_hard_cases_only_and_dedupes_by_prompt(
         "rollout_failures": 0,
         "by_task": {"quality_verdict": 1},
         "cluster_methods": {"verdict_label": 1},
+        "low_consistency_rate": 0.0,
+        "low_consistency_rate_all": 0.0,
     }
     assert generate.calls == [("重复的问题", "quality_verdict")] * 8
     [row] = _read_jsonl(out)
@@ -308,7 +312,67 @@ def test_unclusterable_number_tie_is_skipped(tmp_path: Path) -> None:
     assert report["skipped_unclusterable"] == 1
     assert report["by_task"] == {}
     assert report["cluster_methods"] == {}
+    assert report["low_consistency_rate"] == 0.0
+    # The only rolled-out prompt was unclusterable: it counts as low
+    # consistency in the all-prompts rate.
+    assert report["low_consistency_rate_all"] == 1.0
     assert out.read_text(encoding="utf-8") == ""
+
+
+def test_low_consistency_rates_cover_exported_and_unclusterable_prompts(
+    tmp_path: Path,
+) -> None:
+    store = FeedbackStore(tmp_path / "feedback.jsonl")
+    answers = {
+        # 5 clusterable: 2 majority (max 3 >= kappa 3), 3 split 2-2.
+        "高一致 A": ["放行"] * 3 + ["拦截"],
+        "高一致 B": ["返修"] * 4,
+        "低一致 A": ["放行", "放行", "拦截", "拦截"],
+        "低一致 B": ["合格", "合格", "不合格", "不合格"],
+        "低一致 C": ["放行", "拦截", "返修", "返修"],
+        # 3 unclusterable: no answer parses as a verdict.
+        "不可聚类 A": ["不知道"] * 4,
+        "不可聚类 B": ["无法判断"] * 4,
+        "不可聚类 C": ["", "  ", "……", "??? "],
+    }
+    for index, prompt in enumerate(answers):
+        _add(store, request_id=f"r{index}", prompt=prompt, task="quality_verdict")
+    out = tmp_path / "self_train.jsonl"
+
+    report = store.export_self_train(
+        out, generate=FakeGenerate(answers), n=4, kappa=3
+    )
+
+    assert report["exported"] == 5
+    assert report["skipped_unclusterable"] == 3
+    # Exported rows only: 3 of the 5 exported rows are below the kappa gate.
+    assert report["low_consistency_rate"] == pytest.approx(3 / 5)
+    # All rolled-out prompts: the 3 unclusterable prompts count as low.
+    assert report["low_consistency_rate_all"] == pytest.approx(6 / 8)
+
+
+def test_low_consistency_rate_all_ignores_prompts_without_rollouts(
+    tmp_path: Path,
+) -> None:
+    store = FeedbackStore(tmp_path / "feedback.jsonl")
+    _add(store, request_id="r1", prompt="低一致的问题", task="quality_verdict")
+    _add(store, request_id="r2", prompt="不支持的任务", task="standard_qa")
+    _add(store, request_id="r3", prompt="   ", task="quality_verdict")
+    out = tmp_path / "self_train.jsonl"
+
+    report = store.export_self_train(
+        out,
+        generate=FakeGenerate({"低一致的问题": ["放行", "放行", "拦截", "拦截"]}),
+        n=4,
+        kappa=3,
+    )
+
+    assert report["skipped_unsupported"] == 1
+    assert report["skipped_empty"] == 1
+    assert report["low_consistency_rate"] == 1.0
+    # Empty/unsupported prompts were never rolled out, so they are not part
+    # of the consistency denominator.
+    assert report["low_consistency_rate_all"] == 1.0
 
 
 def test_reference_rollouts_add_aligned_counts_and_consistency(

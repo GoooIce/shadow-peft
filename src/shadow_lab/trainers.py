@@ -213,7 +213,9 @@ def weighted_shifted_ce_loss(
     Each sample's CE is the mean over its non-``-100`` target tokens and the
     batch loss is ``sum(w_i * CE_i) / sum(w_i)``. Uniform positive weights
     reduce to :func:`shadow_lab.eval._shifted_ce_loss` bit for bit, so
-    all-ones weights reproduce the unweighted SFT baseline exactly.
+    all-ones weights reproduce the unweighted SFT baseline exactly. Negative
+    weights raise ``ValueError`` naming the offending index and value; an
+    all-zero batch returns a differentiable zero (no sample contributes).
     """
     weights = torch.as_tensor(sample_weights, dtype=logits.dtype, device=logits.device)
     if weights.dim() == 0:
@@ -222,6 +224,13 @@ def weighted_shifted_ce_loss(
         raise ValueError(
             "sample_weights must be 1-D with one weight per sample "
             f"(got shape {tuple(weights.shape)} for a batch of {labels.size(0)})."
+        )
+    negative = weights < 0
+    if bool(negative.any()):
+        index = int(negative.nonzero(as_tuple=False)[0].item())
+        raise ValueError(
+            "sample_weights must be non-negative "
+            f"(got {weights[index].item():g} at index {index})."
         )
     if bool(torch.all(weights == 0)):
         # Nothing contributes; keep the graph so backward yields zero grads.
@@ -301,8 +310,10 @@ class WeightedSFTTrainer(ShadowSFTTrainer):
     teacher-logit distillation is added); when it does not, the trainer behaves
     exactly like :class:`ShadowSFTTrainer` (teacher injection included).
 
-    ``sample_weights`` are training-only: keep them out of evaluation batches,
-    which the inherited ``evaluation_loop`` forwards straight to the model.
+    ``sample_weights`` are training-only and are stripped from evaluation
+    batches in :meth:`evaluation_loop` and :meth:`prediction_step`, so a
+    dataloader that carries the column never forwards it to the model. The
+    inherited loop would otherwise pass it through.
     """
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
@@ -315,6 +326,40 @@ class WeightedSFTTrainer(ShadowSFTTrainer):
         outputs = model(**inputs)
         loss = weighted_shifted_ce_loss(outputs.logits, labels, sample_weights)
         return (loss, outputs) if return_outputs else loss
+
+    @staticmethod
+    def _strip_sample_weights(loader):
+        """Yield eval batches without the training-only ``sample_weights`` column."""
+        for inputs in loader:
+            if isinstance(inputs, Mapping):
+                inputs = dict(inputs)
+                inputs.pop("sample_weights", None)
+            yield inputs
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        """Keep ``sample_weights`` away from the model during the HF eval path."""
+        inputs = dict(inputs)
+        inputs.pop("sample_weights", None)
+        return super().prediction_step(
+            model, inputs, prediction_loss_only, ignore_keys=ignore_keys
+        )
+
+    def evaluation_loop(
+        self,
+        dataloader,
+        description,
+        prediction_loss_only=None,
+        ignore_keys=None,
+        metric_key_prefix="eval",
+    ):
+        """Evaluate with the standard CE loss, never forwarding ``sample_weights``."""
+        return super().evaluation_loop(
+            self._strip_sample_weights(dataloader),
+            description,
+            prediction_loss_only=prediction_loss_only,
+            ignore_keys=ignore_keys,
+            metric_key_prefix=metric_key_prefix,
+        )
 
 
 class MMLUTrainer(DifferentialLRMixin, DistillTeacherMixin, SFTTrainer):
