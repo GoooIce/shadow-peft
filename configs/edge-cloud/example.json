@@ -7,6 +7,7 @@
       "device": "auto",
       "dtype": "bfloat16",
       "shadow_ckpt": null,
+      "shadow_model_path": null,
       "enable_thinking": false,
       "system_prompt": "你是生产线工艺与质量助手。回答必须给出结论、依据和可执行步骤；涉及数值时写明计算口径。",
       "max_context_tokens": 2048

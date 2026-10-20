@@ -1,8 +1,8 @@
-# exp9b 真实后端交接冒烟（Qwen3-0.6B）
+# exp9b 真实后端交接冒烟（Qwen3-0.6B / Qwen3-4B+H4B）
 
-一句话收束：**在 `goooinext` 上用 Qwen3-0.6B（`enable_thinking=False`）跑通了真实 `generate_until` 流式交接与 `CloudService` 真实续写：前缀在句号/换行处停下、云端返回 `continued_from_prefix=true` 的纯续写；回流焊 prompt 上前缀 + 续写约 2.15s，完整生成约 3.2s，但完整生成在 64 token 处被截断，且两侧模型相同，不能当作生产结论。**
+一句话收束：**在 `goooinext` 上用 Qwen3-0.6B（`enable_thinking=False`）跑通了真实 `generate_until` 流式交接与 `CloudService` 真实续写；随后用 exp7 的 `Qwen3-4B + H4B` ShadowPEFT checkpoint 跑通真实 base/shadow 双路特征、真实特征 probe 校准与单次交接。所有结果都是机制验证：样本量 2–3 条、参考答案为同模型自洽生成，不是质量结论。**
 
-状态：**真实后端冒烟已跑通（2026-10-20）**；真实 shadow/base_shadow 路径与准确率结论未跑，见「已知限制」。
+状态：**真实后端基础链路与真实 base/shadow 双路路径均已跑通（2026-10-20）**；结论级准确率仍待甲方标注集，见「已知限制」。
 
 ## 环境
 
@@ -58,10 +58,36 @@ ssh -J gooo goooinext 'cd ~/Code/shadow-peft && PYTHONPATH=src .venv/bin/python 
 
 ## 已知限制
 
-- **真实 shadow/base_shadow 未跑**：`~/models/Qwen3-0.6B-H4B` / `Qwen3-8B` 等目录是普通模型，不是 ShadowPEFT checkpoint（缺 `shadow_config.json`）；`runs/exp7/*/ckpt-final` 是 4B 主干 + 显式 H4B 影子的 ShadowPEFT checkpoint，而当前 `TransformersBackend` 只调用 `ShadowPeftModel.from_pretrained(base, ckpt)`，不能传入显式 shadow 模型。要在真实 base/shadow 双路 logits 上评测，需要给后端增加 `shadow_model_path`（或从 exp7 训练脚本复用加载逻辑），另立 ticket。
+- **真实 base/shadow 已跑通，但不是结论级评测**：已用 exp7 `e4b-seed0/ckpt-final` + `Qwen3-0.6B-H4B` 在 2 条 prompt 上跑通；n=2、参考答案是同一 4B 模型的完整生成（自洽），没有标注金标。`~/models/Qwen3-0.6B-H4B` 等目录本身不是 ShadowPEFT checkpoint；必须通过 `shadow_ckpt` + `shadow_model_path` 加载 exp7 checkpoint。
 - **无标注语料**：本次只验证机制，不报告准确率增益；结论级评测仍需甲方标注集。
 - 真实云端只用了同一个 0.6B 模型；没有接入 4B/8B 云模型或 OpenAI-compatible 服务。
 - 云端续写耗时是单条、单次测量，未做 P50/P95 或多并发压测。
+
+## 真实 base/shadow 评测（Qwen3-4B + exp7 e4b + H4B）
+
+`TransformersBackend` 新增 `shadow_model_path`：把 exp7 的 4B 主干、`runs/exp7/e4b-seed0/ckpt-final` 适配器和 `Qwen3-0.6B-H4B` 影子模型一起加载：
+
+```python
+TransformersBackend(
+    "/home/goooice/models/Qwen3-4B",
+    shadow_ckpt="/home/goooice/Code/shadow-peft/runs/exp7/e4b-seed0/ckpt-final",
+    shadow_model_path="/home/goooice/models/Qwen3-0.6B-H4B",
+    device="cuda", dtype="bfloat16", enable_thinking=False,
+)
+```
+
+真实双路特征示例（第 3 个前缀 token）：`kl_base_shadow=0.0262`、`top1_agreement=1.0`、`base_entropy=0.00084`、`shadow_entropy=0.174`、`base_margin=0.9999`、`shadow_margin=0.9629`、`base_top1_in_shadow_topk=true`。加载 + 8 token 生成约 57s（含 4B/0.6B 加载）。
+
+用 2 条 completion prompt、`max_tokens=48`、自洽参考答案（同一模型完整生成）跑 exp9：
+
+| 策略 | exact | 升级率 | handoff | 平均位置 | 云端 prefill/decode | 成本 | P95 |
+|---|---|---|---|---|---|---|---|
+| edge_only | 1.000 | 0 | 0 | — | 0 / 0 | 0.000192 | 576 ms |
+| legacy | 1.000 | 1.000 | 0 | — | 124 / 149 | 0.003476 | 2170 ms |
+| probe | 1.000 | 1.000 | 1.000 | 30.0 | 116 / 61 | 0.002316 | 1124 ms |
+| oracle | 1.000 | 1.000 | 1.000 | 30.5 | 115 / 62 | 0.002326 | 1169 ms |
+
+probe 由 96 条真实候选行（正例 59，61.5%）校准：`fingerprint=4340d23c…`、`training_fingerprint=6ec0f902…`。probe 与 oracle 几乎重合，说明真实特征上 probe 能学到交接点；但 n=2，不能外推。每轮评测约 1m43s（含加载）。
 
 ## 复现
 
@@ -81,6 +107,21 @@ PY
   "model_path": "/home/goooice/models/Qwen3-0.6B",
   "device": "cuda",
   "dtype": "bfloat16",
+  "enable_thinking": false
+}
+```
+
+真实 base/shadow（exp7）配置：
+
+```json
+{
+  "kind": "transformers",
+  "model_path": "/home/goooice/models/Qwen3-4B",
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "shadow_ckpt": "/home/goooice/Code/shadow-peft/runs/exp7/e4b-seed0/ckpt-final",
+  "shadow_model_path": "/home/goooice/models/Qwen3-0.6B-H4B",
+  "max_context_tokens": 512,
   "enable_thinking": false
 }
 ```

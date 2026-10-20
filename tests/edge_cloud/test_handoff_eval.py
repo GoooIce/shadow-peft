@@ -123,6 +123,7 @@ def test_load_dataset_defaults_optional_fields_and_preserves_order(tmp_path: Pat
             "risk_at": 2,
             "edge_quality": 0.8,
             "shadow_gap": 0.2,
+            "max_tokens": 16,
         },
     ]
     path.write_text(
@@ -137,9 +138,33 @@ def test_load_dataset_defaults_optional_fields_and_preserves_order(tmp_path: Pat
     assert samples[0].risk_at is None
     assert samples[0].edge_quality is None
     assert samples[0].shadow_gap is None
+    assert samples[0].max_tokens == 256
     assert samples[1].cloud_better_from == 2
     assert samples[1].edge_quality == 0.8
     assert samples[1].shadow_gap == 0.2
+    assert samples[1].max_tokens == 16
+
+
+def test_load_dataset_rejects_an_invalid_max_tokens(tmp_path: Path) -> None:
+    path = tmp_path / "dataset.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "prompt": "p",
+                "task": "general",
+                "expected": "e",
+                "edge_answer": "a",
+                "cloud_answer": "c",
+                "max_tokens": 0,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        load_dataset(path)
 
 
 def test_dataset_dataclass_defaults_match_the_jsonl_contract() -> None:

@@ -662,6 +662,7 @@ class TransformersBackend:
         device: str = "auto",
         dtype: str = "bfloat16",
         shadow_ckpt: str | None = None,
+        shadow_model_path: str | None = None,
         system_prompt: str = "",
         max_context_tokens: int = 2048,
         model_id: str | None = None,
@@ -671,6 +672,11 @@ class TransformersBackend:
         self.device = device
         self.dtype = dtype
         self.shadow_ckpt = os.path.expanduser(shadow_ckpt) if shadow_ckpt else None
+        self.shadow_model_path = (
+            os.path.expanduser(shadow_model_path) if shadow_model_path else None
+        )
+        if self.shadow_model_path and not self.shadow_ckpt:
+            raise ValueError("shadow_model_path 需要同时提供 shadow_ckpt")
         self.system_prompt = system_prompt
         self.max_context_tokens = max_context_tokens
         self.model_id = model_id or (self.shadow_ckpt or self.model_path)
@@ -706,11 +712,24 @@ class TransformersBackend:
         except TypeError:
             model = AutoModelForCausalLM.from_pretrained(self.model_path, torch_dtype=dtype)
         if self.shadow_ckpt:
-            from shadow_peft import ShadowPeftModel
-            from shadow_peft.task_models import ShadowForCausalLM
+            from shadow_peft import (
+                AutoModelForCausalLMWithHiddenProjection,
+                ShadowForCausalLM,
+            )
 
-            model = ShadowPeftModel.from_pretrained(model, self.shadow_ckpt)
-            model = ShadowForCausalLM(model, inference_mode="base_shadow")
+            shadow_model = None
+            if self.shadow_model_path:
+                # Cross-architecture shadow (e.g. Qwen3-0.6B shadow for a 4B base)
+                # is loaded explicitly; the checkpoint carries the projection.
+                shadow_model = AutoModelForCausalLMWithHiddenProjection.from_pretrained(
+                    self.shadow_model_path
+                )
+            model = ShadowForCausalLM.from_pretrained(
+                model,
+                self.shadow_ckpt,
+                shadow_model=shadow_model,
+                inference_mode="base_shadow",
+            )
             self._shadow = True
         model.eval().to(device)
         self._tokenizer = tokenizer
@@ -1018,6 +1037,7 @@ def build_backend(spec: dict[str, Any]) -> Backend:
             device=str(spec.get("device", "auto")),
             dtype=str(spec.get("dtype", "bfloat16")),
             shadow_ckpt=spec.get("shadow_ckpt"),
+            shadow_model_path=spec.get("shadow_model_path"),
             system_prompt=str(spec.get("system_prompt", "")),
             max_context_tokens=int(spec.get("max_context_tokens", 2048)),
             model_id=spec.get("model_id"),

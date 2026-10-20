@@ -469,3 +469,24 @@ def test_build_backend_reads_enable_thinking() -> None:
     )
     assert isinstance(backend, TransformersBackend)
     assert backend.enable_thinking is False
+
+
+def test_transformers_backend_requires_shadow_ckpt_for_a_shadow_model() -> None:
+    with pytest.raises(ValueError):
+        TransformersBackend("unused", shadow_model_path="/tmp/shadow")
+
+
+def test_build_backend_reads_shadow_model_path() -> None:
+    from edge_cloud.backends import build_backend
+
+    backend = build_backend(
+        {
+            "kind": "transformers",
+            "model_path": "/tmp/base",
+            "shadow_ckpt": "/tmp/ckpt",
+            "shadow_model_path": "/tmp/shadow",
+        }
+    )
+    assert isinstance(backend, TransformersBackend)
+    assert backend.shadow_ckpt == "/tmp/ckpt"
+    assert backend.shadow_model_path == "/tmp/shadow"

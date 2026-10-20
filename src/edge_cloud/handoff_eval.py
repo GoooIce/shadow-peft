@@ -161,6 +161,7 @@ class EvalSample:
     risk_at: int | None = None
     edge_quality: float | None = None
     shadow_gap: float | None = None
+    max_tokens: int = 256
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -296,6 +297,9 @@ def load_dataset(path: str | Path) -> list[EvalSample]:
             sample_id = row.get("sample_id", row.get("id"))
             if not isinstance(sample_id, str) or not sample_id:
                 sample_id = f"s{len(samples):04d}"
+            max_tokens = int(row.get("max_tokens", 256))
+            if not 1 <= max_tokens <= 4096:
+                raise ValueError(f"数据集第 {line_number} 行 max_tokens 必须在 [1, 4096] 内")
             samples.append(
                 EvalSample(
                     sample_id=sample_id,
@@ -310,6 +314,7 @@ def load_dataset(path: str | Path) -> list[EvalSample]:
                     risk_at=_optional_int(row.get("risk_at"), name="risk_at"),
                     edge_quality=_optional_float(row.get("edge_quality"), name="edge_quality"),
                     shadow_gap=_optional_float(row.get("shadow_gap"), name="shadow_gap"),
+                    max_tokens=max_tokens,
                 )
             )
     return samples
@@ -429,7 +434,9 @@ def _evaluate_sample(
     latency_model: LatencyModel,
 ) -> dict[str, Any]:
     backend = factory(sample)
-    request = InferRequest(prompt=sample.prompt, task=sample.task)
+    request = InferRequest(
+        prompt=sample.prompt, task=sample.task, max_tokens=sample.max_tokens
+    )
     streaming = isinstance(backend, StreamingBackend)
     recorder = _RecordingPolicy()
     probe_unavailable = False
@@ -1140,7 +1147,9 @@ def export_candidates(
             raise ValueError("导出候选需要支持 generate_until 的流式端侧后端")
         recorder = _RecordingPolicy()
         backend.generate_until(
-            InferRequest(prompt=sample.prompt, task=sample.task),
+            InferRequest(
+                prompt=sample.prompt, task=sample.task, max_tokens=sample.max_tokens
+            ),
             recorder,
             context={"task": sample.task},
         )
