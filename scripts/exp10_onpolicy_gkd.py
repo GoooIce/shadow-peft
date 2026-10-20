@@ -53,6 +53,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -208,7 +209,8 @@ def _add_trainer_compat(model: Any) -> None:
 
 
 def _token_ids(tokenizer: Any, encoded: Any) -> list[int]:
-    if isinstance(encoded, dict):
+    del tokenizer
+    if isinstance(encoded, Mapping):
         encoded = encoded["input_ids"]
     if hasattr(encoded, "tolist"):
         encoded = encoded.tolist()

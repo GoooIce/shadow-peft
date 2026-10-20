@@ -542,3 +542,11 @@ def test_cli_rejects_missing_required_arguments(cli_module):
             ["rollouts", "--out", "rollouts.jsonl", "--model", "m"]
         )
     assert excinfo.value.code == 2
+
+
+def test_cli_token_ids_accepts_batch_encoding_like_mappings(cli_module):
+    from collections import UserDict
+
+    assert cli_module._token_ids(None, UserDict({"input_ids": [1, 2, 3]})) == [1, 2, 3]
+    assert cli_module._token_ids(None, {"input_ids": [[4, 5, 6]]}) == [4, 5, 6]
+    assert cli_module._token_ids(None, [7, 8]) == [7, 8]
