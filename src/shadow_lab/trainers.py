@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 
 import torch
+import torch.nn.functional as F
 from transformers import Trainer
 from transformers.trainer_utils import EvalLoopOutput
 
@@ -201,6 +202,46 @@ def generate_from_shadow(model, **gen_kwargs) -> torch.Tensor:
         model.set_inference_mode(prev)
 
 
+def weighted_shifted_ce_loss(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    sample_weights,
+) -> torch.Tensor:
+    """Next-token CE averaged per sample, then weighted across the batch.
+
+    ``sample_weights`` is one non-negative weight per sample (``(batch,)``).
+    Each sample's CE is the mean over its non-``-100`` target tokens and the
+    batch loss is ``sum(w_i * CE_i) / sum(w_i)``. Uniform positive weights
+    reduce to :func:`shadow_lab.eval._shifted_ce_loss` bit for bit, so
+    all-ones weights reproduce the unweighted SFT baseline exactly.
+    """
+    weights = torch.as_tensor(sample_weights, dtype=logits.dtype, device=logits.device)
+    if weights.dim() == 0:
+        weights = weights.expand(labels.size(0))
+    if weights.dim() != 1 or weights.numel() != labels.size(0):
+        raise ValueError(
+            "sample_weights must be 1-D with one weight per sample "
+            f"(got shape {tuple(weights.shape)} for a batch of {labels.size(0)})."
+        )
+    if bool(torch.all(weights == 0)):
+        # Nothing contributes; keep the graph so backward yields zero grads.
+        return logits.sum() * 0.0
+    if bool(torch.all(weights == weights[0])):
+        return _shifted_ce_loss(logits, labels)
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = labels[..., 1:].contiguous()
+    per_token = F.cross_entropy(
+        shift_logits.view(-1, shift_logits.size(-1)),
+        shift_labels.view(-1),
+        ignore_index=-100,
+        reduction="none",
+    ).view(shift_labels.shape)
+    supervised = (shift_labels != -100).to(per_token.dtype)
+    token_counts = supervised.sum(dim=-1).clamp(min=1.0)
+    per_sample = (per_token * supervised).sum(dim=-1) / token_counts
+    return (weights * per_sample).sum() / weights.sum()
+
+
 # ---------------------------------------------------------------------------
 # Shadow-aware trainers
 # ---------------------------------------------------------------------------
@@ -249,6 +290,31 @@ class ShadowSFTTrainer(DifferentialLRMixin, DistillTeacherMixin, SFTTrainer):
             metrics[f"{metric_key_prefix}_shadow_loss"] = total_shadow_loss / (step + 1)
 
         return EvalLoopOutput(predictions=None, label_ids=None, metrics=metrics, num_samples=num_samples)
+
+
+class WeightedSFTTrainer(ShadowSFTTrainer):
+    """SFTTrainer that applies optional per-sample ``sample_weights``.
+
+    A batch may carry a ``sample_weights`` entry with one non-negative weight
+    per sample. When it does, ``compute_loss`` replaces the next-token CE with
+    :func:`weighted_shifted_ce_loss` (the weighted path trains the CE only; no
+    teacher-logit distillation is added); when it does not, the trainer behaves
+    exactly like :class:`ShadowSFTTrainer` (teacher injection included).
+
+    ``sample_weights`` are training-only: keep them out of evaluation batches,
+    which the inherited ``evaluation_loop`` forwards straight to the model.
+    """
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        sample_weights = inputs.pop("sample_weights", None)
+        if sample_weights is None:
+            return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
+        labels = inputs.pop("labels", None)
+        if labels is None:
+            raise ValueError("WeightedSFTTrainer requires `labels` when `sample_weights` is set.")
+        outputs = model(**inputs)
+        loss = weighted_shifted_ce_loss(outputs.logits, labels, sample_weights)
+        return (loss, outputs) if return_outputs else loss
 
 
 class MMLUTrainer(DifferentialLRMixin, DistillTeacherMixin, SFTTrainer):
