@@ -197,3 +197,76 @@ class FeedbackStore:
             "by_task": dict(task_counts),
             "hard_only": hard_only,
         }
+
+    def export_prompts(
+        self,
+        out_path: str | Path,
+        *,
+        hard_only: bool = True,
+        dedupe: bool = True,
+    ) -> dict[str, Any]:
+        """Export hard-case prompts (without answers) for on-policy rollouts.
+
+        Selection matches :meth:`export_sft`: with ``hard_only`` only records
+        whose stored ``is_hard_case`` flag is true are considered.
+
+        Deduplication is per prompt after ``strip()``. When ``dedupe`` is true
+        the **last** record for a prompt wins (same rule as ``export_sft``), and
+        each replaced record is counted in ``skipped_duplicate``. Blank prompts
+        are always skipped and counted in ``skipped_empty``. The output is a
+        JSONL file with a fixed field set and sorted keys, written to a
+        temporary file and atomically moved into place with ``os.replace``.
+        """
+        records = self.records()
+        selected = [record for record in records if record.get("is_hard_case") or not hard_only]
+
+        exported: list[dict[str, Any]] = []
+        positions: dict[str, int] = {}
+        skipped_empty = 0
+        skipped_duplicate = 0
+        for record in selected:
+            prompt = str(record.get("prompt", "")).strip()
+            if not prompt:
+                skipped_empty += 1
+                continue
+            item = {
+                "prompt": prompt,
+                "task": str(record.get("task", "general")),
+                "source": record.get("source"),
+                "confidence": record.get("confidence"),
+                "request_id": record.get("request_id"),
+                "escalation_reason": record.get("escalation_reason"),
+                "adapter_version": record.get("adapter_version"),
+                "is_hard_case": bool(record.get("is_hard_case", False)),
+                "accepted": bool(record.get("accepted", False)),
+                "corrected": bool(str(record.get("corrected_text", "")).strip()),
+            }
+            if not dedupe:
+                exported.append(item)
+                continue
+            if prompt in positions:
+                exported[positions[prompt]] = item
+                skipped_duplicate += 1
+            else:
+                positions[prompt] = len(exported)
+                exported.append(item)
+
+        output = Path(out_path).expanduser()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temp = output.with_suffix(output.suffix + ".tmp")
+        task_counts: Counter[str] = Counter()
+        with temp.open("w", encoding="utf-8") as handle:
+            for item in exported:
+                task_counts[item["task"]] += 1
+                handle.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
+        os.replace(temp, output)
+        return {
+            "path": str(output),
+            "records": len(records),
+            "selected": len(selected),
+            "exported": len(exported),
+            "skipped_empty": skipped_empty,
+            "skipped_duplicate": skipped_duplicate,
+            "by_task": dict(task_counts),
+            "hard_only": hard_only,
+        }
