@@ -7,7 +7,7 @@ canonical generation-based loop); the GSM8K trainer takes an
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 import torch
 from transformers import Trainer
@@ -37,6 +37,46 @@ from .eval import (
 # Trainer mixins
 # ---------------------------------------------------------------------------
 
+SHADOW_PARAM_PATTERNS = (
+    "shadow_model.",
+    "shadow_lm_head",
+    "shadow_adapter",
+    "shadow_proj",
+    "shadow_hidden_projection",
+    "shadow_classifier",
+    # The joint GKD loss mainly trains these two adapter groups.
+    "shadow_injection_model.",
+    "shadow_update_model.",
+)
+
+
+def _is_shadow_parameter(name: str) -> bool:
+    return any(pattern in name for pattern in SHADOW_PARAM_PATTERNS)
+
+
+def group_parameters_by_shadow(model) -> dict[str, list[torch.nn.Parameter]]:
+    """Split trainable parameters into base/shadow x decay/no-decay groups.
+
+    Shadow identification uses :data:`SHADOW_PARAM_PATTERNS`. Parameters that
+    do not require grad are skipped, mirroring optimizer construction. The
+    four lists feed the differential-LR optimizer groups (shadow parameters
+    get ``learning_rate * shadow_lr_multiplier``).
+    """
+    groups: dict[str, list[torch.nn.Parameter]] = {
+        "base_decay": [],
+        "base_nodecay": [],
+        "shadow_decay": [],
+        "shadow_nodecay": [],
+    }
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        prefix = "shadow" if _is_shadow_parameter(name) else "base"
+        suffix = "nodecay" if len(param.shape) == 1 or name.endswith(".bias") else "decay"
+        groups[f"{prefix}_{suffix}"].append(param)
+    return groups
+
+
 class DifferentialLRMixin:
     """
     Mixin that adds differential learning rate support for shadow parameters.
@@ -49,45 +89,17 @@ class DifferentialLRMixin:
         if self.optimizer is not None:
             return self.optimizer
 
-        # Identify shadow parameter patterns
-        shadow_param_patterns = [
-            'shadow_model.',
-            'shadow_lm_head',
-            'shadow_adapter',
-            'shadow_proj',
-            'shadow_hidden_projection',
-            'shadow_classifier',
-        ]
-
-        # Categorize parameters into 4 groups
-        base_decay = []
-        base_nodecay = []
-        shadow_decay = []
-        shadow_nodecay = []
+        groups = group_parameters_by_shadow(self.model)
+        base_decay = groups["base_decay"]
+        base_nodecay = groups["base_nodecay"]
+        shadow_decay = groups["shadow_decay"]
+        shadow_nodecay = groups["shadow_nodecay"]
 
         print(">>> model architecture:")
         print(self.model)
         for name, param in self.model.named_parameters():
-            if not param.requires_grad:
-                continue
-
-            # Check if this is a shadow parameter
-            is_shadow = any(pattern in name for pattern in shadow_param_patterns)
-
-            # Check if this parameter should have weight decay
-            no_decay = len(param.shape) == 1 or name.endswith(".bias")
-
-            if is_shadow:
+            if param.requires_grad and _is_shadow_parameter(name):
                 print(f">>> Shadow parameter: {name}")
-                if no_decay:
-                    shadow_nodecay.append(param)
-                else:
-                    shadow_decay.append(param)
-            else:
-                if no_decay:
-                    base_nodecay.append(param)
-                else:
-                    base_decay.append(param)
 
         base_lr = self.args.learning_rate
         shadow_lr = base_lr * shadow_lr_multiplier
@@ -1008,6 +1020,49 @@ def onpolicy_gkd_loss(
     return {"ce": ce, "kd": kd, "aux": aux, "total": total}
 
 
+def _model_vocab_size(model, role: str) -> int:
+    """Best-effort vocabulary size for a student/teacher model."""
+    config = getattr(model, "config", None)
+    vocab_size = getattr(config, "vocab_size", None)
+    if vocab_size is not None and int(vocab_size) > 0:
+        return int(vocab_size)
+    peft_model = getattr(model, "peft_model", None)
+    base_model = getattr(peft_model, "base_model", None)
+    for candidate in (model, peft_model, base_model):
+        if candidate is None:
+            continue
+        get_embeddings = getattr(candidate, "get_input_embeddings", None)
+        if callable(get_embeddings):
+            embeddings = get_embeddings()
+            weight = getattr(embeddings, "weight", None)
+            if weight is not None:
+                return int(weight.shape[0])
+        lm_head = getattr(candidate, "lm_head", None)
+        weight = getattr(lm_head, "weight", None)
+        if weight is not None:
+            return int(weight.shape[0])
+    raise ValueError(f"cannot determine the {role} vocabulary size")
+
+
+def validate_teacher_vocab(student, teacher) -> int:
+    """Require a shared tokenizer vocabulary before any distillation run.
+
+    This runs even when ``lambda_onpolicy=0`` (all-supervised batches): a
+    mismatched teacher is a configuration error, not something to discover
+    halfway through a run. Returns the shared size; raises ``ValueError``
+    naming both sizes otherwise.
+    """
+    student_vocab = _model_vocab_size(student, "student")
+    teacher_vocab = _model_vocab_size(teacher, "teacher")
+    if student_vocab != teacher_vocab:
+        raise ValueError(
+            f"teacher vocabulary {teacher_vocab} does not match student "
+            f"vocabulary {student_vocab}; on-policy KD needs a shared "
+            "tokenizer."
+        )
+    return student_vocab
+
+
 class OnPolicyGKDTrainer(ShadowSFTTrainer):
     """GKD-style flywheel trainer: supervised SFT plus on-policy distillation.
 
@@ -1057,6 +1112,11 @@ class OnPolicyGKDTrainer(ShadowSFTTrainer):
             raise ValueError(
                 f"teacher_temperature must be > 0, got {teacher_temperature}."
             )
+        model = kwargs.get("model")
+        if model is None and args:
+            model = args[0]
+        if model is not None and teacher_model is not None:
+            validate_teacher_vocab(model, teacher_model)
         self.lambda_onpolicy = float(lambda_onpolicy)
         self.divergence = divergence
         self.topk = topk
@@ -1128,3 +1188,42 @@ class OnPolicyGKDTrainer(ShadowSFTTrainer):
         if return_outputs:
             return loss, outputs
         return loss
+
+    @staticmethod
+    def _strip_source(loader):
+        """Yield batches without the training-only ``source`` column."""
+        for inputs in loader:
+            if isinstance(inputs, Mapping):
+                inputs = dict(inputs)
+                inputs.pop("source", None)
+            yield inputs
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        """Keep ``source`` away from the model during the HF eval path."""
+        inputs = dict(inputs)
+        inputs.pop("source", None)
+        return super().prediction_step(
+            model, inputs, prediction_loss_only, ignore_keys=ignore_keys
+        )
+
+    def evaluation_loop(
+        self,
+        dataloader,
+        description,
+        prediction_loss_only=None,
+        ignore_keys=None,
+        metric_key_prefix="eval",
+    ):
+        """Evaluate with the standard CE loss, never passing ``source`` down.
+
+        ``source`` selects the training loss branch; it is not a model input.
+        The inherited loop forwards every batch straight to the model, so the
+        loader is filtered here (and in :meth:`prediction_step`).
+        """
+        return super().evaluation_loop(
+            self._strip_source(dataloader),
+            description,
+            prediction_loss_only=prediction_loss_only,
+            ignore_keys=ignore_keys,
+            metric_key_prefix=metric_key_prefix,
+        )

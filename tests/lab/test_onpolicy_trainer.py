@@ -11,6 +11,8 @@ Tiny random Llama student/teacher, CPU, fixed seeds.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -19,7 +21,13 @@ pytest.importorskip("trl")  # shadow_lab.trainers imports TRL at module load.
 
 from transformers import LlamaConfig, LlamaForCausalLM  # noqa: E402
 
-from shadow_lab.trainers import OnPolicyGKDTrainer, onpolicy_gkd_loss  # noqa: E402
+from shadow_lab.onpolicy_eval import evaluate_ppl  # noqa: E402
+from shadow_lab.trainers import (  # noqa: E402
+    OnPolicyGKDTrainer,
+    group_parameters_by_shadow,
+    onpolicy_gkd_loss,
+    validate_teacher_vocab,
+)
 from shadow_peft import ShadowConfig, ShadowForCausalLM, get_shadow_model  # noqa: E402
 from shadow_peft.task_models import _shifted_ce_loss, _shifted_kd_loss  # noqa: E402
 
@@ -395,3 +403,137 @@ def test_compute_loss_vocab_mismatch_raises():
                 "source": "onpolicy",
             },
         )
+
+
+# ---------------------------------------------------------------------------
+# Teacher vocabulary, evaluation loop and LR grouping
+# ---------------------------------------------------------------------------
+
+
+def test_validate_teacher_vocab_reports_both_sizes():
+    student = _tiny_shadow_student(vocab_size=32)
+    teacher = _tiny_llama(vocab_size=40, seed=2)
+
+    with pytest.raises(
+        ValueError, match=r"teacher vocabulary 40.*student vocabulary 32"
+    ):
+        validate_teacher_vocab(student, teacher)
+
+
+def test_trainer_init_rejects_teacher_vocab_mismatch_even_at_lambda_zero():
+    student = _tiny_shadow_student(vocab_size=32)
+    teacher = _tiny_llama(vocab_size=40, seed=2)
+
+    with pytest.raises(
+        ValueError, match=r"teacher vocabulary 40.*student vocabulary 32"
+    ):
+        OnPolicyGKDTrainer(
+            model=student,
+            args=None,
+            teacher_model=teacher,
+            lambda_onpolicy=0.0,
+        )
+
+
+def test_evaluation_loop_strips_source_before_the_model_forward():
+    student = _tiny_shadow_student()
+    seen: list[dict] = []
+    original_forward = student.forward
+
+    def recording_forward(*args, **kwargs):
+        seen.append(dict(kwargs))
+        return original_forward(*args, **kwargs)
+
+    student.forward = recording_forward
+    trainer = object.__new__(OnPolicyGKDTrainer)
+    trainer.model = student
+    trainer.args = SimpleNamespace()
+    trainer._wrap_model = lambda model, training=False, dataloader=None: model
+    trainer._prepare_inputs = lambda inputs: inputs
+    input_ids, attention_mask, labels = _trainer_batch(batch=2, seq=8)
+
+    output = trainer.evaluation_loop(
+        [
+            {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": labels,
+                "source": ["supervised", "onpolicy"],
+            }
+        ],
+        "eval",
+    )
+
+    assert seen
+    assert all("source" not in kwargs for kwargs in seen)
+    assert output.metrics["eval_samples"] == 2
+    assert torch.isfinite(torch.tensor(output.metrics["eval_loss"]))
+
+
+def test_shadow_lr_grouping_includes_injection_and_update_modules():
+    student = _tiny_shadow_student()
+
+    groups = group_parameters_by_shadow(student)
+    names_by_id = {id(param): name for name, param in student.named_parameters()}
+    shadow_names = {
+        names_by_id[id(param)]
+        for key in ("shadow_decay", "shadow_nodecay")
+        for param in groups[key]
+    }
+    base_names = {
+        names_by_id[id(param)]
+        for key in ("base_decay", "base_nodecay")
+        for param in groups[key]
+    }
+
+    assert any(name.startswith("peft_model.shadow_injection_model.") for name in shadow_names)
+    assert any(name.startswith("peft_model.shadow_update_model.") for name in shadow_names)
+    assert not any(name.startswith("peft_model.base_model.") for name in shadow_names)
+    assert not any("shadow_" in name for name in base_names)
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint round-trip
+# ---------------------------------------------------------------------------
+
+
+class _StubTokenizer:
+    pad_token_id = 0
+    eos_token_id = None
+    chat_template = None
+
+    def __call__(self, text, add_special_tokens=True):  # noqa: ARG002
+        return {"input_ids": [3 + (ord(char) % 28) for char in text]}
+
+
+def test_checkpoint_roundtrip_preserves_joint_and_shadow_ppl(tmp_path):
+    student = _tiny_shadow_student()
+    input_ids, attention_mask, labels = _trainer_batch(batch=2, seq=8)
+    optimizer = torch.optim.SGD(
+        [param for param in student.parameters() if param.requires_grad], lr=1e-2
+    )
+    loss = student(
+        input_ids=input_ids, attention_mask=attention_mask, labels=labels
+    ).loss
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+
+    texts = ["the quick brown fox jumps over the lazy dog " * 2]
+    before = evaluate_ppl(
+        student, _StubTokenizer(), texts, seq_len=8, max_windows=2
+    )
+    adapter_dir = tmp_path / "adapter"
+    student.save_pretrained(adapter_dir)
+
+    torch.manual_seed(0)
+    reloaded = ShadowForCausalLM.from_pretrained(
+        _tiny_llama(vocab_size=32, seed=0), adapter_dir
+    )
+    after = evaluate_ppl(
+        reloaded, _StubTokenizer(), texts, seq_len=8, max_windows=2
+    )
+
+    assert after["joint_ppl"] == pytest.approx(before["joint_ppl"], rel=1e-10)
+    assert after["shadow_ppl"] == pytest.approx(before["shadow_ppl"], rel=1e-10)
+    assert after["tokens"] == before["tokens"]
