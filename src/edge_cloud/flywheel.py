@@ -8,16 +8,37 @@ it can be a ShadowPEFT run, LoRA, or a vendor distillation job.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import threading
 import time
 from collections import Counter
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from shadow_lab.restrain import build_self_train_row, cluster_answers, consistency
+
 from .protocol import FeedbackRequest
+
+
+def _accepts_token_budget(callback: Callable[..., Any]) -> bool:
+    """True when *callback* accepts a ``max_new_tokens`` keyword."""
+
+    try:
+        parameters = tuple(inspect.signature(callback).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters):
+        return True
+    return any(
+        param.name == "max_new_tokens"
+        and param.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        for param in parameters
+    )
 
 
 @dataclass(slots=True)
@@ -269,4 +290,175 @@ class FeedbackStore:
             "skipped_duplicate": skipped_duplicate,
             "by_task": dict(task_counts),
             "hard_only": hard_only,
+        }
+
+    @staticmethod
+    def _rollouts(
+        generate: Callable[[str, str], str],
+        prompt: str,
+        task: str,
+        n: int,
+        *,
+        max_new_tokens: int,
+    ) -> tuple[list[str], int]:
+        """Run *n* rollouts, dropping failed or blank answers.
+
+        Returns the usable answers and the number of failed calls. A single
+        failed rollout never aborts the export (User story 19). The token
+        budget is forwarded only to callbacks that declare it.
+        """
+
+        forward_budget = _accepts_token_budget(generate)
+        answers: list[str] = []
+        failures = 0
+        for _ in range(n):
+            try:
+                if forward_budget:
+                    answer = generate(prompt, task, max_new_tokens=max_new_tokens)
+                else:
+                    answer = generate(prompt, task)
+            except Exception:
+                failures += 1
+                continue
+            if not isinstance(answer, str) or not answer.strip():
+                failures += 1
+                continue
+            answers.append(answer)
+        return answers, failures
+
+    def export_self_train(
+        self,
+        out_path: str | Path,
+        *,
+        generate: Callable[[str, str], str],
+        n: int = 8,
+        tasks: Sequence[str] = ("quality_verdict", "process_calc"),
+        max_new_tokens: int = 512,
+        reference_generate: Callable[[str, str], str] | None = None,
+        kappa: int = 3,
+        sigma: float = 0.5,
+    ) -> dict[str, Any]:
+        """Export RESTRAIN-lite rows from hard-case prompts (issue #32).
+
+        ``generate(prompt, task)`` is called ``n`` times per prompt; the caller
+        owns sampling determinism. Failed or blank rollouts are counted in
+        ``rollout_failures`` and dropped without aborting the export. Answers
+        are clustered per task with ``shadow_lab.restrain``; prompts whose
+        answers do not cluster stably are counted in ``skipped_unclusterable``
+        and never written.
+
+        Only hard cases (``is_hard_case``) whose task is in ``tasks`` are
+        considered; other prompts are counted as ``skipped_unsupported`` (task)
+        or ``skipped_empty`` (blank prompt). Prompts are de-duplicated with the
+        last record per prompt winning, matching ``export_sft``.
+
+        When ``reference_generate`` is provided it is sampled ``n`` times with
+        the same contract; ``reference_counts`` is aligned to the exported
+        clusters and ``reference_consistency`` holds the reference answer
+        consistency. Without it both are empty/``None`` (no reference signal).
+        Failed reference rollouts are counted in ``rollout_failures`` too.
+
+        ``max_new_tokens`` is the rollout token budget: it is validated here and
+        forwarded to callbacks that declare a ``max_new_tokens`` keyword;
+        callbacks with the plain ``(prompt, task)`` contract own their decoding.
+        ``kappa`` and ``sigma`` follow ``build_self_train_row``. The JSONL is
+        written atomically with sorted keys and a stable field set.
+        """
+
+        if n < 1:
+            raise ValueError("n must be >= 1")
+        if max_new_tokens < 1:
+            raise ValueError("max_new_tokens must be >= 1")
+        allowed_tasks = (tasks,) if isinstance(tasks, str) else tuple(tasks)
+
+        records = self.records()
+        selected = [record for record in records if record.get("is_hard_case")]
+
+        deduped: dict[str, dict[str, Any]] = {}
+        skipped_empty = 0
+        for record in selected:
+            prompt = str(record.get("prompt", "")).strip()
+            if not prompt:
+                skipped_empty += 1
+                continue
+            deduped[prompt] = record
+
+        rows: list[dict[str, Any]] = []
+        task_counts: Counter[str] = Counter()
+        method_counts: Counter[str] = Counter()
+        skipped_unsupported = 0
+        skipped_unclusterable = 0
+        rollout_failures = 0
+
+        for prompt, record in deduped.items():
+            task = str(record.get("task", "general"))
+            if task not in allowed_tasks:
+                skipped_unsupported += 1
+                continue
+
+            answers, failures = self._rollouts(
+                generate, prompt, task, n, max_new_tokens=max_new_tokens
+            )
+            rollout_failures += failures
+            if cluster_answers(answers, task).unclusterable:
+                skipped_unclusterable += 1
+                continue
+
+            reference_counts: dict[str, int] | None = None
+            reference_consistency: float | None = None
+            if reference_generate is not None:
+                reference_answers, failures = self._rollouts(
+                    reference_generate,
+                    prompt,
+                    task,
+                    n,
+                    max_new_tokens=max_new_tokens,
+                )
+                rollout_failures += failures
+                reference = cluster_answers(reference_answers, task)
+                if reference.counts:
+                    reference_counts = dict(reference.counts)
+                    reference_consistency = consistency(reference.counts, sigma=sigma)
+
+            row = build_self_train_row(
+                prompt,
+                task,
+                answers,
+                reference_counts=reference_counts,
+                adapter_version=str(record.get("adapter_version") or ""),
+                sigma=sigma,
+                kappa=kappa,
+            )
+            if row is None:
+                skipped_unclusterable += 1
+                continue
+            if reference_counts is None:
+                row["reference_counts"] = []
+            row["reference_consistency"] = reference_consistency
+            rows.append(row)
+            task_counts[task] += 1
+            method_counts[str(row["cluster_method"])] += 1
+
+        output = Path(out_path).expanduser()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temp = output.with_suffix(output.suffix + ".tmp")
+        try:
+            with temp.open("w", encoding="utf-8") as handle:
+                for row in rows:
+                    handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+            os.replace(temp, output)
+        finally:
+            temp.unlink(missing_ok=True)
+
+        return {
+            "path": str(output),
+            "records": len(records),
+            "selected": len(selected),
+            "exported": len(rows),
+            "skipped_empty": skipped_empty,
+            "skipped_unsupported": skipped_unsupported,
+            "skipped_unclusterable": skipped_unclusterable,
+            "rollout_failures": rollout_failures,
+            "by_task": dict(task_counts),
+            "cluster_methods": dict(method_counts),
         }
