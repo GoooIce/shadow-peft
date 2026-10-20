@@ -665,6 +665,7 @@ class TransformersBackend:
         system_prompt: str = "",
         max_context_tokens: int = 2048,
         model_id: str | None = None,
+        enable_thinking: bool | None = None,
     ) -> None:
         self.model_path = os.path.expanduser(model_path)
         self.device = device
@@ -673,6 +674,9 @@ class TransformersBackend:
         self.system_prompt = system_prompt
         self.max_context_tokens = max_context_tokens
         self.model_id = model_id or (self.shadow_ckpt or self.model_path)
+        # Qwen3-style chat templates expose this flag; leave it unset for
+        # tokenizers whose template does not understand it.
+        self.enable_thinking = enable_thinking
         self._model: Any = None
         self._tokenizer: Any = None
         self._torch: Any = None
@@ -719,9 +723,18 @@ class TransformersBackend:
             messages.append({"role": "system", "content": self.system_prompt})
         messages.append({"role": "user", "content": prompt})
         if getattr(tokenizer, "chat_template", None):
-            return tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
+            kwargs: dict[str, Any] = {}
+            if self.enable_thinking is not None:
+                kwargs["enable_thinking"] = self.enable_thinking
+            try:
+                return tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True, **kwargs
+                )
+            except TypeError:
+                # A template that rejects unknown kwargs still gets the prompt.
+                return tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
         return prompt
 
     def generate(self, request: InferRequest, *, draft: str | None = None) -> Generation:
@@ -1008,5 +1021,6 @@ def build_backend(spec: dict[str, Any]) -> Backend:
             system_prompt=str(spec.get("system_prompt", "")),
             max_context_tokens=int(spec.get("max_context_tokens", 2048)),
             model_id=spec.get("model_id"),
+            enable_thinking=spec.get("enable_thinking"),
         )
     raise ValueError(f"未知后端类型: {kind!r}")

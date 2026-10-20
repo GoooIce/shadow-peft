@@ -410,3 +410,62 @@ def test_decode_until_ignores_a_malformed_deadline_context() -> None:
 
     assert outcome.text == "a"
     assert outcome.handoff is None
+
+
+class _FakeChatTokenizer:
+    chat_template = "fake-template"
+
+    def __init__(self, *, reject_kwargs: bool = False) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.reject_kwargs = reject_kwargs
+
+    def apply_chat_template(
+        self,
+        messages,
+        *,
+        tokenize: bool,
+        add_generation_prompt: bool,
+        **kwargs,
+    ) -> str:
+        del messages, tokenize, add_generation_prompt
+        if self.reject_kwargs and kwargs:
+            raise TypeError("template does not accept extra kwargs")
+        self.calls.append(dict(kwargs))
+        return "formatted"
+
+
+def test_transformers_backend_passes_enable_thinking_to_chat_template() -> None:
+    backend = TransformersBackend("unused", enable_thinking=False)
+    tokenizer = _FakeChatTokenizer()
+    backend._tokenizer = tokenizer
+
+    assert backend._format_prompt("hello") == "formatted"
+    assert tokenizer.calls == [{"enable_thinking": False}]
+
+
+def test_transformers_backend_omits_enable_thinking_by_default() -> None:
+    backend = TransformersBackend("unused")
+    tokenizer = _FakeChatTokenizer()
+    backend._tokenizer = tokenizer
+
+    assert backend._format_prompt("hello") == "formatted"
+    assert tokenizer.calls == [{}]
+
+
+def test_transformers_backend_retries_without_rejected_chat_kwargs() -> None:
+    backend = TransformersBackend("unused", enable_thinking=True)
+    tokenizer = _FakeChatTokenizer(reject_kwargs=True)
+    backend._tokenizer = tokenizer
+
+    assert backend._format_prompt("hello") == "formatted"
+    assert tokenizer.calls == [{}]
+
+
+def test_build_backend_reads_enable_thinking() -> None:
+    from edge_cloud.backends import build_backend
+
+    backend = build_backend(
+        {"kind": "transformers", "model_path": "/tmp/unused", "enable_thinking": False}
+    )
+    assert isinstance(backend, TransformersBackend)
+    assert backend.enable_thinking is False
