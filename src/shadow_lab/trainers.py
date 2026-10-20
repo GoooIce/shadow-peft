@@ -7,11 +7,13 @@ canonical generation-based loop); the GSM8K trainer takes an
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import torch
 from transformers import Trainer
 from transformers.trainer_utils import EvalLoopOutput
+
+from shadow_peft.task_models import _shifted_kd_loss
 
 try:
     from trl import SFTTrainer
@@ -829,3 +831,300 @@ class SquadV2Trainer(DifferentialLRMixin, DistillTeacherMixin, SFTTrainer):
             metrics=metrics,
             num_samples=num_samples,
         )
+
+
+# ---------------------------------------------------------------------------
+# On-policy GKD flywheel
+# ---------------------------------------------------------------------------
+
+def _onpolicy_mask(
+    source: str | Sequence[str] | torch.Tensor | None,
+    batch_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Normalize a batch's ``source`` column to a boolean on-policy mask.
+
+    ``source`` is normally one string per row (``"supervised"`` or
+    ``"onpolicy"``); a single string broadcasts, a tensor may be a boolean
+    mask or 0/1 integers, and ``None`` treats every row as supervised.
+    """
+    if source is None:
+        return torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+    if isinstance(source, str):
+        values = [source] * batch_size
+    elif torch.is_tensor(source):
+        if source.dim() != 1 or source.numel() != batch_size:
+            raise ValueError(
+                f"source tensor must be 1-D with {batch_size} entries, "
+                f"got shape {tuple(source.shape)}."
+            )
+        if source.dtype == torch.bool:
+            return source.to(device)
+        ints = source.to(device="cpu", dtype=torch.long).tolist()
+        if any(value not in (0, 1) for value in ints):
+            raise ValueError(
+                "source tensor must be boolean or 0/1 integers "
+                "(0=supervised, 1=onpolicy)."
+            )
+        return torch.tensor([bool(value) for value in ints], dtype=torch.bool, device=device)
+    else:
+        values = list(source)
+
+    if len(values) != batch_size:
+        raise ValueError(f"source must have {batch_size} entries, got {len(values)}.")
+    mask = []
+    for value in values:
+        if value == "supervised":
+            mask.append(False)
+        elif value == "onpolicy":
+            mask.append(True)
+        else:
+            raise ValueError(
+                f"Unknown source {value!r}; expected 'supervised' or 'onpolicy'."
+            )
+    return torch.tensor(mask, dtype=torch.bool, device=device)
+
+
+def onpolicy_gkd_loss(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor | None,
+    shadow_logits: torch.Tensor | None,
+    labels: torch.Tensor,
+    *,
+    source: str | Sequence[str] | torch.Tensor | None = None,
+    lambda_onpolicy: float = 0.5,
+    divergence: str = "forward_kl",
+    topk: int | None = None,
+    shadow_aux_weight: float = 0.0,
+    temperature: float = 1.0,
+) -> dict[str, torch.Tensor]:
+    """Compose one on-policy GKD batch into its loss terms.
+
+    ``total = (1 - lambda) * CE_supervised + lambda * KD_onpolicy
+    + shadow_aux_weight * CE_shadow``
+
+    - ``source`` splits the rows into ``"supervised"`` and ``"onpolicy"``.
+      Supervised rows contribute a shifted CE on the joint ``base_shadow``
+      logits; on-policy rows contribute ``_shifted_kd_loss`` against the
+      teacher's logits. The two row sets never share a term.
+    - The auxiliary term is the shadow-only shifted CE (chosen over a KL so
+      it keeps the same target semantics as the supervised CE). It is off by
+      default (weight 0) and skipped when ``shadow_logits`` is missing.
+    - The teacher is only required when ``lambda_onpolicy > 0`` and the batch
+      contains on-policy rows. ``teacher_logits`` may cover the whole batch
+      or only the on-policy rows.
+    - Vocabulary mismatches surface from ``_shifted_kd_loss`` with both
+      vocabulary sizes.
+
+    The model's own ``outputs.loss`` is deliberately not used here: it
+    stacks ``shadow_loss_weight`` and ``distill_weight``, which would
+    double-count the shadow and teacher terms composed explicitly below.
+
+    Returns ``{"ce", "kd", "aux", "total"}``; terms that do not participate
+    are zero scalars.
+    """
+    if student_logits.dim() != 3:
+        raise ValueError(
+            f"student_logits must be [batch, seq, vocab], got {tuple(student_logits.shape)}."
+        )
+    if labels.shape != student_logits.shape[:2]:
+        raise ValueError(
+            f"labels shape {tuple(labels.shape)} must match student_logits "
+            f"batch/seq {tuple(student_logits.shape[:2])}."
+        )
+    if not 0.0 <= lambda_onpolicy <= 1.0:
+        raise ValueError(f"lambda_onpolicy must be in [0, 1], got {lambda_onpolicy}.")
+    if shadow_aux_weight < 0:
+        raise ValueError(f"shadow_aux_weight must be >= 0, got {shadow_aux_weight}.")
+    if temperature <= 0:
+        raise ValueError(f"temperature must be > 0, got {temperature}.")
+    if teacher_logits is not None and (
+        teacher_logits.dim() != 3 or teacher_logits.size(1) != student_logits.size(1)
+    ):
+        raise ValueError(
+            "teacher_logits must be [rows, seq, vocab] with the student's "
+            f"sequence length, got {tuple(teacher_logits.shape)}."
+        )
+    if shadow_logits is not None and shadow_logits.shape != student_logits.shape:
+        raise ValueError(
+            f"shadow_logits shape {tuple(shadow_logits.shape)} must match "
+            f"student_logits {tuple(student_logits.shape)}."
+        )
+
+    batch_size = labels.size(0)
+    onpolicy = _onpolicy_mask(source, batch_size, labels.device)
+    supervised = ~onpolicy
+
+    zero = student_logits.new_zeros(())
+    ce = zero
+    kd = zero
+    aux = zero
+    total = zero
+    has_term = False
+
+    if lambda_onpolicy < 1.0 and bool(supervised.any()):
+        ce = _shifted_ce_loss(student_logits[supervised], labels[supervised])
+        total = total + (1.0 - lambda_onpolicy) * ce
+        has_term = True
+
+    if lambda_onpolicy > 0.0 and bool(onpolicy.any()):
+        if teacher_logits is None:
+            raise ValueError(
+                "Batch has on-policy rows but teacher_logits is None while "
+                "lambda_onpolicy > 0."
+            )
+        if teacher_logits.size(0) == batch_size:
+            teacher_for_kd = teacher_logits[onpolicy]
+        elif teacher_logits.size(0) == int(onpolicy.sum()):
+            teacher_for_kd = teacher_logits
+        else:
+            raise ValueError(
+                "teacher_logits must have one row per batch element or per "
+                f"on-policy element; got {teacher_logits.size(0)} rows for "
+                f"{batch_size} rows ({int(onpolicy.sum())} on-policy)."
+            )
+        kd = _shifted_kd_loss(
+            student_logits[onpolicy],
+            teacher_for_kd,
+            labels[onpolicy],
+            temperature,
+            divergence=divergence,
+            topk=topk,
+        )
+        total = total + lambda_onpolicy * kd
+        has_term = True
+
+    if shadow_aux_weight > 0.0 and shadow_logits is not None:
+        aux = _shifted_ce_loss(shadow_logits, labels)
+        total = total + shadow_aux_weight * aux
+        has_term = True
+
+    if not has_term:
+        # Keep the zero loss connected to the student so an all-on-policy
+        # batch with lambda=0 (or an empty branch) stays backprop-safe.
+        total = student_logits.sum() * 0.0
+
+    return {"ce": ce, "kd": kd, "aux": aux, "total": total}
+
+
+class OnPolicyGKDTrainer(ShadowSFTTrainer):
+    """GKD-style flywheel trainer: supervised SFT plus on-policy distillation.
+
+    Each batch carries a ``source`` column (``"supervised"`` / ``"onpolicy"``);
+    the trainer splits the rows and composes::
+
+        loss = (1 - lambda_onpolicy) * CE_supervised
+             + lambda_onpolicy * KD_onpolicy
+             + shadow_aux_weight * CE_shadow
+
+    Supervised rows use a shifted CE on the joint ``base_shadow`` logits.
+    On-policy rows run the frozen teacher over the same tokens under
+    ``torch.no_grad()`` and distill with ``_shifted_kd_loss`` (temperature,
+    divergence and top-k configurable). ``shadow_logits`` gets an optional
+    shadow-only shifted CE; the default weight 0 leaves the auxiliary path
+    out of the objective. Only positions with ``labels != -100`` contribute.
+    Teacher vocabulary mismatches raise from ``_shifted_kd_loss``.
+
+    The model's own ``outputs.loss`` is not used: it already stacks the
+    model-level ``shadow_loss_weight`` / ``distill_weight``, which would
+    double-count terms this trainer composes explicitly.
+
+    Constructor knobs mirror the spec: ``lambda_onpolicy=0.5``,
+    ``divergence="forward_kl"``, ``topk=None``, ``shadow_aux_weight=0.0``,
+    ``teacher_temperature=1.0``; ``shadow_lr_multiplier`` and
+    ``teacher_model`` pass through to ``ShadowSFTTrainer``. The teacher is
+    frozen and put in eval mode.
+    """
+
+    def __init__(
+        self,
+        *args,
+        lambda_onpolicy: float = 0.5,
+        divergence: str = "forward_kl",
+        topk: int | None = None,
+        shadow_aux_weight: float = 0.0,
+        teacher_temperature: float = 1.0,
+        shadow_lr_multiplier: float = 1.0,
+        teacher_model=None,
+        **kwargs,
+    ):
+        if not 0.0 <= lambda_onpolicy <= 1.0:
+            raise ValueError(f"lambda_onpolicy must be in [0, 1], got {lambda_onpolicy}.")
+        if shadow_aux_weight < 0:
+            raise ValueError(f"shadow_aux_weight must be >= 0, got {shadow_aux_weight}.")
+        if teacher_temperature <= 0:
+            raise ValueError(
+                f"teacher_temperature must be > 0, got {teacher_temperature}."
+            )
+        self.lambda_onpolicy = float(lambda_onpolicy)
+        self.divergence = divergence
+        self.topk = topk
+        self.shadow_aux_weight = float(shadow_aux_weight)
+        self.teacher_temperature = float(teacher_temperature)
+        if teacher_model is not None:
+            teacher_model.requires_grad_(False)
+            teacher_model.eval()
+        super().__init__(
+            *args,
+            shadow_lr_multiplier=shadow_lr_multiplier,
+            teacher_model=teacher_model,
+            **kwargs,
+        )
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        source = inputs.pop("source", None)
+        labels = inputs.get("labels")
+        if labels is None:
+            raise ValueError(
+                "OnPolicyGKDTrainer.compute_loss requires `labels` in the batch."
+            )
+        model_inputs = {key: value for key, value in inputs.items() if key != "labels"}
+        outputs = model(**model_inputs)
+
+        teacher_logits = None
+        onpolicy = _onpolicy_mask(source, labels.size(0), labels.device)
+        if self.lambda_onpolicy > 0.0 and bool(onpolicy.any()):
+            teacher = getattr(self, "teacher_model", None)
+            if teacher is None:
+                raise ValueError(
+                    "OnPolicyGKDTrainer got on-policy rows but teacher_model is "
+                    "None while lambda_onpolicy > 0."
+                )
+            device = labels.device
+            if next(teacher.parameters()).device != device:
+                teacher.to(device)
+            teacher_inputs = {}
+            for key in ("input_ids", "attention_mask", "position_ids"):
+                value = model_inputs.get(key)
+                if value is None:
+                    continue
+                if (
+                    torch.is_tensor(value)
+                    and value.dim() > 0
+                    and value.size(0) == labels.size(0)
+                ):
+                    value = value[onpolicy]
+                teacher_inputs[key] = value
+            with torch.no_grad():
+                teacher_outputs = teacher(**teacher_inputs)
+            teacher_logits = getattr(teacher_outputs, "logits", None)
+            if teacher_logits is None:
+                raise TypeError("Teacher forward returned no `logits`.")
+
+        losses = onpolicy_gkd_loss(
+            outputs.logits,
+            teacher_logits,
+            getattr(outputs, "shadow_logits", None),
+            labels,
+            source=source,
+            lambda_onpolicy=self.lambda_onpolicy,
+            divergence=self.divergence,
+            topk=self.topk,
+            shadow_aux_weight=self.shadow_aux_weight,
+            temperature=self.teacher_temperature,
+        )
+        loss = losses["total"]
+        if return_outputs:
+            return loss, outputs
+        return loss
