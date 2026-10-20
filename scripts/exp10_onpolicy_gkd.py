@@ -42,7 +42,9 @@ Prompt/file formats:
 ``shadow_only`` is the explicit ablation. ``eval`` always reports both paths,
 bootstrap intervals (``--ci-n-boot``/``--ci-seed``) and marks ``no_go`` when
 the baseline guard fails. ``train``/``run`` accept ``--token-budget`` (counts
-only the loss-participating branch, so λ=0 and λ=1 can share one budget) and
+only the loss-participating branch, so λ=0 and λ=1 can share one budget; at
+0<λ<1 it keeps at least one row from each branch and alternates, flagging
+``token_budget_overflow`` if those guaranteed rows exceed the budget) and
 length-bucket rows by default (``--no-sort-by-length`` disables it).
 
 Heavy imports (torch/transformers/trl/datasets) are lazy so ``--help`` stays
@@ -407,11 +409,12 @@ def cmd_train(args: argparse.Namespace) -> dict[str, Any]:
         # the selected rows below without changing the budget accounting.
         sort_by_length=False,
     )
-    records = truncate_training_rows_by_token_budget(
+    selection = truncate_training_rows_by_token_budget(
         dataset.to_list(),
         args.lambda_onpolicy,
         getattr(args, "token_budget", None),
     )
+    records = list(selection)
     if getattr(args, "sort_by_length", True):
         records = [
             row
@@ -477,6 +480,7 @@ def cmd_train(args: argparse.Namespace) -> dict[str, Any]:
         "tokens_supervised": token_counts["tokens_supervised"],
         "tokens_onpolicy": token_counts["tokens_onpolicy"],
         "token_budget": getattr(args, "token_budget", None),
+        "token_budget_overflow": bool(selection.overflow),
         "sort_by_length": bool(getattr(args, "sort_by_length", True)),
         "wall_clock": wall_clock,
         "lambda": args.lambda_onpolicy,
@@ -561,6 +565,7 @@ def cmd_eval(args: argparse.Namespace) -> dict[str, Any]:
         tokens_supervised=getattr(args, "tokens_supervised", None),
         tokens_onpolicy=getattr(args, "tokens_onpolicy", None),
         token_budget=getattr(args, "token_budget", None),
+        token_budget_overflow=bool(getattr(args, "token_budget_overflow", False)),
         wall_clock=wall_clock,
         discard_rate=args.discard_rate,
         prompts=fingerprint_prompts,
@@ -607,6 +612,7 @@ def cmd_run(args: argparse.Namespace) -> dict[str, Any]:
     eval_args.tokens_supervised = train_summary["tokens_supervised"]
     eval_args.tokens_onpolicy = train_summary["tokens_onpolicy"]
     eval_args.token_budget = train_summary["token_budget"]
+    eval_args.token_budget_overflow = train_summary["token_budget_overflow"]
     eval_args.discard_rate = train_args.discard_rate
     eval_args.teacher_support = "topk" if args.topk else "full"
     eval_args.wall_clock_base = (
@@ -625,6 +631,7 @@ def cmd_run(args: argparse.Namespace) -> dict[str, Any]:
         "tokens_supervised": train_summary["tokens_supervised"],
         "tokens_onpolicy": train_summary["tokens_onpolicy"],
         "token_budget": train_summary["token_budget"],
+        "token_budget_overflow": train_summary["token_budget_overflow"],
         "report": str(report_out),
         "no_go": report["no_go"],
         "claims_gain": report["claims_gain"],
@@ -764,7 +771,8 @@ def _add_train_args(
         default=None,
         help=(
             "cap on loss-participating tokens (whole rows, active branch only); "
-            "use the same value for the λ=0 SFT baseline"
+            "mixed λ keeps one row per branch and may record "
+            "token_budget_overflow; use the same value for the λ=0 SFT baseline"
         ),
     )
     _add(
@@ -829,6 +837,15 @@ def _add_eval_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         help="training token budget recorded in the report",
+    )
+    _add(
+        parser,
+        "--token-budget-overflow",
+        action="store_true",
+        help=(
+            "record that the mixed-branch budget kept one row per branch and "
+            "tokens_seen exceeded token_budget"
+        ),
     )
     _add(parser, "--ci-n-boot", type=int, default=200)
     _add(parser, "--ci-seed", type=int, default=0)
