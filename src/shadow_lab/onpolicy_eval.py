@@ -71,6 +71,7 @@ REPORT_FIELDS = (
     "tokens_supervised",
     "tokens_onpolicy",
     "token_budget",
+    "token_budget_overflow",
     "ci_n_boot",
     "ci_seed",
 )
@@ -764,18 +765,55 @@ def count_training_tokens(
     }
 
 
+class TrainingRowSelection(list):
+    """Rows chosen by the token budget plus its accounting.
+
+    Behaves like a list for callers. ``tokens_used`` is the number of active
+    branch loss tokens in the selection, ``token_budget`` the requested cap
+    (``None`` when uncapped) and ``overflow`` is true when the select-one-row-
+    per-branch guarantee pushes the selection past the cap.
+    """
+
+    def __init__(
+        self,
+        rows=(),
+        *,
+        tokens_used: int = 0,
+        token_budget: int | None = None,
+        overflow: bool = False,
+    ) -> None:
+        super().__init__(rows)
+        self.tokens_used = int(tokens_used)
+        self.token_budget = None if token_budget is None else int(token_budget)
+        self.overflow = bool(overflow)
+
+
 def truncate_training_rows_by_token_budget(
     rows: Iterable[Mapping[str, Any]],
     lambda_onpolicy: float,
     token_budget: int | None,
-) -> list[Mapping[str, Any]]:
+) -> TrainingRowSelection:
     """Keep whole rows until the loss-token budget is exhausted.
 
     Only the active branch counts (see :func:`count_training_tokens`), so a
     λ=0 SFT baseline and a λ=1 on-policy run can be compared on the same
-    number of loss tokens. Rows are considered in input order; the first row
-    is always kept even when it alone exceeds the budget, later rows are
-    dropped once adding one would overshoot. ``None`` keeps every active row.
+    number of loss tokens.
+
+    Selection rules:
+
+    - Single active branch (λ=0/1, or only one source present): rows are
+      taken in source order until the next row would overshoot. The first row
+      is always kept.
+    - Both branches active (0 < λ < 1 with supervised and on-policy rows):
+      the first row of each branch is always kept (so mixed training cannot
+      silently degrade into one branch), then rows alternate
+      supervised/on-policy while they fit. If the two guaranteed rows alone
+      exceed the budget, the selection overflows and ``overflow`` is true.
+    - ``token_budget=None`` keeps every active row.
+
+    Returns a :class:`TrainingRowSelection`; ``tokens_used`` is the sum of the
+    selected rows' active-branch labels and ``overflow`` documents a budget
+    overshoot (only possible while honoring the one-row-per-branch guarantee).
     """
     if token_budget is not None and int(token_budget) < 1:
         raise ValueError(f"token_budget must be >= 1 or None, got {token_budget!r}")
@@ -783,6 +821,11 @@ def truncate_training_rows_by_token_budget(
         raise ValueError(
             f"lambda_onpolicy must be in [0, 1], got {lambda_onpolicy!r}"
         )
+
+    active_by_source: dict[str, list[tuple[Mapping[str, Any], int]]] = {
+        "supervised": [],
+        "onpolicy": [],
+    }
     active: list[tuple[Mapping[str, Any], int]] = []
     for index, row in enumerate(rows):
         supervised, onpolicy = _active_branches(row, index)
@@ -795,26 +838,86 @@ def truncate_training_rows_by_token_budget(
         count = _loss_tokens(row, index)
         if count > 0:
             active.append((row, count))
+            active_by_source["supervised" if supervised else "onpolicy"].append(
+                (row, count)
+            )
+
     if not active:
         raise ValueError(
             "no training rows carry loss tokens for the active branch at "
             f"lambda_onpolicy={lambda_onpolicy}"
         )
     if token_budget is None:
-        return [row for row, _count in active]
+        return TrainingRowSelection(
+            [row for row, _count in active],
+            tokens_used=sum(count for _row, count in active),
+            token_budget=None,
+            overflow=False,
+        )
 
-    selected: list[Mapping[str, Any]] = []
-    used = 0
-    for row, count in active:
-        if not selected:
+    budget = int(token_budget)
+    both_branches = (
+        0.0 < float(lambda_onpolicy) < 1.0
+        and bool(active_by_source["supervised"])
+        and bool(active_by_source["onpolicy"])
+    )
+    if not both_branches:
+        single = active_by_source["supervised"] or active_by_source["onpolicy"]
+        selected: list[Mapping[str, Any]] = []
+        used = 0
+        for row, count in single:
+            if not selected:
+                selected.append(row)
+                used = count
+                continue
+            if used + count > budget:
+                break
             selected.append(row)
-            used = count
-            continue
-        if used + count > int(token_budget):
-            break
+            used += count
+        return TrainingRowSelection(
+            selected,
+            tokens_used=used,
+            token_budget=budget,
+            overflow=used > budget,
+        )
+
+    selected = []
+    used = 0
+    indexes = {}
+    for branch in ("supervised", "onpolicy"):
+        row, count = active_by_source[branch][0]
         selected.append(row)
         used += count
-    return selected
+        indexes[branch] = 1
+
+    while True:
+        progressed = False
+        for branch in ("supervised", "onpolicy"):
+            queue = active_by_source[branch]
+            index = indexes[branch]
+            if index >= len(queue):
+                continue
+            progressed = True
+            row, count = queue[index]
+            if used + count > budget:
+                return TrainingRowSelection(
+                    selected,
+                    tokens_used=used,
+                    token_budget=budget,
+                    overflow=used > budget,
+                )
+            selected.append(row)
+            used += count
+            indexes[branch] = index + 1
+        if not progressed:
+            break
+
+    return TrainingRowSelection(
+        selected,
+        tokens_used=used,
+        token_budget=budget,
+        overflow=used > budget,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -899,6 +1002,7 @@ def build_report(
     tokens_supervised: int | None = None,
     tokens_onpolicy: int | None = None,
     token_budget: int | None = None,
+    token_budget_overflow: bool = False,
     joint_losses: Sequence[float] | None = None,
     shadow_losses: Sequence[float] | None = None,
     window_tokens: Sequence[int] | None = None,
@@ -927,6 +1031,8 @@ def build_report(
     task records leave ``task_accuracy_ci`` as ``None`` instead of inventing
     an interval. ``tokens_supervised``/``tokens_onpolicy`` are optional, but
     when both are given their sum must equal ``tokens_seen``.
+    ``token_budget_overflow`` records that a mixed-branch budget had to keep
+    one row per branch; ``tokens_seen`` may then exceed ``token_budget``.
     """
     joint = float(joint_ppl)
     shadow = float(shadow_ppl)
@@ -1071,6 +1177,7 @@ def build_report(
         ),
         "tokens_onpolicy": None if tokens_onpolicy is None else int(tokens_onpolicy),
         "token_budget": None if token_budget is None else int(token_budget),
+        "token_budget_overflow": bool(token_budget_overflow),
         "ci_n_boot": int(n_boot),
         "ci_seed": int(ci_seed),
     }

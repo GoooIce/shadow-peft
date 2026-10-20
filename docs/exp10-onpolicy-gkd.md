@@ -80,7 +80,7 @@ PYTHONPATH=src .venv/bin/python scripts/exp10_onpolicy_gkd.py run \
 
 ## 同 token 预算重跑（待重跑）
 
-`#23` 新增 `--token-budget`：按**实际参与 loss** 的 token 计数（λ=0 只算 supervised，λ=1 只算 onpolicy，0<λ<1 两者都算），保留完整行，累计到预算为止（至少一行）。λ=0 基线与 λ=1 应使用同一个 448 token 预算：
+`#23` 新增 `--token-budget`：按**实际参与 loss** 的 token 计数（λ=0 只算 supervised，λ=1 只算 onpolicy，0<λ<1 两者都算），保留完整行，累计到预算为止（至少一行）。0<λ<1 且两种 source 都存在时，选行按 supervised/onpolicy **交替（round-robin）**，并优先各保留一行，避免先出现的分支吃满预算；若这两行本身就超预算，允许略超并记录 `token_budget_overflow=true`。λ=0 基线与 λ=1 应使用同一个 448 token 预算：
 
 ```bash
 # λ=0 固定标签 SFT 基线，与 λ=1 的 448 loss-token 预算对齐
@@ -98,7 +98,7 @@ PYTHONPATH=src .venv/bin/python scripts/exp10_onpolicy_gkd.py run \
   --teacher-support full --teacher-version Qwen3-4B
 ```
 
-**本档案未执行该重跑**；下表中的 λ=0 数字仍是旧口径（1095 tokens，含未参与 loss 的分支），不能与 λ=1 的 448 直接比较。重跑后应同时更新 `tokens_seen`、`tokens_supervised`/`tokens_onpolicy`、`token_budget`、`joint_ppl_ci`/`shadow_ppl_ci`/`task_accuracy_ci` 与 `claims_gain`。
+**本档案未执行该重跑**；下表中的 λ=0 数字仍是旧口径（1095 tokens，含未参与 loss 的分支），不能与 λ=1 的 448 直接比较。重跑后应同时更新 `tokens_seen`、`tokens_supervised`/`tokens_onpolicy`、`token_budget`/`token_budget_overflow`、`joint_ppl_ci`/`shadow_ppl_ci`/`task_accuracy_ci` 与 `claims_gain`。
 
 ## 结果
 
@@ -148,7 +148,7 @@ PYTHONPATH=src .venv/bin/python scripts/exp10_onpolicy_gkd.py run \
 | shadow-only ppl −3% 且 joint 不退化 | **未验证（2 步 smoke 无信号）** | 三组 shadow ppl 相同且为 bf16/2 步分辨率；joint 未改善 |
 | 至少一个 λ/divergence 组合稳定优于 baseline | **未验证** | 只跑 JSD、2 步；bf16 下 2 步更新低于 1 ULP |
 | 训练产物能通过现有 adapter 加载/灰度 | **通过** | 三个 adapter 均保存且被 eval 重新加载 |
-| 报告字段/数据指纹可审计 | **通过** | `report.json` 含 joint/shadow ppl、λ、divergence、teacher_support、tokens_seen、discard_rate、data_fingerprint、baseline_sft、no_go；`#23` 新增 CI、token split、`claims_gain` 字段（本次 smoke 未重跑） |
+| 报告字段/数据指纹可审计 | **通过** | `report.json` 含 joint/shadow ppl、λ、divergence、teacher_support、tokens_seen、discard_rate、data_fingerprint、baseline_sft、no_go；`#23` 新增 CI、token split、`token_budget_overflow`、`claims_gain` 字段（本次 smoke 未重跑） |
 | bootstrap CI / no_go / claims_gain | **已实现，未在 smoke 产物上重跑** | `#23` 单元测试覆盖；档案数字仍是旧报告 |
 
 ## 已知限制

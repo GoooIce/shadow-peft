@@ -395,7 +395,11 @@ def test_truncate_training_rows_by_token_budget_keeps_at_least_one_row():
 
     selected = truncate_training_rows_by_token_budget(rows, 0.5, token_budget=1)
 
-    assert selected == rows[:1]
+    # Mixed training keeps one row per branch even at a tiny budget; the
+    # overshoot is explicit instead of silently dropping the second branch.
+    assert selected == rows[:2]
+    assert selected.tokens_used == 3
+    assert selected.overflow is True
 
 
 def test_truncate_training_rows_by_token_budget_none_keeps_all_active_rows():
@@ -403,6 +407,72 @@ def test_truncate_training_rows_by_token_budget_none_keeps_all_active_rows():
 
     assert truncate_training_rows_by_token_budget(rows, 0.5, token_budget=None) == rows
     assert truncate_training_rows_by_token_budget(rows, 1.0, token_budget=None) == [rows[1]]
+
+
+def _mixed_budget_rows():
+    rows = []
+    for index in range(4):
+        rows.append(
+            {
+                "id": f"sup{index}",
+                "source": "supervised",
+                "labels": [-100] + [1] * 100,
+            }
+        )
+    for index in range(4):
+        rows.append(
+            {
+                "id": f"onp{index}",
+                "source": "onpolicy",
+                "labels": [-100] + [2] * 100,
+            }
+        )
+    return rows
+
+
+def test_mixed_budget_keeps_both_branches_round_robin():
+    rows = _mixed_budget_rows()
+
+    selection = truncate_training_rows_by_token_budget(rows, 0.5, token_budget=300)
+
+    assert [row["id"] for row in selection] == ["sup0", "onp0", "sup1"]
+    assert count_training_tokens(selection, 0.5) == {
+        "tokens_supervised": 200,
+        "tokens_onpolicy": 100,
+        "tokens_seen": 300,
+    }
+    assert selection.tokens_used == 300
+    assert selection.token_budget == 300
+    assert selection.overflow is False
+    assert (
+        truncate_training_rows_by_token_budget(rows, 0.5, token_budget=300)
+        == selection
+    )
+
+
+def test_mixed_budget_keeps_one_row_per_branch_when_budget_is_tight():
+    rows = _mixed_budget_rows()
+
+    for budget in (50, 150):
+        selection = truncate_training_rows_by_token_budget(
+            rows, 0.5, token_budget=budget
+        )
+        assert [row["id"] for row in selection] == ["sup0", "onp0"]
+        assert count_training_tokens(selection, 0.5)["tokens_seen"] == 200
+        assert selection.tokens_used == 200
+        assert selection.overflow is True
+
+
+def test_single_branch_budget_keeps_the_source_order_prefix():
+    rows = _mixed_budget_rows()
+
+    supervised = truncate_training_rows_by_token_budget(rows, 0.0, token_budget=250)
+    onpolicy = truncate_training_rows_by_token_budget(rows, 1.0, token_budget=250)
+
+    assert [row["id"] for row in supervised] == ["sup0", "sup1"]
+    assert [row["id"] for row in onpolicy] == ["onp0", "onp1"]
+    assert supervised.overflow is False
+    assert onpolicy.overflow is False
 
 
 def test_task_outcomes_returns_only_gradable_verdicts():
@@ -502,6 +572,8 @@ def test_build_report_contains_every_core_field():
     assert report["task_accuracy"] == 0.75
     assert report["lambda"] == 0.5
     assert report["no_go"] is False
+    assert report["claims_gain"] is False
+    assert report["token_budget_overflow"] is False
     assert len(report["data_fingerprint"]) == 64
 
 
@@ -635,6 +707,7 @@ def test_build_report_adds_bootstrap_intervals_and_token_split():
         tokens_supervised=100,
         tokens_onpolicy=50,
         token_budget=148,
+        token_budget_overflow=True,
         joint_losses=[2.0, 2.1, 2.2, 2.3],
         shadow_losses=[1.9, 2.0, 2.1, 2.2],
         window_tokens=[8, 8, 8, 8],
@@ -649,6 +722,7 @@ def test_build_report_adds_bootstrap_intervals_and_token_split():
     assert report["tokens_supervised"] == 100
     assert report["tokens_onpolicy"] == 50
     assert report["token_budget"] == 148
+    assert report["token_budget_overflow"] is True
     assert report["ci_n_boot"] == 300
     assert report["ci_seed"] == 7
     for key in ("joint_ppl_ci", "shadow_ppl_ci", "task_accuracy_ci"):
@@ -888,6 +962,7 @@ def test_cli_parses_token_budget_length_sorting_and_ci_knobs(cli_module):
             "20",
             "--token-budget",
             "448",
+            "--token-budget-overflow",
         ]
     )
 
@@ -899,6 +974,7 @@ def test_cli_parses_token_budget_length_sorting_and_ci_knobs(cli_module):
     assert evaluation.tokens_supervised == 100
     assert evaluation.tokens_onpolicy == 20
     assert evaluation.token_budget == 448
+    assert evaluation.token_budget_overflow is True
 
 
 def test_cli_fill_task_responses_mutates_task_records(cli_module):
