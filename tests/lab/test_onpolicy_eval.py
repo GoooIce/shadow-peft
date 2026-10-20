@@ -550,3 +550,12 @@ def test_cli_token_ids_accepts_batch_encoding_like_mappings(cli_module):
     assert cli_module._token_ids(None, UserDict({"input_ids": [1, 2, 3]})) == [1, 2, 3]
     assert cli_module._token_ids(None, {"input_ids": [[4, 5, 6]]}) == [4, 5, 6]
     assert cli_module._token_ids(None, [7, 8]) == [7, 8]
+
+
+def test_cli_fill_task_responses_mutates_task_records(cli_module):
+    records = [{"prompt": "a"}, {"prompt": "b"}]
+
+    out = cli_module._fill_task_responses(records, ["answer-a", "answer-b"])
+
+    assert out is records
+    assert [record["response"] for record in records] == ["answer-a", "answer-b"]

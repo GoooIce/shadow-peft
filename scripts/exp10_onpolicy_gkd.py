@@ -296,6 +296,15 @@ def _record_has_response(record: dict[str, Any]) -> bool:
     )
 
 
+def _fill_task_responses(
+    records: list[dict[str, Any]], responses: list[str]
+) -> list[dict[str, Any]]:
+    """Attach generated responses to the task records that needed one."""
+    for record, response in zip(records, responses, strict=True):
+        record["response"] = response
+    return records
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -475,16 +484,16 @@ def cmd_eval(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("eval needs at least one held-out text or task record")
 
     started = time.perf_counter()
-    pending = [
-        str(record["prompt"])
+    pending_records = [
+        record
         for record in tasks
         if not _record_has_response(record) and record.get("prompt")
     ]
+    pending = [str(record["prompt"]) for record in pending_records]
     responses = _generate_responses(
         model, tokenizer, pending, max_new_tokens=args.generation_max_new_tokens
     )
-    for record, response in zip(pending, responses, strict=True):
-        record["response"] = response
+    _fill_task_responses(pending_records, responses)
 
     if texts:
         ppl = evaluate_ppl(
