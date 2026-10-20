@@ -105,13 +105,117 @@ def _shifted_ce_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     )
 
 
+_KD_DIVERGENCES = ("forward_kl", "reverse_kl", "jsd")
+
+
+def _validate_topk_arg(topk: int | None, vocab_size: int) -> None:
+    if topk is None:
+        return
+    if isinstance(topk, bool) or not isinstance(topk, int):
+        raise ValueError(f"topk must be a positive int or None, got {topk!r}.")
+    if topk < 1:
+        raise ValueError(f"topk must be >= 1 when provided, got {topk}.")
+    if topk > vocab_size:
+        raise ValueError(f"topk={topk} exceeds the vocab size {vocab_size}.")
+
+
+def _mask_to_topk_union(
+    student_logits: torch.Tensor, teacher_logits: torch.Tensor, topk: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Mask both sides to the per-position union of their top-k candidates.
+
+    Non-candidate logits become ``-inf``, so a softmax over the masked rows is
+    exactly the distribution renormalized over the union.
+    """
+    candidate = torch.zeros_like(student_logits, dtype=torch.bool)
+    candidate.scatter_(-1, student_logits.topk(topk, dim=-1).indices, True)
+    candidate.scatter_(-1, teacher_logits.topk(topk, dim=-1).indices, True)
+    student = student_logits.masked_fill(~candidate, float("-inf"))
+    teacher = teacher_logits.masked_fill(~candidate, float("-inf"))
+    # One side may have no finite candidate left (e.g. an API teacher that
+    # only exposed its own top-k and left the rest at -inf, so the other
+    # side's candidates are all -inf on this row). Fall back to a uniform
+    # distribution over the union instead of letting softmax return NaN.
+    student_empty = ~torch.isfinite(student).any(dim=-1, keepdim=True)
+    teacher_empty = ~torch.isfinite(teacher).any(dim=-1, keepdim=True)
+    student = torch.where(student_empty & candidate, torch.zeros_like(student), student)
+    teacher = torch.where(teacher_empty & candidate, torch.zeros_like(teacher), teacher)
+    return student, teacher
+
+
+def _divergence_over_valid(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    valid: torch.Tensor,
+    temperature: float,
+    divergence: str,
+) -> torch.Tensor:
+    """Non-default divergences / top-k paths over already-flattened rows."""
+    if not bool(valid.any()):
+        return student_logits.new_zeros(())
+    student_logits = student_logits[valid] / temperature
+    teacher_logits = teacher_logits[valid] / temperature
+    student_probs = F.softmax(student_logits, dim=-1)
+    teacher_probs = F.softmax(teacher_logits, dim=-1)
+    student_log_probs = F.log_softmax(student_logits, dim=-1)
+    teacher_log_probs = F.log_softmax(teacher_logits, dim=-1)
+    zero = torch.zeros((), dtype=student_logits.dtype, device=student_logits.device)
+    # Masked (non-candidate) entries have probability exactly 0 and a -inf
+    # log-prob; a finite placeholder keeps 0 * (-inf) out of the arithmetic.
+    student_log_probs = torch.where(torch.isfinite(student_log_probs), student_log_probs, zero)
+    teacher_log_probs = torch.where(torch.isfinite(teacher_log_probs), teacher_log_probs, zero)
+
+    if divergence == "forward_kl":
+        per_token = torch.where(
+            teacher_probs > 0, teacher_probs * (teacher_log_probs - student_log_probs), zero
+        ).sum(dim=-1)
+        return per_token.mean() * temperature * temperature
+    if divergence == "reverse_kl":
+        per_token = torch.where(
+            student_probs > 0, student_probs * (student_log_probs - teacher_log_probs), zero
+        ).sum(dim=-1)
+        return per_token.mean() * temperature * temperature
+    # Natural-log JSD: 0.5 KL(P || M) + 0.5 KL(Q || M), M = (P + Q) / 2.
+    # Unlike the KL variants it is not scaled by T^2, keeping it symmetric
+    # and bounded by ln(2).
+    mixture_probs = 0.5 * (student_probs + teacher_probs)
+    mixture_positive = mixture_probs > 0
+    mixture_safe = torch.where(mixture_positive, mixture_probs, torch.ones_like(mixture_probs))
+    mixture_log_probs = torch.where(mixture_positive, mixture_safe.log(), zero)
+    kl_student = torch.where(
+        student_probs > 0, student_probs * (student_log_probs - mixture_log_probs), zero
+    )
+    kl_teacher = torch.where(
+        teacher_probs > 0, teacher_probs * (teacher_log_probs - mixture_log_probs), zero
+    )
+    return (0.5 * kl_student + 0.5 * kl_teacher).sum(dim=-1).mean()
+
+
 def _shifted_kd_loss(
     student_logits: torch.Tensor,
     teacher_logits: torch.Tensor,
     labels: torch.Tensor,
     temperature: float,
+    *,
+    divergence: str = "forward_kl",
+    topk: int | None = None,
 ) -> torch.Tensor:
-    # KL(teacher || student) with the same shift/ignore_index alignment as `_shifted_ce_loss`.
+    """Token-level KD divergence with the same shift/ignore_index alignment as
+    ``_shifted_ce_loss``.
+
+    - ``forward_kl`` (default): KL(teacher || student), scaled by T^2.
+    - ``reverse_kl``: KL(student || teacher), scaled by T^2.
+    - ``jsd``: natural-log Jensen-Shannon divergence, bounded by ln(2).
+
+    ``topk`` truncates both distributions to the union of their per-position
+    top-k candidates and renormalizes before computing the divergence; ``None``
+    keeps the full-vocabulary path.
+    """
+    if divergence not in _KD_DIVERGENCES:
+        raise ValueError(
+            f"Unknown KD divergence {divergence!r}; expected one of {', '.join(_KD_DIVERGENCES)}."
+        )
+    _validate_topk_arg(topk, student_logits.size(-1))
     if teacher_logits.size(-1) != student_logits.size(-1):
         raise ValueError(
             f"Teacher/student vocab mismatch: teacher has vocab {teacher_logits.size(-1)}, "
@@ -121,12 +225,31 @@ def _shifted_kd_loss(
     shift_student = student_logits[..., :-1, :].contiguous()
     shift_teacher = teacher_logits[..., :-1, :].contiguous().to(dtype=shift_student.dtype)
     shift_labels = labels[..., 1:].contiguous()
-    student_log_probs = F.log_softmax(shift_student.view(-1, shift_student.size(-1)) / temperature, dim=-1)
-    teacher_probs = F.softmax(shift_teacher.view(-1, shift_teacher.size(-1)) / temperature, dim=-1)
+    if topk is not None:
+        shift_student, shift_teacher = _mask_to_topk_union(shift_student, shift_teacher, topk)
+
+    # Keep the legacy forward-KL full-vocabulary path byte-for-byte identical:
+    # existing runs (and GRACE's DKD anchor) depend on these exact values.
+    if divergence == "forward_kl" and topk is None:
+        student_log_probs = F.log_softmax(
+            shift_student.view(-1, shift_student.size(-1)) / temperature, dim=-1
+        )
+        teacher_probs = F.softmax(
+            shift_teacher.view(-1, shift_teacher.size(-1)) / temperature, dim=-1
+        )
+        valid = shift_labels.view(-1) != -100
+        # batchmean over non-ignored tokens matches the CE normalization (mean over non-ignored).
+        kd = F.kl_div(student_log_probs[valid], teacher_probs[valid], reduction="batchmean")
+        return kd * temperature * temperature
+
     valid = shift_labels.view(-1) != -100
-    # batchmean over non-ignored tokens matches the CE normalization (mean over non-ignored).
-    kd = F.kl_div(student_log_probs[valid], teacher_probs[valid], reduction="batchmean")
-    return kd * temperature * temperature
+    return _divergence_over_valid(
+        shift_student.view(-1, shift_student.size(-1)),
+        shift_teacher.view(-1, shift_teacher.size(-1)),
+        valid,
+        temperature,
+        divergence,
+    )
 
 
 def _hidden_mse_loss(
@@ -386,6 +509,8 @@ class ShadowForCausalLM(nn.Module, GenerationMixin):
         labels: torch.Tensor | None = None,
         teacher_logits: torch.Tensor | None = None,
         teacher_hidden_states: tuple[torch.Tensor, ...] | None = None,
+        kd_divergence: str = "forward_kl",
+        kd_topk: int | None = None,
         **kwargs: Any,
     ) -> ShadowCausalLMOutputWithPast:
         # Default to no-cache for backward compatibility (training / full-seq inference).
@@ -451,7 +576,14 @@ class ShadowForCausalLM(nn.Module, GenerationMixin):
             if self.shadow_loss_weight > 0:
                 loss = loss + self.shadow_loss_weight * _shifted_ce_loss(shadow_logits, labels)
             if teacher_logits is not None and self.distill_weight > 0:
-                kd_loss = _shifted_kd_loss(base_logits, teacher_logits, labels, self.distill_temperature)
+                kd_loss = _shifted_kd_loss(
+                    base_logits,
+                    teacher_logits,
+                    labels,
+                    self.distill_temperature,
+                    divergence=kd_divergence,
+                    topk=kd_topk,
+                )
                 loss = loss + self.distill_weight * kd_loss
             if need_student_hidden:
                 student_hidden = getattr(outputs, "hidden_states", None)
