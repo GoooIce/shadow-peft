@@ -4,16 +4,22 @@ Issue #21 closes the loop started by the rollout pipeline (issue #19) and the
 ``OnPolicyGKDTrainer`` (issue #20). It provides:
 
 - :func:`evaluate_ppl` — paired joint (``base_shadow``) and shadow-only
-  perplexity over the same held-out windows, restoring the caller's inference
-  mode and train/eval flag afterwards.
-- :func:`grade_task` / :func:`task_accuracy` — structured grading for the two
-  production tasks (``quality_verdict`` verdict keywords, ``process_calc``
-  numeric tolerance); open-ended tasks return ``None`` instead of a fake score.
-- :func:`bootstrap_ci` — 2.5/97.5 percentile bootstrap interval so small
-  held-out sets are reported with their uncertainty.
-- :func:`build_report` — the auditable report (both perplexities, task
-  accuracy, rollout/loss provenance, token budget, wall clock, discard rate,
-  data fingerprint, SFT baseline and the ``no_go`` guard).
+  perplexity over the same held-out windows, plus the per-window losses the
+  report bootstraps into confidence intervals.
+- :func:`grade_task` / :func:`task_accuracy` / :func:`task_outcomes` —
+  structured grading for the two production tasks (``quality_verdict``
+  verdict keywords, ``process_calc`` numeric tolerance); open-ended tasks
+  return ``None`` instead of a fake score.
+- :func:`bootstrap_ci` — 2.5/97.5 percentile bootstrap interval (optionally
+  weighted) so small held-out sets are reported with their uncertainty.
+- :func:`count_training_tokens` /
+  :func:`truncate_training_rows_by_token_budget` — only tokens that actually
+  enter the composed loss count toward ``tokens_seen`` and the same-budget
+  SFT comparison.
+- :func:`build_report` — the auditable report (both perplexities with CIs,
+  task accuracy with its CI, rollout/loss provenance, token split and budget,
+  wall clock, discard rate, data fingerprint, SFT baseline, the ``no_go``
+  guard and ``claims_gain``).
 - :class:`OnPolicyTrainDataset` / :func:`collate_training_rows` — turn rollout
   rows and supervised SFT rows into the ``input_ids``/``attention_mask``/
   ``labels``/``source`` batch contract the trainer consumes. Rollout metadata
@@ -36,6 +42,8 @@ import torch
 
 from shadow_peft.task_models import _shifted_ce_loss
 
+from .onpolicy import normalize_token_ids
+
 ROLLOUT_MODES = ("base_shadow", "shadow_only")
 DIVERGENCES = ("forward_kl", "reverse_kl", "jsd")
 TEACHER_SUPPORTS = ("full", "topk")
@@ -56,6 +64,15 @@ REPORT_FIELDS = (
     "data_fingerprint",
     "baseline_sft",
     "no_go",
+    "claims_gain",
+    "joint_ppl_ci",
+    "shadow_ppl_ci",
+    "task_accuracy_ci",
+    "tokens_supervised",
+    "tokens_onpolicy",
+    "token_budget",
+    "ci_n_boot",
+    "ci_seed",
 )
 
 _NUMBER_RE = re.compile(
@@ -91,13 +108,7 @@ NUMBER_REL_TOL = 1e-2
 
 def _normalize_ids(encoded: Any) -> list[int]:
     """Normalize a tokenizer return value to a flat list of token ids."""
-    if isinstance(encoded, Mapping):
-        encoded = encoded["input_ids"]
-    if hasattr(encoded, "tolist"):  # torch.Tensor / numpy array
-        encoded = encoded.tolist()
-    if encoded and isinstance(encoded[0], (list, tuple)):
-        encoded = list(encoded[0])
-    return [int(token) for token in encoded]
+    return normalize_token_ids(encoded)
 
 
 def _encode_text(tokenizer: Any, text: str) -> list[int]:
@@ -152,9 +163,13 @@ def evaluate_ppl(
     Both run under ``torch.no_grad()``. The model's previous inference mode and
     train/eval flag are restored even if a forward raises.
 
-    Returns ``{"joint_ppl", "shadow_ppl", "tokens"}`` where ``tokens`` is the
-    number of scored next-token targets. At least one window of two tokens is
-    required; an all-empty/one-token corpus raises ``ValueError``.
+    Returns ``{"joint_ppl", "shadow_ppl", "tokens", "joint_losses",
+    "shadow_losses", "window_tokens"}``. The ``*_losses`` entries are the mean
+    next-token CE of each window and ``window_tokens`` its scored target
+    count; ``build_report`` bootstraps them into a perplexity interval. The
+    point estimate stays the token-weighted ``exp`` of the summed losses.
+    At least one window of two tokens is required; an all-empty/one-token
+    corpus raises ``ValueError``.
     """
     if isinstance(texts, str):
         raise TypeError("texts must be a sequence of strings, not a bare string")
@@ -179,6 +194,8 @@ def evaluate_ppl(
     previous_mode = getattr(model, "inference_mode", "base_shadow")
 
     totals = {"joint": [0.0, 0], "shadow": [0.0, 0]}
+    window_losses: dict[str, list[float]] = {"joint": [], "shadow": []}
+    window_tokens: list[int] = []
     if hasattr(model, "eval"):
         model.eval()
     try:
@@ -192,6 +209,9 @@ def evaluate_ppl(
                     targets = x.size(1) - 1
                     totals[key][0] += float(loss) * targets
                     totals[key][1] += targets
+                    window_losses[key].append(float(loss))
+                    if key == "joint":
+                        window_tokens.append(targets)
     finally:
         if previous_mode is not None:
             set_mode(previous_mode)
@@ -205,6 +225,9 @@ def evaluate_ppl(
         "joint_ppl": math.exp(totals["joint"][0] / tokens),
         "shadow_ppl": math.exp(totals["shadow"][0] / tokens),
         "tokens": tokens,
+        "joint_losses": window_losses["joint"],
+        "shadow_losses": window_losses["shadow"],
+        "window_tokens": window_tokens,
     }
 
 
@@ -293,14 +316,14 @@ def _record_text(record: Mapping[str, Any]) -> Any:
     return None
 
 
-def task_accuracy(records: Iterable[Mapping[str, Any]]) -> float | None:
-    """Mean accuracy over gradable records; ``None`` when none can be graded.
+def task_outcomes(records: Iterable[Mapping[str, Any]]) -> list[bool]:
+    """Graded outcomes for the records that can be graded.
 
-    Records carry ``task``, ``expected`` and the model output under one of
-    ``response``/``text``/``output``/``prediction``/``answer``. Open-ended
-    tasks are skipped, never counted as failures.
+    Open-ended tasks and records without an expected answer are skipped, never
+    counted as failures. The list feeds ``build_report(task_outcomes=...)`` so
+    the accuracy interval resamples the same sample as the point estimate.
     """
-    graded = []
+    outcomes: list[bool] = []
     for record in records:
         if not isinstance(record, Mapping):
             continue
@@ -308,10 +331,21 @@ def task_accuracy(records: Iterable[Mapping[str, Any]]) -> float | None:
             _record_text(record), record.get("expected"), record.get("task")
         )
         if verdict is not None:
-            graded.append(bool(verdict))
-    if not graded:
+            outcomes.append(bool(verdict))
+    return outcomes
+
+
+def task_accuracy(records: Iterable[Mapping[str, Any]]) -> float | None:
+    """Mean accuracy over gradable records; ``None`` when none can be graded.
+
+    Records carry ``task``, ``expected`` and the model output under one of
+    ``response``/``text``/``output``/``prediction``/``answer``. Open-ended
+    tasks are skipped, never counted as failures.
+    """
+    outcomes = task_outcomes(records)
+    if not outcomes:
         return None
-    return sum(graded) / len(graded)
+    return sum(outcomes) / len(outcomes)
 
 
 # ---------------------------------------------------------------------------
@@ -334,23 +368,48 @@ def _percentile(sorted_values: Sequence[float], q: float) -> float:
 
 
 def bootstrap_ci(
-    values: Sequence[float], n_boot: int = 1000, seed: int = 0
+    values: Sequence[float],
+    n_boot: int = 1000,
+    seed: int = 0,
+    weights: Sequence[float] | None = None,
 ) -> tuple[float, float]:
-    """Percentile bootstrap interval (2.5%, 97.5%) for the mean of ``values``.
+    """Percentile bootstrap interval (2.5%, 97.5%) for a weighted mean.
 
     With few observations the resampled means spread out, so the interval is
     wider than for a large sample. Deterministic for a fixed ``seed``.
+    ``weights`` lets a caller reweight windows (e.g. by scored tokens) while
+    resampling; when omitted every value has weight 1.
     """
     data = [float(value) for value in values]
     if not data:
         raise ValueError("bootstrap_ci needs at least one value")
     if n_boot < 1:
         raise ValueError(f"n_boot must be >= 1, got {n_boot}")
+    if weights is not None:
+        weight_values = [float(weight) for weight in weights]
+        if len(weight_values) != len(data):
+            raise ValueError(
+                f"weights must match values ({len(data)}), got {len(weight_values)}"
+            )
+        if any(not math.isfinite(weight) or weight <= 0.0 for weight in weight_values):
+            raise ValueError("weights must be finite and > 0")
     rng = random.Random(seed)
     count = len(data)
-    means = sorted(
-        sum(rng.choices(data, k=count)) / count for _ in range(n_boot)
-    )
+    if weights is None:
+        means = sorted(
+            sum(rng.choices(data, k=count)) / count for _ in range(n_boot)
+        )
+    else:
+        weight_values = [float(weight) for weight in weights]
+        means = []
+        for _ in range(n_boot):
+            indices = [rng.randrange(count) for _ in range(count)]
+            sample_weight = sum(weight_values[index] for index in indices)
+            means.append(
+                sum(weight_values[index] * data[index] for index in indices)
+                / sample_weight
+            )
+        means.sort()
     return _percentile(means, 0.025), _percentile(means, 0.975)
 
 
@@ -466,6 +525,12 @@ class OnPolicyTrainDataset(torch.utils.data.Dataset):
     masked. The prompt's original provenance (``cloud``/``feedback``/...) is
     preserved in ``prompt_sources`` for reporting and never used as the loss
     branch.
+
+    With ``sort_by_length=True`` (the default) records are reordered by their
+    number of supervised targets, so a length-bucketed batch only right-pads
+    to the longest row in that bucket. Ties keep construction order. Set it
+    to ``False`` when row order carries meaning (e.g. applying a token budget
+    to the source order before bucketing).
     """
 
     def __init__(
@@ -475,6 +540,7 @@ class OnPolicyTrainDataset(torch.utils.data.Dataset):
         rollout_rows: Iterable[Mapping[str, Any]] = (),
         supervised_rows: Iterable[Mapping[str, Any]] = (),
         max_seq_len: int = 512,
+        sort_by_length: bool = True,
     ) -> None:
         if max_seq_len < 2:
             raise ValueError(f"max_seq_len must be >= 2, got {max_seq_len}")
@@ -490,6 +556,23 @@ class OnPolicyTrainDataset(torch.utils.data.Dataset):
             raise ValueError(
                 "OnPolicyTrainDataset needs at least one rollout or supervised row"
             )
+        if sort_by_length:
+            self._sort_by_length()
+
+    def _sort_by_length(self) -> None:
+        """Reorder records (and their prompt provenance) by target length."""
+        order = sorted(
+            range(len(self.records)),
+            key=lambda index: (
+                sum(
+                    label != IGNORE_INDEX
+                    for label in self.records[index]["labels"]
+                ),
+                index,
+            ),
+        )
+        self.records = [self.records[index] for index in order]
+        self.prompt_sources = [self.prompt_sources[index] for index in order]
 
     def __len__(self) -> int:
         return len(self.records)
@@ -629,6 +712,112 @@ def collate_training_rows(
 
 
 # ---------------------------------------------------------------------------
+# Token accounting and same-budget selection
+# ---------------------------------------------------------------------------
+
+
+def _loss_tokens(row: Mapping[str, Any], index: int) -> int:
+    labels = row.get("labels")
+    if labels is None:
+        raise ValueError(f"training row {index} has no `labels`")
+    return sum(1 for label in labels if int(label) != IGNORE_INDEX)
+
+
+def _active_branches(row: Mapping[str, Any], index: int) -> tuple[bool, bool]:
+    source = row.get("source")
+    if source not in BRANCH_SOURCES:
+        raise ValueError(
+            f"training row {index} has source {source!r}; expected one of "
+            f"{BRANCH_SOURCES}"
+        )
+    return source == "supervised", source == "onpolicy"
+
+
+def count_training_tokens(
+    rows: Iterable[Mapping[str, Any]], lambda_onpolicy: float
+) -> dict[str, int]:
+    """Count only the tokens that actually enter the composed loss.
+
+    ``supervised`` rows participate when ``lambda_onpolicy < 1`` (their CE is
+    weighted by ``1 - lambda``); ``onpolicy`` rows participate when
+    ``lambda_onpolicy > 0`` (their KD term is weighted by ``lambda``). At
+    λ=0/1 the inactive branch contributes zero, so ``tokens_seen`` is the sum
+    of the two reported branch counts.
+    """
+    if not 0.0 <= float(lambda_onpolicy) <= 1.0:
+        raise ValueError(
+            f"lambda_onpolicy must be in [0, 1], got {lambda_onpolicy!r}"
+        )
+    tokens_supervised = 0
+    tokens_onpolicy = 0
+    for index, row in enumerate(rows):
+        supervised, onpolicy = _active_branches(row, index)
+        count = _loss_tokens(row, index)
+        if supervised and lambda_onpolicy < 1.0:
+            tokens_supervised += count
+        elif onpolicy and lambda_onpolicy > 0.0:
+            tokens_onpolicy += count
+    return {
+        "tokens_supervised": tokens_supervised,
+        "tokens_onpolicy": tokens_onpolicy,
+        "tokens_seen": tokens_supervised + tokens_onpolicy,
+    }
+
+
+def truncate_training_rows_by_token_budget(
+    rows: Iterable[Mapping[str, Any]],
+    lambda_onpolicy: float,
+    token_budget: int | None,
+) -> list[Mapping[str, Any]]:
+    """Keep whole rows until the loss-token budget is exhausted.
+
+    Only the active branch counts (see :func:`count_training_tokens`), so a
+    λ=0 SFT baseline and a λ=1 on-policy run can be compared on the same
+    number of loss tokens. Rows are considered in input order; the first row
+    is always kept even when it alone exceeds the budget, later rows are
+    dropped once adding one would overshoot. ``None`` keeps every active row.
+    """
+    if token_budget is not None and int(token_budget) < 1:
+        raise ValueError(f"token_budget must be >= 1 or None, got {token_budget!r}")
+    if not 0.0 <= float(lambda_onpolicy) <= 1.0:
+        raise ValueError(
+            f"lambda_onpolicy must be in [0, 1], got {lambda_onpolicy!r}"
+        )
+    active: list[tuple[Mapping[str, Any], int]] = []
+    for index, row in enumerate(rows):
+        supervised, onpolicy = _active_branches(row, index)
+        participates = (
+            (supervised and lambda_onpolicy < 1.0)
+            or (onpolicy and lambda_onpolicy > 0.0)
+        )
+        if not participates:
+            continue
+        count = _loss_tokens(row, index)
+        if count > 0:
+            active.append((row, count))
+    if not active:
+        raise ValueError(
+            "no training rows carry loss tokens for the active branch at "
+            f"lambda_onpolicy={lambda_onpolicy}"
+        )
+    if token_budget is None:
+        return [row for row, _count in active]
+
+    selected: list[Mapping[str, Any]] = []
+    used = 0
+    for row, count in active:
+        if not selected:
+            selected.append(row)
+            used = count
+            continue
+        if used + count > int(token_budget):
+            break
+        selected.append(row)
+        used += count
+    return selected
+
+
+# ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
 
@@ -668,6 +857,27 @@ def data_fingerprint(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _ppl_interval(
+    losses: Sequence[float],
+    window_tokens: Sequence[int] | None,
+    n_boot: int,
+    seed: int,
+) -> list[float]:
+    """Bootstrap the token-weighted window CE, then exponentiate the bounds."""
+    values = [float(loss) for loss in losses]
+    if any(not math.isfinite(loss) for loss in values):
+        raise ValueError("window losses must be finite")
+    weights = None if window_tokens is None else [float(count) for count in window_tokens]
+    lower, upper = bootstrap_ci(values, n_boot=n_boot, seed=seed, weights=weights)
+    return [math.exp(lower), math.exp(upper)]
+
+
+def _baseline_value(baseline: Mapping[str, Any] | None, key: str) -> float | None:
+    if baseline is None or baseline.get(key) is None:
+        return None
+    return float(baseline[key])
+
+
 def build_report(
     *,
     joint_ppl: float,
@@ -685,14 +895,38 @@ def build_report(
     teacher_version: str = "",
     baseline_sft: Mapping[str, Any] | None = None,
     no_go: bool | None = None,
+    claims_gain: bool | None = None,
+    tokens_supervised: int | None = None,
+    tokens_onpolicy: int | None = None,
+    token_budget: int | None = None,
+    joint_losses: Sequence[float] | None = None,
+    shadow_losses: Sequence[float] | None = None,
+    window_tokens: Sequence[int] | None = None,
+    task_outcomes: Sequence[bool] | None = None,
+    n_boot: int = 200,
+    ci_seed: int = 0,
 ) -> dict[str, Any]:
     """Build the auditable evaluation report; every core field is required.
 
-    ``no_go`` is the deployment guard from the spec: when a same-budget
-    ``baseline_sft`` (with ``joint_ppl``/``shadow_ppl``) is supplied, it is
-    true exactly when shadow-only perplexity improved but joint perplexity did
-    not. Without a baseline it defaults to ``False`` (no claim either way) and
-    can be overridden explicitly.
+    ``no_go`` is the deployment guard from the spec. With a same-budget
+    ``baseline_sft`` it is true when any of these holds:
+
+    - joint perplexity regressed (``joint_ppl > baseline.joint_ppl``);
+    - task accuracy did not reach ``baseline.task_accuracy + 0.02`` (when both
+      are available);
+    - shadow-only perplexity improved but joint did not.
+
+    ``claims_gain`` is the positive claim and follows the spec's acceptance
+    criteria: joint perplexity is not worse **and** either task accuracy gained
+    2 percentage points or shadow-only perplexity improved by 3%. Without a
+    baseline neither flag is set, and no gain is claimed.
+
+    ``joint_losses``/``shadow_losses`` (per-window mean CE from
+    :func:`evaluate_ppl`) and ``task_outcomes`` (gradable booleans from
+    :func:`task_outcomes`) add percentile bootstrap intervals; fewer than two
+    task records leave ``task_accuracy_ci`` as ``None`` instead of inventing
+    an interval. ``tokens_supervised``/``tokens_onpolicy`` are optional, but
+    when both are given their sum must equal ``tokens_seen``.
     """
     joint = float(joint_ppl)
     shadow = float(shadow_ppl)
@@ -726,14 +960,86 @@ def build_report(
         raise ValueError(
             f"task_accuracy must be None or in [0, 1], got {task_accuracy!r}"
         )
+    if int(n_boot) < 1:
+        raise ValueError(f"n_boot must be >= 1, got {n_boot!r}")
+    if tokens_supervised is not None and int(tokens_supervised) < 0:
+        raise ValueError(
+            f"tokens_supervised must be >= 0, got {tokens_supervised!r}"
+        )
+    if tokens_onpolicy is not None and int(tokens_onpolicy) < 0:
+        raise ValueError(f"tokens_onpolicy must be >= 0, got {tokens_onpolicy!r}")
+    if (
+        tokens_supervised is not None
+        and tokens_onpolicy is not None
+        and int(tokens_supervised) + int(tokens_onpolicy) != int(tokens_seen)
+    ):
+        raise ValueError(
+            "tokens_seen must equal tokens_supervised + tokens_onpolicy "
+            f"({tokens_seen} != {tokens_supervised} + {tokens_onpolicy})"
+        )
+    if token_budget is not None and int(token_budget) < 1:
+        raise ValueError(f"token_budget must be >= 1 or None, got {token_budget!r}")
 
     baseline = dict(baseline_sft) if baseline_sft is not None else None
+    baseline_joint = _baseline_value(baseline, "joint_ppl")
+    baseline_shadow = _baseline_value(baseline, "shadow_ppl")
+    baseline_accuracy = _baseline_value(baseline, "task_accuracy")
+    accuracy = None if task_accuracy is None else float(task_accuracy)
+    # 2 percentage points with a tolerance so an exact +0.02 does not fail on
+    # binary floating point representation.
+    task_threshold = None if baseline_accuracy is None else baseline_accuracy + 0.02 - 1e-12
+
     if no_go is None:
         no_go = False
         if baseline is not None:
-            baseline_joint = float(baseline["joint_ppl"])
-            baseline_shadow = float(baseline["shadow_ppl"])
-            no_go = shadow < baseline_shadow and not (joint < baseline_joint)
+            if baseline_joint is not None and joint > baseline_joint:
+                no_go = True
+            if (
+                task_threshold is not None
+                and accuracy is not None
+                and accuracy < task_threshold
+            ):
+                no_go = True
+            if (
+                baseline_shadow is not None
+                and baseline_joint is not None
+                and shadow < baseline_shadow
+                and not (joint < baseline_joint)
+            ):
+                no_go = True
+    if claims_gain is None:
+        claims_gain = False
+        if baseline is not None and baseline_joint is not None and joint <= baseline_joint:
+            task_gain = (
+                task_threshold is not None
+                and accuracy is not None
+                and accuracy >= task_threshold
+            )
+            shadow_gain = (
+                baseline_shadow is not None
+                and shadow <= baseline_shadow * 0.97 + 1e-12
+            )
+            claims_gain = bool(task_gain or shadow_gain)
+
+    joint_ci = (
+        _ppl_interval(joint_losses, window_tokens, int(n_boot), int(ci_seed))
+        if joint_losses is not None
+        else None
+    )
+    shadow_ci = (
+        _ppl_interval(shadow_losses, window_tokens, int(n_boot), int(ci_seed))
+        if shadow_losses is not None
+        else None
+    )
+    accuracy_ci = None
+    if task_outcomes is not None and len(task_outcomes) >= 2:
+        accuracy_ci = list(
+            bootstrap_ci(
+                [float(bool(outcome)) for outcome in task_outcomes],
+                n_boot=int(n_boot),
+                seed=int(ci_seed),
+            )
+        )
 
     fingerprint = data_fingerprint(
         prompts,
@@ -745,7 +1051,7 @@ def build_report(
     return {
         "joint_ppl": joint,
         "shadow_ppl": shadow,
-        "task_accuracy": None if task_accuracy is None else float(task_accuracy),
+        "task_accuracy": accuracy,
         "rollout_mode": rollout_mode,
         "lambda": float(lambda_onpolicy),
         "divergence": divergence,
@@ -756,4 +1062,15 @@ def build_report(
         "data_fingerprint": fingerprint,
         "baseline_sft": baseline,
         "no_go": bool(no_go),
+        "claims_gain": bool(claims_gain),
+        "joint_ppl_ci": joint_ci,
+        "shadow_ppl_ci": shadow_ci,
+        "task_accuracy_ci": accuracy_ci,
+        "tokens_supervised": (
+            None if tokens_supervised is None else int(tokens_supervised)
+        ),
+        "tokens_onpolicy": None if tokens_onpolicy is None else int(tokens_onpolicy),
+        "token_budget": None if token_budget is None else int(token_budget),
+        "ci_n_boot": int(n_boot),
+        "ci_seed": int(ci_seed),
     }

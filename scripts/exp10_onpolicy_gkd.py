@@ -39,8 +39,11 @@ Prompt/file formats:
   to grade or a ``prompt`` to generate first.
 
 ``rollouts`` uses ``base_shadow`` by default (the deployment path);
-``shadow_only`` is the explicit ablation. ``eval`` always reports both paths and
-marks ``no_go`` when only shadow-only ppl improved.
+``shadow_only`` is the explicit ablation. ``eval`` always reports both paths,
+bootstrap intervals (``--ci-n-boot``/``--ci-seed``) and marks ``no_go`` when
+the baseline guard fails. ``train``/``run`` accept ``--token-budget`` (counts
+only the loss-participating branch, so λ=0 and λ=1 can share one budget) and
+length-bucket rows by default (``--no-sort-by-length`` disables it).
 
 Heavy imports (torch/transformers/trl/datasets) are lazy so ``--help`` stays
 fast and the parser can be smoke-tested without loading a model.
@@ -53,7 +56,6 @@ import json
 import os
 import sys
 import time
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -210,13 +212,9 @@ def _add_trainer_compat(model: Any) -> None:
 
 def _token_ids(tokenizer: Any, encoded: Any) -> list[int]:
     del tokenizer
-    if isinstance(encoded, Mapping):
-        encoded = encoded["input_ids"]
-    if hasattr(encoded, "tolist"):
-        encoded = encoded.tolist()
-    if encoded and isinstance(encoded[0], (list, tuple)):
-        encoded = list(encoded[0])
-    return [int(token) for token in encoded]
+    from shadow_lab.onpolicy import normalize_token_ids
+
+    return normalize_token_ids(encoded)
 
 
 def _encode_prompt(tokenizer: Any, prompt: str) -> list[int]:
@@ -370,12 +368,18 @@ def cmd_train(args: argparse.Namespace) -> dict[str, Any]:
     from datasets import Dataset as HFDataset
     from trl import SFTConfig
 
-    from shadow_lab.onpolicy import load_rollouts
-    from shadow_lab.onpolicy_eval import OnPolicyTrainDataset, collate_training_rows
-    from shadow_lab.trainers import OnPolicyGKDTrainer
+    from shadow_lab.onpolicy import bucket_rows_by_length, load_rollouts
+    from shadow_lab.onpolicy_eval import (
+        OnPolicyTrainDataset,
+        collate_training_rows,
+        count_training_tokens,
+        truncate_training_rows_by_token_budget,
+    )
+    from shadow_lab.trainers import OnPolicyGKDTrainer, validate_teacher_vocab
 
     model, tokenizer = _load_shadow_model(args, is_trainable=True)
     teacher = _load_base_model(args.teacher, args.dtype)
+    validate_teacher_vocab(model, teacher)
     device = _resolve_device(args.device)
     model.to(device)
     teacher.to(device)
@@ -399,7 +403,22 @@ def cmd_train(args: argparse.Namespace) -> dict[str, Any]:
         rollout_rows=train_rows,
         supervised_rows=supervised_rows,
         max_seq_len=args.max_seq_len,
+        # Apply the token budget in source order first; bucketing reorders
+        # the selected rows below without changing the budget accounting.
+        sort_by_length=False,
     )
+    records = truncate_training_rows_by_token_budget(
+        dataset.to_list(),
+        args.lambda_onpolicy,
+        getattr(args, "token_budget", None),
+    )
+    if getattr(args, "sort_by_length", True):
+        records = [
+            row
+            for bucket in bucket_rows_by_length(records, max(1, args.batch_size))
+            for row in bucket
+        ]
+    token_counts = count_training_tokens(records, args.lambda_onpolicy)
     pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
     def collator(rows):
@@ -430,7 +449,7 @@ def cmd_train(args: argparse.Namespace) -> dict[str, Any]:
     trainer = OnPolicyGKDTrainer(
         model=model,
         args=training_args,
-        train_dataset=HFDataset.from_list(dataset.to_list()),
+        train_dataset=HFDataset.from_list(records),
         data_collator=collator,
         processing_class=tokenizer,
         teacher_model=teacher,
@@ -448,16 +467,17 @@ def cmd_train(args: argparse.Namespace) -> dict[str, Any]:
     output = Path(args.out).expanduser()
     output.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(output)
-    tokens_seen = sum(
-        sum(1 for label in item["labels"] if label != -100) for item in dataset
-    )
     summary = {
         "out": str(output),
         "steps": int(result.global_step),
-        "rows": len(dataset),
-        "onpolicy_rows": len(train_rows),
-        "supervised_rows": len(supervised_rows),
-        "tokens_seen": tokens_seen,
+        "rows": len(records),
+        "onpolicy_rows": sum(1 for row in records if row["source"] == "onpolicy"),
+        "supervised_rows": sum(1 for row in records if row["source"] == "supervised"),
+        "tokens_seen": token_counts["tokens_seen"],
+        "tokens_supervised": token_counts["tokens_supervised"],
+        "tokens_onpolicy": token_counts["tokens_onpolicy"],
+        "token_budget": getattr(args, "token_budget", None),
+        "sort_by_length": bool(getattr(args, "sort_by_length", True)),
         "wall_clock": wall_clock,
         "lambda": args.lambda_onpolicy,
         "divergence": args.divergence,
@@ -474,7 +494,12 @@ def cmd_train(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_eval(args: argparse.Namespace) -> dict[str, Any]:
     """Evaluate held-out ppl (joint + shadow) and structured task accuracy."""
-    from shadow_lab.onpolicy_eval import build_report, evaluate_ppl, task_accuracy
+    from shadow_lab.onpolicy_eval import (
+        build_report,
+        evaluate_ppl,
+        task_accuracy,
+        task_outcomes,
+    )
 
     model, tokenizer = _load_shadow_model(args, is_trainable=False)
     model.to(_resolve_device(args.device))
@@ -506,6 +531,7 @@ def cmd_eval(args: argparse.Namespace) -> dict[str, Any]:
     else:
         raise ValueError("--heldout is required to report joint/shadow perplexity")
     accuracy = task_accuracy(tasks)
+    outcomes = task_outcomes(tasks)
     wall_clock = float(getattr(args, "wall_clock_base", 0.0) or 0.0) + (
         time.perf_counter() - started
     )
@@ -532,11 +558,20 @@ def cmd_eval(args: argparse.Namespace) -> dict[str, Any]:
         divergence=args.divergence,
         teacher_support=args.teacher_support,
         tokens_seen=args.tokens_seen,
+        tokens_supervised=getattr(args, "tokens_supervised", None),
+        tokens_onpolicy=getattr(args, "tokens_onpolicy", None),
+        token_budget=getattr(args, "token_budget", None),
         wall_clock=wall_clock,
         discard_rate=args.discard_rate,
         prompts=fingerprint_prompts,
         teacher_version=args.teacher_version,
         baseline_sft=baseline,
+        joint_losses=ppl["joint_losses"],
+        shadow_losses=ppl["shadow_losses"],
+        window_tokens=ppl["window_tokens"],
+        task_outcomes=outcomes,
+        n_boot=getattr(args, "ci_n_boot", 200),
+        ci_seed=getattr(args, "ci_seed", 0),
     )
     _write_json(args.out, report)
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
@@ -569,6 +604,9 @@ def cmd_run(args: argparse.Namespace) -> dict[str, Any]:
     eval_args.shadow_ckpt = str(adapter_out)
     eval_args.out = str(report_out)
     eval_args.tokens_seen = train_summary["tokens_seen"]
+    eval_args.tokens_supervised = train_summary["tokens_supervised"]
+    eval_args.tokens_onpolicy = train_summary["tokens_onpolicy"]
+    eval_args.token_budget = train_summary["token_budget"]
     eval_args.discard_rate = train_args.discard_rate
     eval_args.teacher_support = "topk" if args.topk else "full"
     eval_args.wall_clock_base = (
@@ -584,8 +622,12 @@ def cmd_run(args: argparse.Namespace) -> dict[str, Any]:
         "out": str(out_dir),
         "rollouts": rollout_summary["rows"],
         "tokens_seen": train_summary["tokens_seen"],
+        "tokens_supervised": train_summary["tokens_supervised"],
+        "tokens_onpolicy": train_summary["tokens_onpolicy"],
+        "token_budget": train_summary["token_budget"],
         "report": str(report_out),
         "no_go": report["no_go"],
+        "claims_gain": report["claims_gain"],
     }
     _write_json(out_dir / "run_summary.json", summary)
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
@@ -717,6 +759,23 @@ def _add_train_args(
     _add(parser, "--discard-rate", type=float, default=0.0)
     _add(
         parser,
+        "--token-budget",
+        type=int,
+        default=None,
+        help=(
+            "cap on loss-participating tokens (whole rows, active branch only); "
+            "use the same value for the λ=0 SFT baseline"
+        ),
+    )
+    _add(
+        parser,
+        "--sort-by-length",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="length-bucket the selected rows before batching (default: on)",
+    )
+    _add(
+        parser,
         "--dtype",
         choices=("auto", "float32", "bfloat16"),
         default="auto",
@@ -762,6 +821,17 @@ def _add_eval_args(parser: argparse.ArgumentParser) -> None:
     )
     _add(parser, "--teacher-version", default="")
     _add(parser, "--tokens-seen", type=int, default=0)
+    _add(parser, "--tokens-supervised", type=int, default=None)
+    _add(parser, "--tokens-onpolicy", type=int, default=None)
+    _add(
+        parser,
+        "--token-budget",
+        type=int,
+        default=None,
+        help="training token budget recorded in the report",
+    )
+    _add(parser, "--ci-n-boot", type=int, default=200)
+    _add(parser, "--ci-seed", type=int, default=0)
     _add(parser, "--discard-rate", type=float, default=0.0)
     _add(
         parser,

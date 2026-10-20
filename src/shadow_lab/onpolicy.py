@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import os
 import random
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -35,6 +35,7 @@ import torch
 ROLLOUT_MODES = ("base_shadow", "shadow_only")
 FINISH_REASONS = ("eos", "length")
 DISCARD_REASONS = ("empty", "immediate_eos", "too_long")
+IGNORE_INDEX = -100
 
 
 def _prompt_text(prompt: dict[str, Any]) -> str:
@@ -129,8 +130,12 @@ def split_prompts(
     return train, val
 
 
-def _ids_from_encoded(encoded: Any) -> list[int]:
-    """Normalize a tokenizer/chat-template return value to a flat id list."""
+def normalize_token_ids(encoded: Any) -> list[int]:
+    """Normalize a tokenizer/chat-template return value to a flat id list.
+
+    Accepts a ``Mapping`` with ``input_ids`` (``BatchEncoding`` included), a
+    tensor/array, a nested batch of one sequence, or a plain id list.
+    """
     if isinstance(encoded, Mapping):
         encoded = encoded["input_ids"]
     if hasattr(encoded, "tolist"):  # torch.Tensor / numpy array
@@ -138,6 +143,44 @@ def _ids_from_encoded(encoded: Any) -> list[int]:
     if encoded and isinstance(encoded[0], (list, tuple)):
         encoded = list(encoded[0])
     return [int(token) for token in encoded]
+
+
+def _ids_from_encoded(encoded: Any) -> list[int]:
+    """Backward-compatible alias for :func:`normalize_token_ids`."""
+    return normalize_token_ids(encoded)
+
+
+def _labeled_token_count(row: Mapping[str, Any]) -> int:
+    """Number of supervised targets in a row (``labels != -100``)."""
+    labels = row.get("labels")
+    if labels is not None:
+        return sum(1 for label in labels if int(label) != IGNORE_INDEX)
+    return len(row.get("input_ids") or ())
+
+
+def bucket_rows_by_length(
+    rows: Iterable[Mapping[str, Any]], batch_size: int
+) -> list[list[Mapping[str, Any]]]:
+    """Group rows into deterministic length-sorted buckets.
+
+    Rows are ordered by their number of supervised targets (``labels !=
+    -100``; rows without labels fall back to ``len(input_ids)``), ties keep
+    the original order, and consecutive rows are chunked into buckets of at
+    most ``batch_size``. The final bucket may be short; no row is dropped.
+
+    This matches ``shadow_lab.atoms.make_batch``'s contract: sequences are
+    right-padded with an attention mask of 0 and padding labels set to
+    ``-100``. Sorting first keeps padding (and the wasted compute it causes)
+    inside a batch small without changing the label mask.
+    """
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+    ordered = sorted(
+        enumerate(rows),
+        key=lambda pair: (_labeled_token_count(pair[1]), pair[0]),
+    )
+    flat = [row for _, row in ordered]
+    return [flat[start : start + batch_size] for start in range(0, len(flat), batch_size)]
 
 
 def _encode_prompt(tokenizer: Any, prompt: str) -> list[int]:
