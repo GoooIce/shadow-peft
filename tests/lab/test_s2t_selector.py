@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +27,7 @@ torch = pytest.importorskip("torch")
 
 from shadow_lab.s2t_selector import (  # noqa: E402
     DEFAULT_BETA,
+    DEFAULT_MLP_HIDDEN,
     IGNORE_INDEX,
     SELECTOR_CONFIG_FILENAME,
     SELECTOR_VERSION,
@@ -68,6 +70,18 @@ def test_score_reads_candidate_vectors_from_the_lm_head_weight_table():
     scores = head.score(h_t, candidate_ids, weight)
 
     assert torch.equal(scores, head(h_t, weight[candidate_ids]))
+
+
+def test_default_head_stays_under_a_million_parameters_for_qwen3_4b():
+    head = SelectorHead(hidden_size=2560)
+
+    parameters = sum(parameter.numel() for parameter in head.parameters())
+
+    assert DEFAULT_MLP_HIDDEN == 64
+    assert head.mlp_hidden == DEFAULT_MLP_HIDDEN
+    # 5120 -> 64 -> 1 MLP: 5120*64 + 64 + 64*1 + 1 = 327,809.
+    assert parameters == 327_809
+    assert parameters < 1_000_000
 
 
 def test_head_does_not_mutate_the_candidate_weight_table():
@@ -442,6 +456,27 @@ def test_train_selector_is_deterministic_and_splits_by_prompt(beta):
     ):
         assert name == other
         assert torch.equal(left, right)
+
+
+def test_train_selector_accepts_an_explicit_mlp_hidden_and_saves_it(tmp_path):
+    examples = _synthetic_selector_examples()
+    candidate_weight = torch.randn(40, 8)
+
+    result = train_selector(
+        examples,
+        candidate_weight=candidate_weight,
+        steps=1,
+        mlp_hidden=32,
+        val_ratio=0.5,
+        seed=0,
+        device="cpu",
+    )
+    paths = save_selector(result.head, tmp_path)
+
+    config = json.loads(Path(paths["config"]).read_text(encoding="utf-8"))
+    assert result.head.mlp_hidden == 32
+    assert config["mlp_hidden"] == 32
+    assert load_selector(tmp_path).mlp_hidden == 32
 
 
 def test_train_selector_with_a_single_prompt_has_no_validation_split():

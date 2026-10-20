@@ -9,6 +9,7 @@ path and the shadow distribution is read from the initial shadow hidden.
 from __future__ import annotations
 
 import csv
+import importlib.util
 import json
 import subprocess
 import sys
@@ -234,6 +235,86 @@ def test_use_cache_matches_the_full_prefix_path():
         assert cached_record["shadow_topk_logprobs"] == pytest.approx(
             full_record["shadow_topk_logprobs"], abs=1e-4
         )
+
+
+def test_run_diagnostic_defaults_to_k16_and_reports_the_full_hit_curve():
+    model = _tiny_shadow_model()
+    tokenizer = _StubTokenizer()
+
+    result = run_diagnostic(
+        model,
+        tokenizer,
+        [{"prompt": "alpha", "task": "fault"}, {"prompt": "beta", "task": "calc"}],
+        max_new_tokens=3,
+        n_boot=20,
+    )
+
+    report = result.report
+    assert report["candidate_k"] == 16
+    assert all(len(record["shadow_topk_ids"]) == 16 for record in result.records)
+    hits = [report["hit_at_1"], report["hit_at_4"], report["hit_at_8"], report["hit_at_16"]]
+    assert hits == sorted(hits)
+    summary = summarize_hits(result.records, ks=(1, 4, 8, 16))
+    assert report["hit_at_16"] == pytest.approx(summary["hit_at_16"])
+    assert report["hit_at_8"] == pytest.approx(summary["hit_at_8"])
+    assert not any("capped by this capture width" in note for note in report["notes"])
+
+
+def test_report_rank_all_uses_every_exact_token_rank():
+    model = _tiny_shadow_model()
+    tokenizer = _StubTokenizer()
+
+    result = run_diagnostic(
+        model,
+        tokenizer,
+        [{"prompt": "alpha", "task": "fault"}],
+        max_new_tokens=8,
+        k=16,
+        n_boot=20,
+    )
+
+    report = result.report
+    exact_ranks = [record["base_top1_rank_in_shadow"] for record in result.records]
+    assert all(isinstance(rank, int) and rank >= 1 for rank in exact_ranks)
+    assert report["n_rank_known_all"] == len(exact_ranks) == report["n_tokens"]
+    assert report["n_rank_known"] <= report["n_rank_known_all"]
+    assert report["rank_all_p99"] is not None
+    assert report["rank_all_p99"] >= report["rank_hit_p99"]
+
+
+def test_hit_at_8_is_identical_when_capture_widens_from_k8_to_k16():
+    model = _tiny_shadow_model()
+    tokenizer = _StubTokenizer()
+    prompts = [{"prompt": "alpha", "task": "fault"}, {"prompt": "beta", "task": "calc"}]
+
+    narrow = diagnose(model, tokenizer, prompts, max_new_tokens=3, k=8)
+    wide = diagnose(model, tokenizer, prompts, max_new_tokens=3, k=16)
+
+    narrow_summary = summarize_hits(narrow, ks=(1, 4, 8, 16))
+    wide_summary = summarize_hits(wide, ks=(1, 4, 8, 16))
+    assert wide_summary["hit_at_1"] == pytest.approx(narrow_summary["hit_at_1"])
+    assert wide_summary["hit_at_4"] == pytest.approx(narrow_summary["hit_at_4"])
+    assert wide_summary["hit_at_8"] == pytest.approx(narrow_summary["hit_at_8"])
+    assert (
+        wide_summary["hit_at_1"]
+        <= wide_summary["hit_at_4"]
+        <= wide_summary["hit_at_8"]
+        <= wide_summary["hit_at_16"]
+    )
+
+
+def test_cli_k_default_is_16():
+    script = Path(__file__).resolve().parents[2] / "scripts" / "exp11_s2t_diagnose.py"
+    spec = importlib.util.spec_from_file_location("exp11_s2t_diagnose", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    args = module.build_parser().parse_args(
+        ["--model", "m", "--shadow-ckpt", "c", "--prompts", "p"]
+    )
+
+    assert args.k == 16
 
 
 def test_run_diagnostic_exports_stable_json_jsonl_and_csv(tmp_path):

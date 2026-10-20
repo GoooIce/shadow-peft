@@ -55,6 +55,7 @@ def _record(
     shadow_logits: list[float] | None = None,
     shadow_topk_ids: list[int] | None = None,
     base_logits: list[float] | None = None,
+    base_top1_rank_in_shadow: int | None = None,
     task: str | None = "fault",
     position: int | None = 0,
     prompt_id: str | None = "p0",
@@ -62,6 +63,8 @@ def _record(
     record: dict = {}
     if base_top1 is not None:
         record["base_top1"] = base_top1
+    if base_top1_rank_in_shadow is not None:
+        record["base_top1_rank_in_shadow"] = base_top1_rank_in_shadow
     if shadow_logits is not None:
         record["shadow_logits"] = shadow_logits
     if shadow_topk_ids is not None:
@@ -168,6 +171,18 @@ def test_nan_logits_are_rejected():
         token_hit([0.0, math.nan, 1.0], base_top1=0, k=1)
 
 
+def test_spec_reference_resolves_to_the_tracked_spec_issue():
+    root = Path(__file__).parents[2]
+
+    assert (root / "docs" / "specs" / "s2t-local-shadow-selector.md").is_file()
+    assert "issue #3" in (root / "src" / "shadow_lab" / "s2t.py").read_text(
+        encoding="utf-8"
+    )
+    assert "issue #3" in (root / "scripts" / "exp11_s2t_eval.py").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_module_does_not_import_torch():
     source = Path(__file__).parents[2] / "src" / "shadow_lab" / "s2t.py"
     tree = ast.parse(source.read_text(encoding="utf-8"))
@@ -229,6 +244,31 @@ def test_summarize_hits_accepts_partial_topk_records():
     assert summary["agree_at_1"] == 0.0
     assert summary["n_rank_known"] == 1
     assert summary["rank_p50"] == 2.0
+
+
+def test_summarize_hits_uses_exact_rank_field_for_outside_topk_tokens():
+    records = [
+        _record(base_top1=1, shadow_topk_ids=[0, 1, 2, 3], base_top1_rank_in_shadow=2),
+        _record(base_top1=9, shadow_topk_ids=[0, 1, 2, 3], base_top1_rank_in_shadow=40),
+        _record(base_top1=8, shadow_topk_ids=[0, 1, 2, 3], base_top1_rank_in_shadow=20),
+        _record(base_top1=2, shadow_topk_ids=[0, 1, 2, 3], base_top1_rank_in_shadow=3),
+    ]
+
+    summary = summarize_hits(records, ks=(1, 4, 8, 16))
+
+    # Every token has an exact rank, including the two misses outside top-4.
+    assert summary["n_rank_known_all"] == 4
+    assert summary["rank_all_p50"] == pytest.approx(11.5)
+    assert summary["rank_all_p90"] == pytest.approx(34.0)
+    assert summary["rank_all_p99"] == pytest.approx(39.4)
+    # The old hit-position percentile only knows the two in-list tokens.
+    assert summary["n_rank_known"] == 2
+    assert summary["rank_hit_p50"] == pytest.approx(2.5)
+    assert summary["rank_hit_p99"] == pytest.approx(2.99)
+    # Deprecated rank_* keys keep the old hit-position meaning.
+    assert summary["rank_p50"] == summary["rank_hit_p50"]
+    assert summary["rank_p99"] == summary["rank_hit_p99"]
+    assert summary["rank_all_p99"] > summary["rank_hit_p99"]
 
 
 def test_summarize_hits_derives_base_top1_from_optional_base_logits():
@@ -543,6 +583,36 @@ def test_build_report_assembles_metrics_cis_and_decision():
     assert report["hit_at_8_ci"][0] <= report["hit_at_8"] <= report["hit_at_8_ci"][1]
     assert sum(metric["n"] for metric in report["by_task"].values()) == 10
     assert sum(metric["n"] for metric in report["by_position_bucket"].values()) == 10
+
+
+def test_build_report_exposes_rank_all_and_rank_hit_sections():
+    records = [
+        _record(base_top1=0, shadow_logits=[1.0, 0.0], prompt_id="p0", position=0),
+        _record(base_top1=9, shadow_topk_ids=[0, 1], base_top1_rank_in_shadow=30),
+    ]
+
+    report = build_report(records, n_boot=20, seed=0)
+
+    for key in (
+        "n_rank_known_all",
+        "rank_all_p50",
+        "rank_all_p90",
+        "rank_all_p95",
+        "rank_all_p99",
+        "n_rank_known",
+        "rank_hit_p50",
+        "rank_hit_p90",
+        "rank_hit_p95",
+        "rank_hit_p99",
+        "rank_p50",
+    ):
+        assert key in report
+    assert report["n_rank_known_all"] == 2
+    assert report["n_rank_known"] == 1
+    assert report["rank_all_p99"] == pytest.approx(29.71)
+    assert report["rank_hit_p50"] == pytest.approx(1.0)
+    assert report["rank_p50"] == report["rank_hit_p50"]
+    assert any("rank_hit" in note and "rank_all" in note for note in report["notes"])
 
 
 def test_build_report_keeps_standard_fields_for_custom_ks_and_derives_hit8():

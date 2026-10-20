@@ -3,12 +3,12 @@
 
 Examples::
 
-    # Diagnose a shadow adapter on a JSONL prompt set, K=8, 32 new tokens.
+    # Diagnose a shadow adapter on a JSONL prompt set, K=16, 32 new tokens.
     PYTHONPATH=src python scripts/exp11_s2t_diagnose.py \
         --model Qwen/Qwen3-4B \
         --shadow-ckpt runs/exp7/adapter \
         --prompts runs/exp11/prompts.jsonl \
-        --max-new-tokens 32 --k 8 --seed 0 \
+        --max-new-tokens 32 --k 16 --seed 0 \
         --out runs/exp11/diagnostic
 
     # Same on a plain-text prompt file (one prompt per line), cached decode.
@@ -57,7 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSONL rows with {'prompt', 'task'} or a plain-text file (one prompt per line).",
     )
     parser.add_argument("--max-new-tokens", type=int, default=32)
-    parser.add_argument("--k", type=int, default=8, help="Shadow candidate count.")
+    parser.add_argument(
+        "--k",
+        type=int,
+        default=16,
+        help="Shadow candidate capture width (default 16 covers Hit@1/4/8/16).",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", default="runs/exp11_s2t_diagnose", help="Output directory.")
     parser.add_argument("--limit", type=int, default=None, help="Use only the first N prompts.")

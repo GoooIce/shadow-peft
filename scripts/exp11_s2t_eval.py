@@ -49,7 +49,10 @@ EXP8_REFERENCE = {
     "name": "exp8 logit ensemble beta=0.7",
     "perplexity": 8.238,
     "requires_base": True,
-    "source": "docs/specs/s2t-local-shadow-selector.md (§Implementation Decisions 6)",
+    "source": (
+        "issue #3 (docs/specs/s2t-local-shadow-selector.md, "
+        "§Implementation Decisions 6)"
+    ),
     "note": "Quoted archive number for comparison; this script does not rerun exp8.",
 }
 
@@ -488,6 +491,11 @@ def _evaluate(args: argparse.Namespace) -> dict[str, Any]:
         notes.append(
             "Base reference skipped: Agree@1, Hit@K and the delta breakdown are null."
         )
+    elif breakdowns:
+        notes.append(
+            "hit_at_8 is 1 - delta_hit at the configured candidate width "
+            f"(--k {args.k}, default 8)."
+        )
     if args.mode == "shadow_selector" and not selector_active:
         notes.append(
             "No selector head supplied; shadow_selector fell back to shadow-greedy tokens."
@@ -533,6 +541,7 @@ def _evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "n_gradable_tasks": n_gradable,
         "breakdown": None if breakdown is None else breakdown.to_dict(),
         "hit_at_k": None if breakdown is None else breakdown.hit_at_k,
+        "hit_at_8": None if breakdown is None else breakdown.hit_at_k,
         "agree_at_1": None if breakdown is None else breakdown.agree_at_1,
         "greedy_agree_at_1": None if breakdown is None else breakdown.greedy_agree_at_1,
         "delta_hit": None if breakdown is None else breakdown.delta_hit,
@@ -540,11 +549,8 @@ def _evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "selection_accuracy_on_hits": (
             None if breakdown is None else breakdown.selection_accuracy_on_hits
         ),
-        "selector_gain": (
-            None
-            if breakdown is None or not selector_active
-            else breakdown.selector_gain
-        ),
+        "selector_gain": None if breakdown is None else breakdown.selector_gain,
+        "latency_overhead": latency.get("overhead"),
         "latency": latency,
         "deployable": deployable,
         "base_reference": BASE_REFERENCE_NOTE if breakdowns else None,
