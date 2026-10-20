@@ -56,6 +56,20 @@ class Backend(Protocol):
 
 
 @runtime_checkable
+class NBestBackend(Protocol):
+    """Backend that can return several complete answers for memory reranking.
+
+    ``generate_nbest`` is an optional capability: the router falls back to a
+    single ``generate`` answer (and no memory reranking) when a backend does not
+    implement it.
+    """
+
+    model_id: str
+
+    def generate_nbest(self, request: InferRequest, n: int = 4) -> list[Generation]: ...
+
+
+@runtime_checkable
 class StreamingBackend(Protocol):
     """Backend that can pause generation at a semantic handoff boundary."""
 
@@ -366,6 +380,18 @@ class MockEdgeBackend:
             latency_ms=(time.perf_counter() - started) * 1000,
             raw={"kb_key": entry.key, "difficulty": entry.difficulty, "edge_quality": quality},
         )
+
+    def generate_nbest(self, request: InferRequest, n: int = 4) -> list[Generation]:
+        """Return the deterministic mock answer ``n`` times.
+
+        The mock has one answer per knowledge-base entry, so every candidate is
+        identical; memory reranking can still be exercised because the candidate
+        list is well-formed and the baseline is unambiguous.
+        """
+
+        count = max(1, int(n))
+        generation = self.generate(request)
+        return [generation for _ in range(count)]
 
 
 _MOCK_TOKEN = re.compile(
@@ -789,6 +815,27 @@ class TransformersBackend:
             latency_ms=(time.perf_counter() - started) * 1000,
             raw={"prompt_tokens": prompt_len},
         )
+
+    def generate_nbest(self, request: InferRequest, n: int = 4) -> list[Generation]:
+        """Sample ``n`` complete answers for memory reranking.
+
+        A temperature > 0 request samples every candidate at that temperature.
+        A greedy request keeps the first (deterministic) answer as the baseline
+        and samples the remaining candidates at a small exploration ladder, as
+        the spec allows for greedy decoding.  This is n sequential generations:
+        edge answers are short and memory reranking is an opt-in path.
+        """
+
+        count = max(1, int(n))
+        if count == 1:
+            return [self.generate(request)]
+        if request.temperature > 0.0:
+            return [self.generate(request) for _ in range(count)]
+        generations = [self.generate(request)]
+        for index in range(1, count):
+            temperature = min(2.0, 0.7 + 0.3 * (index - 1))
+            generations.append(self.generate(replace(request, temperature=temperature)))
+        return generations
 
     def generate_until(
         self,

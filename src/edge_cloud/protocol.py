@@ -182,6 +182,10 @@ class InferResponse:
     prefix_trust: float | None = None
     cloud_output_tokens: int = 0
     cost_estimate: dict[str, Any] | None = None
+    memory_hit: bool = False
+    memory_entry_ids: list[str] = field(default_factory=list)
+    memory_score: float | None = None
+    memory_reranked: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
