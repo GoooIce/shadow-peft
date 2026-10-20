@@ -1,0 +1,544 @@
+"""Evaluation/report seams for the on-policy GKD flywheel (issue #21).
+
+Only public behavior is asserted: paired joint/shadow perplexity under a tiny
+random Llama, structured-task grading, bootstrap intervals, the batch contract
+handed to ``OnPolicyGKDTrainer`` (``source`` branch labels), report fields and
+the CLI parser. CPU, fixed seeds, no real checkpoints.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import math
+from pathlib import Path
+
+import pytest
+
+torch = pytest.importorskip("torch")
+transformers = pytest.importorskip("transformers")
+
+from transformers import LlamaConfig, LlamaForCausalLM  # noqa: E402
+
+from shadow_lab.onpolicy_eval import (  # noqa: E402
+    REPORT_FIELDS,
+    OnPolicyTrainDataset,
+    bootstrap_ci,
+    build_report,
+    collate_training_rows,
+    data_fingerprint,
+    evaluate_ppl,
+    grade_task,
+    task_accuracy,
+)
+from shadow_peft import ShadowConfig, ShadowForCausalLM, get_shadow_model  # noqa: E402
+
+VOCAB = 64
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class _StubTokenizer:
+    """Minimal tokenizer: one id per character, deterministic and pad-free."""
+
+    pad_token_id = 0
+    eos_token_id = None
+    chat_template = None
+
+    def __call__(self, text, add_special_tokens=True):  # noqa: ARG002
+        return {"input_ids": [3 + (ord(char) % (VOCAB - 4)) for char in text]}
+
+
+def _tiny_shadow(seed: int = 0) -> ShadowForCausalLM:
+    torch.manual_seed(seed)
+    base = LlamaForCausalLM(
+        LlamaConfig(
+            vocab_size=VOCAB,
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=256,
+        )
+    )
+    peft = get_shadow_model(
+        base,
+        ShadowConfig(
+            num_shadow_layers=1,
+            injection_hidden_size=8,
+            gate_hidden_size=10,
+            alpha=0.1,
+            dropout=0.0,
+        ),
+    )
+    return ShadowForCausalLM(peft, shadow_loss_weight=0.05, inference_mode="base_shadow")
+
+
+# ---------------------------------------------------------------------------
+# evaluate_ppl
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_ppl_reports_joint_and_shadow_and_restores_mode():
+    model = _tiny_shadow()
+    tokenizer = _StubTokenizer()
+    model.train()
+    model.set_inference_mode("shadow_only")
+
+    report = evaluate_ppl(
+        model,
+        tokenizer,
+        ["the quick brown fox jumps over the lazy dog " * 2],
+        seq_len=16,
+        max_windows=2,
+    )
+
+    assert set(report) == {"joint_ppl", "shadow_ppl", "tokens"}
+    for key in ("joint_ppl", "shadow_ppl"):
+        assert math.isfinite(report[key])
+        assert report[key] > 0.0
+    assert report["tokens"] > 0
+    # The caller's inference mode and train/eval flag survive the evaluation.
+    assert model.inference_mode == "shadow_only"
+    assert model.training is True
+
+
+def test_evaluate_ppl_rejects_streams_too_short_to_score():
+    model = _tiny_shadow()
+    with pytest.raises(ValueError, match="too short"):
+        evaluate_ppl(model, _StubTokenizer(), ["x"], seq_len=16, max_windows=2)
+
+
+# ---------------------------------------------------------------------------
+# Structured grading
+# ---------------------------------------------------------------------------
+
+
+def test_grade_quality_verdict_uses_the_leading_verdict_term():
+    assert (
+        grade_task(
+            "判定：返修。空洞面积超过 25%，不满足放行条件。", "返修", "quality_verdict"
+        )
+        is True
+    )
+    assert grade_task("判定：返修。", "放行", "quality_verdict") is False
+    assert grade_task("结论：不合格，建议拦截。", "reject", "quality_verdict") is True
+    assert grade_task("判定：放行。", "pass", "quality_verdict") is True
+    assert grade_task("Verdict: REWORK due to voids.", "返修", "quality_verdict") is True
+    assert grade_task("无法给出结论。", "返修", "quality_verdict") is False
+
+
+def test_grade_process_calc_uses_numeric_tolerance():
+    assert (
+        grade_task(
+            "30000 DPPM。计算：6 ÷ 200 × 1,000,000 = 30,000 DPPM。",
+            30000,
+            "process_calc",
+        )
+        is True
+    )
+    # Wrong order of magnitude is not within tolerance.
+    assert grade_task("约为 3000 DPPM。", 30000, "process_calc") is False
+    # Rounding within 1% still counts.
+    assert grade_task("结果 29,998 DPPM", "30000", "process_calc") is True
+    # Percent answers grade against both 25 and 0.25.
+    assert grade_task("空洞面积约 25%", 0.25, "process_calc") is True
+    assert grade_task("没有数字", 30000, "process_calc") is False
+
+
+def test_open_ended_tasks_are_not_fake_graded():
+    assert grade_task("any answer", "any expected", "standard_qa") is None
+    assert grade_task(None, "返修", "quality_verdict") is None
+    assert grade_task("判定：返修。", None, "quality_verdict") is None
+
+
+def test_task_accuracy_skips_open_ended_records():
+    records = [
+        {"task": "quality_verdict", "response": "判定：返修。", "expected": "返修"},
+        {"task": "process_calc", "response": "约为 3000 DPPM", "expected": "30000"},
+        {"task": "general", "response": "anything", "expected": "x"},
+        {"task": "quality_verdict", "expected": "返修"},
+    ]
+
+    assert task_accuracy(records) == 0.5
+    assert task_accuracy([{"task": "general", "response": "x"}]) is None
+    assert task_accuracy([]) is None
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap interval
+# ---------------------------------------------------------------------------
+
+
+def test_bootstrap_interval_is_wider_for_small_samples():
+    small = bootstrap_ci([0.0, 1.0, 0.0, 1.0], n_boot=1000, seed=3)
+    large = bootstrap_ci([0.0, 1.0] * 500, n_boot=1000, seed=3)
+
+    assert small[0] < small[1]
+    assert large[0] < large[1]
+    assert (small[1] - small[0]) > (large[1] - large[0])
+    assert bootstrap_ci([0.0, 1.0, 0.0, 1.0], n_boot=1000, seed=3) == small
+
+
+def test_bootstrap_interval_rejects_empty_values_and_zero_bootstraps():
+    with pytest.raises(ValueError, match="at least one value"):
+        bootstrap_ci([])
+    with pytest.raises(ValueError, match="n_boot"):
+        bootstrap_ci([1.0], n_boot=0)
+
+
+# ---------------------------------------------------------------------------
+# Training batch contract
+# ---------------------------------------------------------------------------
+
+
+class _ChatTokenizer(_StubTokenizer):
+    """Stub with a chat template: each message renders as role id + content."""
+
+    chat_template = "stub"
+
+    def apply_chat_template(
+        self, messages, tokenize=True, add_generation_prompt=False
+    ):  # noqa: ARG002
+        role_ids = {"system": 1, "user": 2, "assistant": 3}
+        ids: list[int] = []
+        for message in messages:
+            ids.append(role_ids[message["role"]])
+            ids.extend(self(message["content"])["input_ids"])
+        if add_generation_prompt:
+            ids.append(role_ids["assistant"])
+        return ids
+
+
+def test_onpolicy_train_dataset_maps_prompt_metadata_to_branch_label():
+    tokenizer = _ChatTokenizer()
+    rollout = {
+        "prompt": "q",
+        "source": "cloud",
+        "prompt_ids": [5, 6, 7],
+        "rollout_ids": [8, 9, 10],
+    }
+    supervised = {
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "ans"},
+        ],
+        "meta": {"source": "feedback"},
+    }
+
+    dataset = OnPolicyTrainDataset(
+        tokenizer,
+        rollout_rows=[rollout],
+        supervised_rows=[supervised],
+        max_seq_len=64,
+    )
+
+    assert len(dataset) == 2
+    onpolicy, supervised_item = dataset[0], dataset[1]
+    assert onpolicy["source"] == "onpolicy"  # not the prompt's "cloud" provenance
+    assert onpolicy["input_ids"] == [5, 6, 7, 8, 9, 10]
+    assert onpolicy["labels"] == [-100, -100, -100, 8, 9, 10]
+    assert supervised_item["source"] == "supervised"
+    answer_ids = tokenizer("ans", add_special_tokens=True)["input_ids"]
+    assert supervised_item["input_ids"][-len(answer_ids) :] == answer_ids
+    assert supervised_item["labels"][:-len(answer_ids)] == [
+        -100
+    ] * (len(supervised_item["input_ids"]) - len(answer_ids))
+    assert supervised_item["labels"][-len(answer_ids) :] == answer_ids
+    # Original provenance is preserved for audit, outside the batch contract.
+    assert dataset.prompt_sources == ["cloud", "feedback"]
+    assert set(dataset[0]) == {"input_ids", "attention_mask", "labels", "source"}
+
+
+def test_onpolicy_train_dataset_truncates_prompt_before_rollout_tokens():
+    dataset = OnPolicyTrainDataset(
+        _StubTokenizer(),
+        rollout_rows=[{"prompt_ids": [1, 2, 3, 4], "rollout_ids": [5, 6, 7]}],
+        max_seq_len=5,
+    )
+
+    item = dataset[0]
+
+    assert item["input_ids"] == [3, 4, 5, 6, 7]
+    assert item["labels"] == [-100, -100, 5, 6, 7]
+
+
+def test_collate_training_rows_pads_labels_and_keeps_branch_sources():
+    rows = [
+        {
+            "input_ids": [5, 6, 7],
+            "attention_mask": [1, 1, 1],
+            "labels": [-100, 6, 7],
+            "source": "onpolicy",
+            "prompt_source": "cloud",
+        },
+        {
+            "input_ids": [8, 9],
+            "attention_mask": [1, 1],
+            "labels": [8, 9],
+            "source": "supervised",
+        },
+    ]
+
+    batch = collate_training_rows(rows, pad_id=0)
+
+    assert batch["input_ids"].shape == (2, 3)
+    assert batch["input_ids"][0].tolist() == [5, 6, 7]
+    assert batch["input_ids"][1].tolist() == [8, 9, 0]
+    assert batch["attention_mask"][1].tolist() == [1, 1, 0]
+    assert batch["labels"][0].tolist() == [-100, 6, 7]
+    assert batch["labels"][1].tolist() == [8, 9, -100]
+    assert batch["source"] == ["onpolicy", "supervised"]
+    assert "prompt_source" not in batch
+
+
+def test_collate_training_rows_rejects_prompt_metadata_as_source():
+    row = {"input_ids": [1], "labels": [1], "source": "cloud"}
+
+    with pytest.raises(ValueError, match="prompt_source"):
+        collate_training_rows([row], pad_id=0)
+    with pytest.raises(ValueError, match="at least one row"):
+        collate_training_rows([], pad_id=0)
+
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+
+
+def _report_kwargs(**overrides):
+    kwargs = {
+        "joint_ppl": 10.0,
+        "shadow_ppl": 9.0,
+        "task_accuracy": 0.75,
+        "rollout_mode": "base_shadow",
+        "lambda_onpolicy": 0.5,
+        "divergence": "jsd",
+        "teacher_support": "topk",
+        "tokens_seen": 1234,
+        "wall_clock": 1.5,
+        "discard_rate": 0.25,
+        "prompts": ["b", "a"],
+        "teacher_version": "qwen3-4b",
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_build_report_contains_every_core_field():
+    report = build_report(**_report_kwargs())
+
+    assert set(report) == set(REPORT_FIELDS)
+    assert report["joint_ppl"] == 10.0
+    assert report["shadow_ppl"] == 9.0
+    assert report["task_accuracy"] == 0.75
+    assert report["lambda"] == 0.5
+    assert report["no_go"] is False
+    assert len(report["data_fingerprint"]) == 64
+
+
+def test_build_report_fails_when_a_core_field_is_missing():
+    kwargs = _report_kwargs()
+    kwargs.pop("joint_ppl")
+
+    with pytest.raises(TypeError):
+        build_report(**kwargs)
+
+
+def test_data_fingerprint_tracks_data_identity_only():
+    base = data_fingerprint(
+        ["b", "a"], teacher_version="qwen3-4b", lambda_onpolicy=0.5, divergence="jsd"
+    )
+
+    assert (
+        data_fingerprint(
+            ["a", "b", "a"],
+            teacher_version="qwen3-4b",
+            lambda_onpolicy=0.5,
+            divergence="jsd",
+        )
+        == base
+    )
+    for changed in (
+        {"prompts": ["a", "c"]},
+        {"teacher_version": "qwen3-8b"},
+        {"lambda_onpolicy": 1.0},
+        {"divergence": "forward_kl"},
+    ):
+        kwargs = {
+            "prompts": ["b", "a"],
+            "teacher_version": "qwen3-4b",
+            "lambda_onpolicy": 0.5,
+            "divergence": "jsd",
+        }
+        kwargs.update(changed)
+        assert data_fingerprint(**kwargs) != base
+
+
+def test_no_go_flags_shadow_gain_without_joint_gain():
+    baseline = {"joint_ppl": 10.0, "shadow_ppl": 10.0}
+
+    worse_joint = build_report(
+        **_report_kwargs(joint_ppl=10.5, shadow_ppl=9.0, baseline_sft=baseline)
+    )
+    both_better = build_report(
+        **_report_kwargs(joint_ppl=9.0, shadow_ppl=9.0, baseline_sft=baseline)
+    )
+    shadow_worse = build_report(
+        **_report_kwargs(joint_ppl=9.0, shadow_ppl=11.0, baseline_sft=baseline)
+    )
+
+    assert worse_joint["no_go"] is True
+    assert both_better["no_go"] is False
+    assert shadow_worse["no_go"] is False
+    assert worse_joint["baseline_sft"] == baseline
+
+
+def test_build_report_rejects_invalid_metrics():
+    with pytest.raises(ValueError, match="joint_ppl"):
+        build_report(**_report_kwargs(joint_ppl=float("inf")))
+    with pytest.raises(ValueError, match="discard_rate"):
+        build_report(**_report_kwargs(discard_rate=1.5))
+    with pytest.raises(ValueError, match="teacher_support"):
+        build_report(**_report_kwargs(teacher_support="approx"))
+
+
+# ---------------------------------------------------------------------------
+# CLI parser (no model loading)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def cli_module():
+    path = ROOT / "scripts" / "exp10_onpolicy_gkd.py"
+    spec = importlib.util.spec_from_file_location("exp10_onpolicy_gkd", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_cli_help_is_available_for_every_subcommand(cli_module):
+    for argv in ([], ["rollouts"], ["train"], ["eval"], ["run"]):
+        with pytest.raises(SystemExit) as excinfo:
+            cli_module.build_parser().parse_args([*argv, "--help"])
+        assert excinfo.value.code == 0
+
+
+def test_cli_parses_rollouts_arguments(cli_module):
+    args = cli_module.build_parser().parse_args(
+        [
+            "rollouts",
+            "--prompts",
+            "prompts.jsonl",
+            "--out",
+            "rollouts.jsonl",
+            "--model",
+            "base-model",
+            "--shadow-ckpt",
+            "adapter",
+            "--shadow-model-path",
+            "shadow-model",
+            "--rollout-mode",
+            "shadow_only",
+            "--g",
+            "3",
+            "--max-new-tokens",
+            "32",
+            "--seed",
+            "7",
+        ]
+    )
+
+    assert args.command == "rollouts"
+    assert args.prompts == "prompts.jsonl"
+    assert args.out == "rollouts.jsonl"
+    assert args.shadow_ckpt == "adapter"
+    assert args.shadow_model_path == "shadow-model"
+    assert args.rollout_mode == "shadow_only"
+    assert args.num_rollouts == 3
+    assert args.max_new_tokens == 32
+    assert args.seed == 7
+
+
+def test_cli_parses_train_eval_and_run_arguments(cli_module):
+    parser = cli_module.build_parser()
+    train = parser.parse_args(
+        [
+            "train",
+            "--model",
+            "base-model",
+            "--teacher",
+            "teacher-model",
+            "--rollouts",
+            "rollouts.jsonl",
+            "--supervised",
+            "sft.jsonl",
+            "--out",
+            "adapter",
+            "--lambda",
+            "0.25",
+            "--divergence",
+            "jsd",
+            "--topk",
+            "16",
+            "--shadow-aux-weight",
+            "0.1",
+            "--max-steps",
+            "3",
+        ]
+    )
+    assert train.command == "train"
+    assert train.lambda_onpolicy == 0.25
+    assert train.divergence == "jsd"
+    assert train.topk == 16
+    assert train.shadow_aux_weight == 0.1
+    assert train.max_steps == 3
+    assert train.supervised == "sft.jsonl"
+
+    evaluation = parser.parse_args(
+        [
+            "eval",
+            "--model",
+            "base-model",
+            "--shadow-ckpt",
+            "adapter",
+            "--heldout",
+            "heldout.jsonl",
+            "--tasks",
+            "tasks.jsonl",
+            "--out",
+            "report.json",
+        ]
+    )
+    assert evaluation.command == "eval"
+    assert evaluation.heldout == "heldout.jsonl"
+    assert evaluation.tasks == "tasks.jsonl"
+
+    run = parser.parse_args(
+        [
+            "run",
+            "--prompts",
+            "prompts.jsonl",
+            "--model",
+            "base-model",
+            "--shadow-ckpt",
+            "adapter",
+            "--teacher",
+            "teacher-model",
+            "--heldout",
+            "heldout.jsonl",
+            "--out",
+            "runs/exp10/smoke",
+            "--smoke",
+        ]
+    )
+    assert run.command == "run"
+    assert run.smoke is True
+
+
+def test_cli_rejects_missing_required_arguments(cli_module):
+    with pytest.raises(SystemExit) as excinfo:
+        cli_module.build_parser().parse_args(
+            ["rollouts", "--out", "rollouts.jsonl", "--model", "m"]
+        )
+    assert excinfo.value.code == 2
