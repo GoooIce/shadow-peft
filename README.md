@@ -634,6 +634,7 @@ This repository also ships a runnable reference implementation for **edge-cloud 
 - Design: [docs/edge-cloud-system.md](docs/edge-cloud-system.md)
 - Requirements draft: [docs/edge-cloud-srs.md](docs/edge-cloud-srs.md)
 - exp9 token-level handoff evaluation: [docs/exp9-handoff-eval.md](docs/exp9-handoff-eval.md)
+- exp15 cost-aware per-task thresholds: [docs/exp15-cost-policy.md](docs/exp15-cost-policy.md)
 - Code: `src/edge_cloud/`
 
 ```bash
@@ -666,6 +667,31 @@ PYTHONPATH=src python scripts/exp9_handoff_eval.py --backend synthetic \
 ```
 
 The synthetic round, its numbers, curves, bootstrap intervals and known limitations are archived in [docs/exp9-handoff-eval.md](docs/exp9-handoff-eval.md). Real transformers/OpenAI backends and a customer-labelled evaluation set are still pending.
+
+### Per-task escalation thresholds
+
+`edge.escalation_threshold_by_task` gives the legacy whole-answer path a threshold per task; tasks missing from the map fall back to `edge.escalation_threshold`, and `edge.require_cloud_tasks` still wins (those tasks always escalate). An empty map reproduces the previous behavior, and the probe path keeps using `handoff_threshold_by_task` independently.
+
+```json
+{
+  "escalation_threshold": 0.45,
+  "escalation_threshold_by_task": {
+    "fault_diagnosis": 0.35,
+    "process_calc": 0.35,
+    "process_qa": 0.0
+  }
+}
+```
+
+Fit a policy offline, then review the emitted `policy.json` before pasting it into `configs/edge-cloud/example.json`:
+
+```bash
+# synthetic only validates the pipeline (claims_gain=false); pass --dataset for real replay
+PYTHONPATH=src python scripts/exp15_cost_policy.py --synthetic \
+  --out runs-local/exp15 --bootstrap 1000
+```
+
+The synthetic run, λ sweep, per-task metrics, caveats and the replay evidence gate are documented in [docs/exp15-cost-policy.md](docs/exp15-cost-policy.md); the spec is [docs/specs/cost-aware-task-thresholds.md](docs/specs/cost-aware-task-thresholds.md).
 
 ---
 
