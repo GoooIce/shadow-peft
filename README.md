@@ -699,6 +699,27 @@ The synthetic run, λ sweep, per-task metrics, caveats and the replay evidence g
 
 ---
 
+## Shadow-only recovery and real evaluation (exp16/exp17)
+
+- **exp16 shadow-only recovery**：export round-trip、可训练范围、shadow-only 指令 SFT 与 GSM8K 评测。MVP 管线已跑通；完整 3–5 天 SFT 未运行。See [docs/exp16-shadow-only-recovery.md](docs/exp16-shadow-only-recovery.md).
+- **exp17 real-corpus eval**：GKD/S2T/RESTRAIN/JitRL 的统一复评 harness；真实 GSM8K/exp12 数据优先，缺数据时明确 `data_missing`。MVP 冒烟为 `evidence_insufficient`；完整 2–4 天复评未运行。See [docs/exp17-real-eval.md](docs/exp17-real-eval.md).
+
+```bash
+# Export round-trip + 2-step SFT smoke (goooinext; needs the 4B/H4B/exp7 assets)
+PYTHONPATH=src python scripts/exp16_shadow_only.py run \
+  --base-model ~/models/Qwen3-4B \
+  --shadow-model ~/models/Qwen3-0.6B-H4B \
+  --shadow-ckpt runs/exp7/e4b-seed0/ckpt-final \
+  --out runs-local/exp16 --smoke --device cuda --dtype bfloat16
+
+# Real GSM8K GKD smoke
+PYTHONPATH=src python scripts/exp17_real_eval.py --suite gkd --dataset gsm8k \
+  --model ~/models/Qwen3-0.6B --shadow-ckpt runs/exp10/smoke/fresh-adapter \
+  --limit 8 --smoke --device cuda --dtype bfloat16 --out runs-local/exp17/gkd
+```
+
+---
+
 ## Notes and Limitations
 
 - **KV cache is supported.** Training and full-sequence forwards default to `use_cache=False`; generation works with `use_cache=True`, keeping one KV cache for the base model and a second one for the shadow backbone (identical tokens to uncached decoding, much faster).
