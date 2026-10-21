@@ -556,6 +556,60 @@ def test_probe_unavailable_falls_back_to_the_whole_segment_path(tmp_path: Path) 
     assert "handoff_total" not in counters
 
 
+def test_probe_fallback_uses_per_task_escalation_threshold(tmp_path: Path) -> None:
+    backend = ScriptedStreamingBackend(["判", "定", "："])
+    cloud = FakeCloud()
+    config = edge_config(
+        tmp_path,
+        probe_path=str(tmp_path / "missing-probe.json"),
+        escalation_threshold=0.62,
+        escalation_threshold_by_task={"keep_task": 0.7, "escalate_task": 0.99},
+    )
+    router = Router(backend, config, cloud_client=cloud)
+
+    stays_on_edge = router.infer(
+        InferRequest(prompt="安全操作规范", task="keep_task", deadline_ms=3000)
+    )
+    escalated = router.infer(
+        InferRequest(prompt="安全操作规范", task="escalate_task", deadline_ms=3000)
+    )
+
+    assert stays_on_edge.source == "edge"
+    assert stays_on_edge.escalated is False
+    assert escalated.escalated is True
+    assert escalated.escalation_reason == "low_confidence"
+    assert escalated.edge_confidence == pytest.approx(stays_on_edge.confidence)
+    assert "触发升级：low_confidence（task=escalate_task 阈值 0.99）" in escalated.trace
+
+
+def test_probe_path_keeps_handoff_threshold_by_task_semantics(tmp_path: Path) -> None:
+    backend = ScriptedStreamingBackend(["安全。", "完成。"])
+    cloud = FakeCloud(text="云端补充。", output_tokens=3)
+    config = edge_config(
+        tmp_path,
+        probe_path=write_trigger_probe(tmp_path, 2),
+        handoff_threshold=0.5,
+        handoff_threshold_by_task={"process_qa": 0.995},
+        escalation_threshold_by_task={"process_qa": 0.0},
+    )
+    router = Router(backend, config, cloud_client=cloud)
+
+    response = router.infer(
+        InferRequest(
+            prompt="安全操作规范", task="process_qa", max_tokens=32, deadline_ms=3000
+        )
+    )
+
+    assert len(cloud.calls) == 1
+    cloud_request, _ = cloud.calls[0]
+    assert cloud_request.partial_trace == "安全。"
+    assert cloud_request.handoff_index == 1
+    assert cloud_request.handoff_reason == "low_prefix_trust"
+    assert response.escalated is True
+    assert response.escalation_reason == "low_prefix_trust"
+
+
+
 def test_non_streaming_backend_falls_back_with_streaming_unavailable_metric(
     tmp_path: Path,
 ) -> None:
