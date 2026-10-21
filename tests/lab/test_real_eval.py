@@ -679,10 +679,13 @@ def test_cli_without_model_writes_data_missing_report(
 
 
 def test_cli_all_without_model_never_loads_gsm8k(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cli = _load_cli()
     out = tmp_path / "out"
+    monkeypatch.setitem(sys.modules, "datasets", None)
 
     exit_code = cli.main(["--suite", "all", "--out", str(out), "--smoke"])
     capsys.readouterr()

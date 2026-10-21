@@ -256,14 +256,15 @@ def load_gsm8k_examples(
         row = rows[row_index]
         question = str(row.get("question") or "").strip()
         reference = str(row.get("answer") or "").strip()
-        if not question or "####" not in reference:
+        final = _final_answer(reference) if "####" in reference else ""
+        if not question or not final:
             continue
         examples.append(
             EvalExample(
                 id=f"gsm8k-{split}-{row_index}",
                 prompt=f"{question}\nAnswer:",
                 task="gsm8k",
-                expected=_final_answer(reference),
+                expected=final,
                 metadata={
                     "source": "gsm8k",
                     "split": split,
