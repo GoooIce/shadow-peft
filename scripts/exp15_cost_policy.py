@@ -454,7 +454,7 @@ def _normalize_threshold_grid(values: Iterable[float]) -> tuple[float, ...]:
         raise ValueError("阈值网格必须是数值序列") from exc
     if not items:
         raise ValueError("阈值网格不能为空")
-    return tuple(sorted({_unit(value, "threshold") for value in items}))
+    return tuple(sorted({round(_unit(value, "threshold"), 9) for value in items}))
 
 
 def _references(

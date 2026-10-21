@@ -500,6 +500,27 @@ def test_experiment_full_replay_can_claim_gain(exp15):
     }
 
 
+def test_experiment_is_deterministic_with_bootstrap(exp15):
+    samples = exp15.build_synthetic_samples(variants_per_entry=2, seed=15)
+    kwargs = {
+        "dataset_source": "synthetic",
+        "seed": 15,
+        "min_samples": 1,
+        "bootstrap": 10,
+        "selected_lambda": 0.1,
+        "require_cloud_tasks": ("quality_verdict",),
+        "smoke": True,
+    }
+
+    first = exp15.run_experiment(samples, **kwargs)
+    second = exp15.run_experiment(samples, **kwargs)
+
+    assert first.report == second.report
+    assert first.policy == second.policy
+    assert first.summary_rows == second.summary_rows
+    assert first.curve_rows == second.curve_rows
+
+
 # ---------------------------------------------------------------------------
 # Summary/curve tables and artifacts
 # ---------------------------------------------------------------------------
