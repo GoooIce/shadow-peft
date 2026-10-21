@@ -45,8 +45,10 @@ def two_task_samples() -> list[CostSample]:
 
     return [
         sample("task_a", 0.2, edge_correct=False, cloud_correct=True),
+        sample("task_a", 0.25, edge_correct=False, cloud_correct=True),
         sample("task_a", 0.3, edge_correct=True, cloud_correct=True),
         sample("task_b", 0.5, edge_correct=False, cloud_correct=True),
+        sample("task_b", 0.65, edge_correct=False, cloud_correct=True),
         sample("task_b", 0.7, edge_correct=True, cloud_correct=True),
     ]
 
@@ -63,9 +65,9 @@ def test_fit_finds_known_per_task_thresholds() -> None:
     assert fit.cost_weight == pytest.approx(0.1)
     assert fit.min_samples == 2
     assert fit.always_cloud_tasks == ()
-    assert fit.per_task["task_a"].n == 2
+    assert fit.per_task["task_a"].n == 3
     assert fit.per_task["task_a"].fallback_reason is None
-    assert fit.per_task["task_b"].n == 2
+    assert fit.per_task["task_b"].n == 3
 
 
 def test_cost_weight_zero_maximises_accuracy_and_high_weight_prefers_low_cost() -> None:
@@ -77,23 +79,25 @@ def test_cost_weight_zero_maximises_accuracy_and_high_weight_prefers_low_cost() 
     accuracy_only = fit_cost_policy(samples, cost_weight=0.0, min_samples=2)
     cost_averse = fit_cost_policy(samples, cost_weight=10.0, min_samples=2)
 
-    assert accuracy_only.global_threshold == pytest.approx(0.80)
+    assert accuracy_only.global_threshold == pytest.approx(0.25)
     assert accuracy_only.global_report.accuracy == pytest.approx(1.0)
-    assert cost_averse.global_threshold == pytest.approx(0.20)
+    assert cost_averse.global_threshold == pytest.approx(0.0)
     assert cost_averse.global_report.cost < accuracy_only.global_report.cost
 
 
-def test_objective_ties_pick_the_higher_threshold_and_record_the_tie_break() -> None:
+def test_objective_ties_pick_the_lower_threshold_and_record_the_tie_break() -> None:
     samples = [
-        sample("task", 0.4, edge_correct=True, cloud_correct=True, edge_cost=0.5),
-        sample("task", 0.4, edge_correct=True, cloud_correct=True, edge_cost=0.5),
+        sample("task", 0.4, edge_correct=True, cloud_correct=True),
+        sample("task", 0.4, edge_correct=True, cloud_correct=True),
     ]
 
-    fit = fit_cost_policy(samples, cost_weight=0.1, min_samples=2)
+    fit = fit_cost_policy(samples, cost_weight=0.0, min_samples=2)
 
-    assert fit.global_threshold == pytest.approx(1.0)
-    assert fit.per_task["task"].threshold == pytest.approx(1.0)
-    assert fit.per_task["task"].tie_break == "higher_threshold"
+    assert fit.global_threshold == pytest.approx(0.0)
+    assert fit.per_task["task"].threshold == pytest.approx(0.0)
+    assert fit.per_task["task"].tie_break == "lower_threshold"
+    assert fit.per_task["task"].escalation_rate == pytest.approx(0.0)
+    assert fit.per_task["task"].cost == pytest.approx(0.1)
 
 
 def test_sparse_task_falls_back_to_the_global_threshold() -> None:

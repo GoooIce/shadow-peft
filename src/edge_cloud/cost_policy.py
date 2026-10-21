@@ -25,7 +25,7 @@ _THRESHOLD_STEP = 0.05
 DEFAULT_THRESHOLD_GRID: tuple[float, ...] = tuple(
     round(index * _THRESHOLD_STEP, _PRECISION) for index in range(21)
 )
-TIE_BREAK_HIGHER_THRESHOLD = "higher_threshold"
+TIE_BREAK_LOWER_THRESHOLD = "lower_threshold"
 FALLBACK_INSUFFICIENT_SAMPLES = "insufficient_samples"
 
 
@@ -511,10 +511,7 @@ def _fit_threshold(
             best_metrics = metrics
             tie_break = None
         elif metrics["objective"] == best_metrics["objective"]:
-            if threshold > best_threshold:
-                best_threshold = threshold
-                best_metrics = metrics
-            tie_break = TIE_BREAK_HIGHER_THRESHOLD
+            tie_break = TIE_BREAK_LOWER_THRESHOLD
     return best_threshold, best_metrics, tie_break
 
 
