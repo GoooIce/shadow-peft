@@ -345,6 +345,55 @@ def test_go_no_go_fails_on_escalation_cap_and_direction_inversion(exp15):
     assert gate["inverted_tasks"] == ["task_a"]
 
 
+def test_go_no_go_keeps_overall_inversion_as_a_diagnostic(exp15):
+    def task_entry(objective: float) -> dict:
+        return {
+            "task_a": {
+                "n": 50,
+                "accuracy": 0.9,
+                "cost": 0.8,
+                "cost_norm": 0.8,
+                "objective": objective,
+                "escalation_rate": 0.4,
+                "cloud_calls": 20,
+                "threshold": 0.3,
+                "always_cloud": False,
+                "latency_p95_ms": None,
+            }
+        }
+
+    per_task_val = _eval_report(
+        0.9, 0.8, objective=0.82, tasks=task_entry(0.82)
+    )
+    baseline_val = _eval_report(
+        0.9, 1.0, objective=0.9, tasks=task_entry(0.80)
+    )
+    per_task_train = _eval_report(
+        0.9, 0.8, objective=0.82, tasks=task_entry(0.82)
+    )
+    baseline_train = _eval_report(
+        0.9, 1.0, objective=0.80, tasks=task_entry(0.80)
+    )
+
+    gate = exp15.evaluate_go_no_go(
+        per_task_val,
+        baseline_val,
+        per_task_train,
+        baseline_train,
+        fitted_tasks=("task_a",),
+        min_samples=1,
+    )
+
+    # The aggregate objective improves on train and drops on val, but no task
+    # shows that reversal, so the per-task check must stay green.
+    assert gate["overall_inverted"] is True
+    assert gate["inverted_tasks"] == []
+    assert gate["checks"]["no_direction_inversion"] is True
+    assert gate["failed_checks"] == []
+    assert gate["status"] == "go"
+    assert all("整体 objective" not in reason for reason in gate["reasons"])
+
+
 def test_go_no_go_exempts_always_cloud_tasks_from_the_escalation_cap(exp15):
     tasks = {
         "task_a": {
@@ -431,6 +480,66 @@ def test_evidence_gate_passes_for_large_replay(exp15):
     }
 
 
+def test_cloud_only_reference_uses_cloud_only_cost(exp15):
+    samples = [
+        CostSample(
+            task="task_a",
+            score=0.4,
+            edge_correct=False,
+            cloud_correct=True,
+            edge_cost=0.1,
+            escalated_cost=0.9,
+            cloud_only_cost=0.5,
+            split="val",
+        ),
+        CostSample(
+            task="task_a",
+            score=0.6,
+            edge_correct=True,
+            cloud_correct=True,
+            edge_cost=0.1,
+            escalated_cost=0.9,
+            cloud_only_cost=0.7,
+            split="val",
+        ),
+    ]
+
+    reference = exp15.cloud_only_reference(samples, cost_weight=0.2)
+
+    assert reference["n"] == 2
+    assert reference["accuracy"] == pytest.approx(1.0)
+    assert reference["cost"] == pytest.approx(0.6)
+    assert reference["cost_norm"] == pytest.approx(1.0)
+    assert reference["objective"] == pytest.approx(1.0 - 0.2 * 1.0)
+    assert reference["cloud_calls"] == 2
+    assert reference["escalation_rate"] == pytest.approx(1.0)
+    # It is the direct cloud cost, not the always-escalate escalated cost.
+    assert reference["cost"] != pytest.approx(0.9)
+    assert reference["per_task"]["task_a"]["cost"] == pytest.approx(0.6)
+    assert reference["per_task"]["task_a"]["cost_norm"] == pytest.approx(1.0)
+
+
+def test_cloud_only_reference_handles_a_zero_cost_denominator(exp15):
+    samples = [
+        CostSample(
+            task="free_cloud",
+            score=0.4,
+            edge_correct=False,
+            cloud_correct=True,
+            edge_cost=0.1,
+            escalated_cost=0.2,
+            cloud_only_cost=0.0,
+            split="val",
+        )
+    ]
+
+    reference = exp15.cloud_only_reference(samples, cost_weight=0.5)
+
+    assert reference["cost"] == pytest.approx(0.0)
+    assert reference["cost_norm"] == pytest.approx(0.0)
+    assert reference["objective"] == pytest.approx(1.0)
+
+
 def test_experiment_synthetic_never_claims_gain(exp15):
     samples = exp15.build_synthetic_samples(variants_per_entry=2, seed=15)
 
@@ -452,7 +561,10 @@ def test_experiment_synthetic_never_claims_gain(exp15):
     assert report["selected"]["lambda"] == pytest.approx(exp15.DEFAULT_SELECT_LAMBDA)
     assert result.policy["escalation_threshold_by_task"]
     assert report["selected"]["references"]["edge_only"]["escalation_rate"] == 0.0
-    assert report["selected"]["references"]["cloud_only"]["escalation_rate"] == 1.0
+    cloud_only = report["selected"]["references"]["cloud_only"]
+    assert cloud_only["escalation_rate"] == 1.0
+    assert cloud_only["cost_norm"] == pytest.approx(1.0)
+    assert cloud_only["cloud_calls"] == report["counts"]["val"]
 
 
 def test_experiment_small_replay_is_evidence_insufficient(exp15):

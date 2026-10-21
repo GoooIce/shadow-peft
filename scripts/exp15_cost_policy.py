@@ -379,7 +379,9 @@ def evaluate_go_no_go(
         "primary_condition": primary,
         "no_task_over_escalation_cap": not violations,
         "val_sample_sizes": not size_failures,
-        "no_direction_inversion": not overall_inverted and not inverted_tasks,
+        # Spec §7 only makes the per-task reversal a gate; the aggregate
+        # reversal stays in the report as a diagnostic.
+        "no_direction_inversion": not inverted_tasks,
     }
     failed = [
         name
@@ -398,10 +400,6 @@ def evaluate_go_no_go(
         reasons.append(f"task={violation['task']} val 升级率 {violation['rate']:.3f} > {cap:.3f}")
     for failure in size_failures:
         reasons.append(f"task={failure['task']} val 样本 {failure['val']} < {minimum}")
-    if overall_inverted:
-        reasons.append(
-            f"整体 objective 在 train 提升 {train_delta:+.4f} 但 val 下降 {val_delta:+.4f}"
-        )
     if inverted_tasks:
         reasons.append(f"task 方向反转: {', '.join(inverted_tasks)}")
 
@@ -465,19 +463,12 @@ def _references(
     bootstrap: int,
     seed: int,
 ) -> dict[str, Any]:
-    val_tasks = sorted({sample.task for sample in samples if sample.split == "val"})
     policies = {
         "edge_only": CostPolicy(
             global_threshold=0.0,
             thresholds_by_task={},
             cost_weight=select_lambda,
             always_cloud_tasks=(),
-        ),
-        "cloud_only": CostPolicy(
-            global_threshold=0.0,
-            thresholds_by_task={},
-            cost_weight=select_lambda,
-            always_cloud_tasks=val_tasks,
         ),
         "current_0.62": CostPolicy(
             global_threshold=CURRENT_DEFAULT_THRESHOLD,
@@ -486,11 +477,68 @@ def _references(
             always_cloud_tasks=require_cloud_tasks,
         ),
     }
-    return {
+    references = {
         name: evaluate_cost_policy(
             policy, samples, split="val", n_boot=bootstrap, seed=seed
         ).to_dict()
         for name, policy in policies.items()
+    }
+    references["cloud_only"] = cloud_only_reference(
+        samples, cost_weight=select_lambda
+    )
+    return references
+
+
+def cloud_only_reference(
+    samples: Sequence[CostSample],
+    *,
+    cost_weight: float,
+) -> dict[str, Any]:
+    """Spec §6 cloud-only endpoint: every request goes straight to the cloud.
+
+    The endpoint uses ``cloud_only_cost`` (prompt prefill + decode + call), not
+    the always-escalate ``escalated_cost`` (which also bills the edge answer).
+    ``cost_norm`` is therefore 1.0 by construction, or 0.0 when the cloud-only
+    denominator is zero. Bootstrap intervals and P95 are not reported because
+    ``CostSample`` has no cloud-only latency field.
+    """
+
+    weight = _finite_non_negative(cost_weight, "cost_weight")
+    val = [sample for sample in samples if sample.split == "val"]
+    if not val:
+        raise ValueError("val split 为空")
+
+    def summarize(group: Sequence[CostSample]) -> dict[str, Any]:
+        n = len(group)
+        accuracy = sum(1.0 if sample.cloud_correct else 0.0 for sample in group) / n
+        cost = sum(sample.cloud_only_cost for sample in group) / n
+        cost_norm = 1.0 if cost > 0.0 else 0.0
+        return {
+            "n": n,
+            "accuracy": round(accuracy, 9),
+            "cost": round(cost, 9),
+            "cost_norm": cost_norm,
+            "objective": round(accuracy - weight * cost_norm, 9),
+            "escalation_rate": 1.0,
+            "cloud_calls": n,
+            "latency_p95_ms": None,
+        }
+
+    groups: dict[str, list[CostSample]] = {}
+    for sample in val:
+        groups.setdefault(sample.task, []).append(sample)
+    per_task = {
+        task: {
+            **summarize(groups[task]),
+            "threshold": None,
+            "always_cloud": True,
+        }
+        for task in sorted(groups)
+    }
+    return {
+        **summarize(val),
+        "per_task": per_task,
+        "cost_weight": weight,
     }
 
 
@@ -773,20 +821,25 @@ def _cloud_calls_per_example(metrics: Mapping[str, Any]) -> float:
     return round(float(metrics.get("cloud_calls", 0)) / n, 9) if n else 0.0
 
 
-def _aggregate_summary_row(
+def _summary_row(
     weight: float,
     arm: str,
+    task: str,
     metrics: Mapping[str, Any],
     *,
     status: str,
     failed_checks: Sequence[str],
+    threshold: Any,
+    always_cloud: Any,
 ) -> dict[str, Any]:
+    """Build one 20-column summary row shared by the aggregate and task arms."""
+
     accuracy_ci = metrics.get("accuracy_ci") or {}
     cost_ci = metrics.get("cost_ci") or {}
     return {
         "lambda": weight,
         "arm": arm,
-        "task": "",
+        "task": task,
         "n": metrics.get("n"),
         "accuracy": metrics.get("accuracy"),
         "cost_per_request": metrics.get("cost"),
@@ -796,8 +849,8 @@ def _aggregate_summary_row(
         "cloud_calls": metrics.get("cloud_calls"),
         "cloud_calls_per_example": _cloud_calls_per_example(metrics),
         "latency_p95_ms": metrics.get("latency_p95_ms"),
-        "threshold": metrics.get("global_threshold"),
-        "always_cloud": "",
+        "threshold": threshold,
+        "always_cloud": always_cloud,
         "accuracy_ci_low": accuracy_ci.get("low"),
         "accuracy_ci_high": accuracy_ci.get("high"),
         "cost_ci_low": cost_ci.get("low"),
@@ -805,6 +858,26 @@ def _aggregate_summary_row(
         "status": status,
         "failed_checks": ";".join(failed_checks),
     }
+
+
+def _aggregate_summary_row(
+    weight: float,
+    arm: str,
+    metrics: Mapping[str, Any],
+    *,
+    status: str,
+    failed_checks: Sequence[str],
+) -> dict[str, Any]:
+    return _summary_row(
+        weight,
+        arm,
+        "",
+        metrics,
+        status=status,
+        failed_checks=failed_checks,
+        threshold=metrics.get("global_threshold"),
+        always_cloud="",
+    )
 
 
 def _per_task_summary_rows(
@@ -815,33 +888,19 @@ def _per_task_summary_rows(
     status: str,
     failed_checks: Sequence[str],
 ) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for task, entry in sorted(metrics.get("per_task", {}).items()):
-        rows.append(
-            {
-                "lambda": weight,
-                "arm": arm,
-                "task": task,
-                "n": entry.get("n"),
-                "accuracy": entry.get("accuracy"),
-                "cost_per_request": entry.get("cost"),
-                "cost_norm": entry.get("cost_norm"),
-                "objective": entry.get("objective"),
-                "escalation_rate": entry.get("escalation_rate"),
-                "cloud_calls": entry.get("cloud_calls"),
-                "cloud_calls_per_example": _cloud_calls_per_example(entry),
-                "latency_p95_ms": entry.get("latency_p95_ms"),
-                "threshold": entry.get("threshold"),
-                "always_cloud": entry.get("always_cloud"),
-                "accuracy_ci_low": None,
-                "accuracy_ci_high": None,
-                "cost_ci_low": None,
-                "cost_ci_high": None,
-                "status": status,
-                "failed_checks": ";".join(failed_checks),
-            }
+    return [
+        _summary_row(
+            weight,
+            arm,
+            task,
+            entry,
+            status=status,
+            failed_checks=failed_checks,
+            threshold=entry.get("threshold"),
+            always_cloud=entry.get("always_cloud"),
         )
-    return rows
+        for task, entry in sorted(metrics.get("per_task", {}).items())
+    ]
 
 
 def _summary_rows(report: Mapping[str, Any]) -> list[dict[str, Any]]:

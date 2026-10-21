@@ -118,6 +118,15 @@ def test_router_escalates_low_confidence_to_cloud(tmp_path: Path) -> None:
     assert response.confidence == pytest.approx(0.95)
 
 
+class FailingEdgeBackend:
+    """Edge backend that always fails, used to exercise degraded escalation."""
+
+    model_id = "failing-edge"
+
+    def generate(self, request, *, draft=None):
+        raise RuntimeError("simulated edge outage")
+
+
 def test_router_forces_cloud_for_quality_verdict(tmp_path: Path) -> None:
     router = Router(MockEdgeBackend(), edge_config(tmp_path), cloud_client=FakeCloud())
     response = router.infer(
@@ -125,6 +134,27 @@ def test_router_forces_cloud_for_quality_verdict(tmp_path: Path) -> None:
     )
     assert response.source == "cloud"
     assert response.escalation_reason == "task_requires_cloud"
+
+
+@pytest.mark.parametrize("forced_by", ["task_list", "request_flag"])
+def test_required_cloud_wins_over_edge_failure_reason(
+    tmp_path: Path, forced_by: str
+) -> None:
+    router = Router(FailingEdgeBackend(), edge_config(tmp_path), cloud_client=FakeCloud())
+    if forced_by == "task_list":
+        request = InferRequest(prompt=EASY_PROMPT, task="quality_verdict")
+    else:
+        request = InferRequest(prompt=EASY_PROMPT, require_cloud=True)
+
+    response = router.infer(request)
+
+    assert response.source == "cloud"
+    assert response.escalated is True
+    assert response.escalation_reason == "task_requires_cloud"
+    counters = router.metrics.snapshot()["counters"]
+    assert counters["edge_failures_total"] == 1
+    assert counters["escalation_reason_task_requires_cloud"] == 1
+    assert "escalation_reason_edge_unavailable" not in counters
 
 
 def test_per_task_escalation_thresholds_use_the_request_task(tmp_path: Path) -> None:

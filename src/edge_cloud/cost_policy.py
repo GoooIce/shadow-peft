@@ -471,7 +471,7 @@ def _metrics(
     cloud_costs: list[float] = []
     cloud_calls = 0
     for item in samples:
-        escalated = always_cloud or threshold is None or item.score < threshold
+        escalated = _is_escalated(item, threshold, always_cloud)
         if escalated:
             cloud_calls += 1
             correct.append(1.0 if item.cloud_correct else 0.0)
@@ -548,7 +548,14 @@ def fit_cost_policy(
     min_samples: int = 30,
     require_cloud_tasks: Iterable[str] | str = (),
 ) -> CostPolicyFit:
-    """Fit a global threshold, then one threshold per task with enough rows."""
+    """Fit a global threshold, then one threshold per task with enough rows.
+
+    The global threshold is fitted on the *eligible* train rows only: rows whose
+    task is listed in ``require_cloud_tasks`` are excluded, because those tasks
+    always escalate and must not bias the shared fallback threshold (spec #48
+    §3). Per-task thresholds are then fitted for every non-forced task with at
+    least ``min_samples`` train rows.
+    """
 
     weight = _non_negative(cost_weight, "cost_weight")
     grid = _normalize_grid(threshold_grid)
@@ -722,12 +729,7 @@ def evaluate_cost_policy(
     latencies: list[float] = []
     groups: dict[str, list[CostSample]] = {}
     for item in items:
-        threshold = policy.threshold_for(item.task)
-        escalated = _is_escalated(
-            item,
-            threshold,
-            always_cloud=policy.is_always_cloud(item.task),
-        )
+        escalated = policy.should_escalate(item.task, item.score)
         groups.setdefault(item.task, []).append(item)
         if escalated:
             cloud_calls += 1
