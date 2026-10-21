@@ -1,0 +1,16 @@
+{"id": "qa-00", "task": "quality_verdict", "prompt": "焊点空洞面积超过 25% 应如何判定？", "expected": "判定：返修。空洞面积超过 25% 不满足放行条件。"}
+{"id": "qa-01", "task": "quality_verdict", "prompt": "焊点虚焊但未影响可靠性，应如何判定？", "expected": "判定：返修。虚焊影响连接可靠性，不能放行。"}
+{"id": "qa-02", "task": "quality_verdict", "prompt": "IPC-A-610 Class 3 焊点出现界面空洞，应如何判定？", "expected": "判定：不合格。Class 3 不允许界面空洞。"}
+{"id": "qa-03", "task": "quality_verdict", "prompt": "焊点润湿不良但功能正常，能否放行？", "expected": "判定：不合格。润湿不良不满足验收标准。"}
+{"id": "qa-04", "task": "process_calc", "prompt": "200 个焊点中发现 6 个缺陷，DPPM 是多少？", "expected": "30000"}
+{"id": "qa-05", "task": "process_calc", "prompt": "1000 个产品有 3 个不良，DPPM 是多少？", "expected": "3000"}
+{"id": "qa-06", "task": "process_calc", "prompt": "500 个焊点 10 个缺陷，DPPM 是多少？", "expected": "20000"}
+{"id": "qa-07", "task": "process_calc", "prompt": "不良率 0.3% 换算成 DPPM 是多少？", "expected": "3000"}
+{"id": "qa-08", "task": "process_qa", "prompt": "回流焊峰值温度应控制在多少？217℃ 以上需要维持多久？", "expected_keywords": ["235", "245", "217", "60", "90"]}
+{"id": "qa-09", "task": "fault_diagnosis", "prompt": "贴片机报 E-104 真空压力不足，应该按什么顺序排查？", "expected_keywords": ["吸嘴", "真空", "过滤"]}
+{"id": "qa-10", "task": "standard_qa", "prompt": "IPC-A-610 Class 3 对虚焊和空洞有什么要求？", "expected_keywords": ["润湿", "10%", "界面"]}
+{"id": "qa-11", "task": "fault_diagnosis", "prompt": "加工中心报 E-217 主轴冷却液流量不足，应该怎么处理？", "expected_keywords": ["冷却液", "流量", "传感器"]}
+{"id": "qa-12", "task": "improvement", "prompt": "OEE 只有 92%，应该从哪些方向改善？", "expected_keywords": ["可用率", "性能", "良率"]}
+{"id": "qa-13", "task": "safety", "prompt": "设备急停后如何安全复位？", "expected_keywords": ["危险源", "复位", "安全门"]}
+{"id": "qa-14", "task": "quality_verdict", "prompt": "焊点空洞面积 30%，能否放行？", "expected": "判定：返修。"}
+{"id": "qa-15", "task": "process_calc", "prompt": "800 个产品有 4 个不良，DPPM 是多少？", "expected": "5000"}
