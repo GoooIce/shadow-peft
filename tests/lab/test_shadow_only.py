@@ -26,15 +26,18 @@ from shadow_lab.shadow_only import (  # noqa: E402
     ShadowOnlyTrainStats,
     TrainableScopeReport,
     build_sft_rows,
+    evaluate_qa_only,
     evaluate_shadow_only,
     export_roundtrip_check,
     format_is_valid,
+    grade_qa_output,
     load_exported_shadow,
     numeric_answer_match,
     parse_gsm8k_answer,
     repetition_rate,
     set_trainable_scope,
     summarize_generations,
+    summarize_qa,
     train_shadow_only_sft,
 )
 
@@ -118,11 +121,16 @@ def test_train_config_defaults_and_validation():
     assert config.train_scope == "backbone"
     assert config.device == "cpu"
     assert config.steps >= 1
+    assert config.epochs is None
 
     with pytest.raises(ValueError, match="train_scope"):
         ShadowOnlyTrainConfig(train_scope="everything")
     with pytest.raises(ValueError, match="steps"):
         ShadowOnlyTrainConfig(steps=0)
+    with pytest.raises(ValueError, match="epochs"):
+        ShadowOnlyTrainConfig(epochs=0)
+    with pytest.raises(ValueError, match="log_every"):
+        ShadowOnlyTrainConfig(log_every=0)
     with pytest.raises(ValueError, match="dtype"):
         ShadowOnlyTrainConfig(dtype="int4")
 
@@ -302,6 +310,36 @@ def test_train_shadow_only_sft_is_reproducible_for_a_fixed_seed():
     assert first.losses == pytest.approx(second.losses, abs=1e-7)
 
 
+def test_train_shadow_only_sft_derives_steps_from_epochs():
+    tokenizer = StubTokenizer()
+    # 5 rows / batch 2 -> 3 steps per epoch; 3 epochs -> 9 steps, ignoring steps.
+    rows = SFT_ROWS + [{"prompt": "question 4", "answer": "answer 4"}]
+    stats = train_shadow_only_sft(
+        tiny_model(seed=13),
+        tokenizer,
+        rows,
+        _train_config(epochs=3, steps=99, batch_size=2),
+    )
+
+    assert stats.steps == 9
+    assert stats.epochs == 3
+    assert len(stats.losses) == 9
+
+
+def test_train_shadow_only_sft_logs_every_n_steps(capsys):
+    train_shadow_only_sft(
+        tiny_model(seed=17),
+        StubTokenizer(),
+        SFT_ROWS,
+        _train_config(steps=4, batch_size=1, log_every=2),
+    )
+
+    output = capsys.readouterr().out
+    assert "step 2/4" in output
+    assert "step 4/4" in output
+    assert "step 3/4" not in output
+
+
 def test_train_shadow_only_sft_backbone_scope_freezes_the_head():
     model = tiny_model(seed=5)
     stats = train_shadow_only_sft(
@@ -454,6 +492,142 @@ def test_evaluate_shadow_only_rejects_mismatched_generation_counts():
             [{"prompt": "q", "answer": "1"}],
             max_new_tokens=4,
             generate_fn=fake_generate,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Production QA grading
+# ---------------------------------------------------------------------------
+
+
+def test_grade_qa_output_uses_restrain_for_structured_tasks():
+    verdict = grade_qa_output(
+        {"task": "quality_verdict", "expected": "判定：返修。"}, "结论：判定：返修。"
+    )
+    assert verdict["correct"] is True
+    assert verdict["format_valid"] is True
+    assert verdict["keyword_coverage"] is None
+
+    wrong = grade_qa_output(
+        {"task": "quality_verdict", "expected": "判定：返修。"}, "判定：放行。"
+    )
+    assert wrong["correct"] is False
+    assert wrong["format_valid"] is True
+
+    unparsed = grade_qa_output(
+        {"task": "quality_verdict", "expected": "判定：返修。"}, "无法判断"
+    )
+    assert unparsed["correct"] is False
+    assert unparsed["format_valid"] is False
+
+    calc = grade_qa_output({"task": "process_calc", "expected": "30000"}, "30000")
+    assert calc["correct"] is True
+    assert calc["format_valid"] is True
+
+    wrong_calc = grade_qa_output({"task": "process_calc", "expected": "30000"}, "3000")
+    assert wrong_calc["correct"] is False
+
+
+def test_grade_qa_output_scores_free_text_with_keyword_coverage():
+    row = {"task": "safety", "expected_keywords": ["危险源", "复位", "安全门"]}
+
+    partial = grade_qa_output(row, "先确认危险源。")
+    assert partial["keyword_coverage"] == pytest.approx(1 / 3)
+    assert partial["correct"] is False
+
+    full = grade_qa_output(row, "确认危险源后复位，并检查安全门。")
+    assert full["keyword_coverage"] == pytest.approx(1.0)
+    assert full["correct"] is True
+    assert full["format_valid"] is True
+
+
+def test_summarize_qa_reports_accuracy_format_and_keyword_coverage():
+    records = [
+        grade_qa_output(
+            {"task": "quality_verdict", "expected": "判定：返修。"}, "判定：返修。"
+        ),
+        grade_qa_output({"task": "process_calc", "expected": "30000"}, "3000"),
+        grade_qa_output(
+            {"task": "safety", "expected_keywords": ["危险源", "复位"]},
+            "确认危险源后复位。",
+        ),
+        grade_qa_output(
+            {"task": "improvement", "expected_keywords": ["可用率", "性能", "良率"]},
+            "先看可用率。",
+        ),
+    ]
+
+    summary = summarize_qa(records)
+
+    assert summary["n"] == 4
+    # verdict + full keyword; wrong calc + 1/3 keyword coverage fail.
+    assert summary["accuracy"] == pytest.approx(0.5)
+    assert summary["format_rate"] == pytest.approx(1.0)
+    assert summary["keyword_coverage"] == pytest.approx((1.0 + 1 / 3) / 2)
+    assert summary["keyword_full_rate"] == pytest.approx(0.5)
+    assert summary["n_keyword_rows"] == 2
+    assert summary["by_task"]["quality_verdict"]["accuracy"] == pytest.approx(1.0)
+    assert summary["by_task"]["process_calc"]["accuracy"] == pytest.approx(0.0)
+
+
+def test_evaluate_qa_only_formats_prompts_and_grades_through_the_seam():
+    tokenizer = StubTokenizer()
+    rows = [
+        {
+            "id": "qa-0",
+            "task": "quality_verdict",
+            "prompt": "q0",
+            "expected": "判定：返修。",
+        },
+        {
+            "id": "qa-1",
+            "task": "safety",
+            "prompt": "q1",
+            "expected_keywords": ["危险源", "复位"],
+        },
+    ]
+    seen = {}
+
+    def fake_generate(model, generation_tokenizer, prompts, *, max_new_tokens, batch_size, device):
+        assert model is None
+        assert generation_tokenizer is tokenizer
+        assert (max_new_tokens, batch_size, device) == (8, 2, "cpu")
+        seen["prompts"] = list(prompts)
+        return [
+            {"text": "判定：返修。", "truncated": False, "n_new_tokens": 3},
+            {"text": "确认危险源后复位。", "truncated": False, "n_new_tokens": 5},
+        ]
+
+    result = evaluate_qa_only(
+        None,
+        tokenizer,
+        rows,
+        max_new_tokens=8,
+        batch_size=2,
+        device="cpu",
+        generate_fn=fake_generate,
+    )
+
+    expected_prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "q0"}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    assert seen["prompts"][0] == expected_prompt
+    assert result["summary"]["n"] == 2
+    assert result["summary"]["accuracy"] == pytest.approx(1.0)
+    assert [record["id"] for record in result["generations"]] == ["qa-0", "qa-1"]
+    assert result["generations"][0]["correct"] is True
+    assert result["generations"][1]["keyword_coverage"] == pytest.approx(1.0)
+
+
+def test_evaluate_qa_only_rejects_rows_without_a_prompt():
+    with pytest.raises(ValueError, match="prompt"):
+        evaluate_qa_only(
+            None,
+            StubTokenizer(),
+            [{"task": "quality_verdict"}],
+            generate_fn=lambda *args, **kwargs: [],
         )
 
 
@@ -710,24 +884,101 @@ def test_exp16_parser_exposes_all_commands():
         assert args.smoke is True
         if command in ("train", "run"):
             assert args.train_scope == "backbone"
+            assert args.epochs is None
+        if command in ("eval", "run"):
+            assert args.baseline_model is None
+            assert args.qa_jsonl is None
 
 
-def test_exp16_gate_summary_does_not_gate_recovery_on_the_baseline():
-    gates = exp16._gate_summary(
-        {"passed": True},
-        {"format_rate": 0.0},
-        {
-            "format_rate": 0.9,
-            "truncation_rate": 0.1,
-            "empty_rate": 0.0,
-        },
-    )
+def test_exp16_gate_summary_requires_a_native_baseline_for_recovery():
+    evaluation = {
+        "accuracy": 0.9,
+        "format_rate": 0.9,
+        "truncation_rate": 0.1,
+        "empty_rate": 0.0,
+    }
+
+    gates = exp16._gate_summary({"passed": True}, {"format_rate": 0.0}, evaluation)
 
     assert gates["roundtrip_passed"] is True
     assert gates["diagnose_format_ok"] is False
     assert gates["eval_format_ok"] is True
+    assert gates["accuracy_gate_passed"] is False
+    assert gates["accuracy_ratio"] is None
+    assert gates["accuracy_status"] == "not_run"
+    assert gates["recovery_ready"] is False
+
+
+def test_exp16_gate_summary_recovers_only_with_ratio_at_least_070():
+    roundtrip = {"passed": True}
+    evaluation = {
+        "accuracy": 0.4,
+        "format_rate": 0.9,
+        "truncation_rate": 0.1,
+        "empty_rate": 0.0,
+    }
+    baseline = {"status": "ok", "accuracy": 0.5}
+
+    gates = exp16._gate_summary(roundtrip, None, evaluation, baseline)
+
+    assert gates["accuracy_ratio"] == pytest.approx(0.8)
+    assert gates["accuracy_gate_passed"] is True
     assert gates["recovery_ready"] is True
-    assert gates["accuracy_gate"].startswith("n/a")
+
+    weak = exp16._gate_summary(
+        roundtrip,
+        None,
+        {**evaluation, "accuracy": 0.3},
+        baseline,
+    )
+    assert weak["accuracy_ratio"] == pytest.approx(0.6)
+    assert weak["accuracy_gate_passed"] is False
+    assert weak["recovery_ready"] is False
+
+
+def test_exp16_gate_summary_treats_zero_baseline_as_not_passed():
+    gates = exp16._gate_summary(
+        {"passed": True},
+        None,
+        {
+            "accuracy": 0.9,
+            "format_rate": 0.9,
+            "truncation_rate": 0.1,
+            "empty_rate": 0.0,
+        },
+        {"status": "ok", "accuracy": 0.0},
+    )
+
+    assert gates["accuracy_ratio"] is None
+    assert gates["accuracy_status"] == "baseline_zero"
+    assert gates["accuracy_gate_passed"] is False
+    assert gates["recovery_ready"] is False
+
+
+def test_exp16_gate_summary_never_recovers_without_roundtrip():
+    gates = exp16._gate_summary(
+        None,
+        None,
+        {
+            "accuracy": 0.4,
+            "format_rate": 0.9,
+            "truncation_rate": 0.1,
+            "empty_rate": 0.0,
+        },
+        {"status": "ok", "accuracy": 0.5},
+    )
+
+    assert gates["accuracy_gate_passed"] is True
+    assert gates["recovery_ready"] is False
+
+
+def test_exp16_load_qa_rows_reads_the_repo_fixture():
+    rows = exp16.load_qa_rows(None)
+
+    assert len(rows) == 16
+    assert rows[0]["id"] == "qa-00"
+    assert rows[0]["task"] == "quality_verdict"
+    assert any(row.get("expected_keywords") for row in rows)
 
 
 def test_exp16_load_jsonl_rows_honors_limit(tmp_path):

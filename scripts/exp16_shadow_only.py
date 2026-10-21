@@ -5,8 +5,14 @@ Four commands share one export path:
 
 - ``diagnose``: save/reload round-trip plus a shadow-only generation baseline;
 - ``train``: chat-template SFT on GSM8K train (or ``--dataset-jsonl``);
-- ``eval``: GSM8K-style generation/grading from a saved export;
+- ``eval``: GSM8K-style generation/grading from a saved export, plus the
+  native ``--baseline-model`` comparison and the production-QA diagnostic;
 - ``run``: diagnose -> train -> eval in one process.
+
+Note: this is the revision for issue #46.  ``eval``/``run`` now require a
+native baseline (e.g. ``~/models/Qwen3-0.6B``) before the accuracy gate can
+pass; without ``--baseline-model`` the report says ``status="not_run"`` and
+``recovery_ready`` stays false.  ``--epochs`` replaces ``--steps`` when set.
 
 Every command writes ``report.json`` under ``--out``; generation commands also
 write ``generations.jsonl`` and training writes ``train_stats.json``.  The
@@ -18,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gc
 import json
 import random
 import sys
@@ -31,6 +38,7 @@ ISSUE = 46
 DEFAULT_BASE_MODEL = "~/models/Qwen3-4B"
 DEFAULT_SHADOW_MODEL = "~/models/Qwen3-0.6B-H4B"
 DEFAULT_SHADOW_CKPT = "runs/exp7/e4b-seed0/ckpt-final"
+DEFAULT_QA_JSONL = "data/pyrodash_stage0/production_qa.jsonl"
 
 GSM8K_SYSTEM = (
     "You are a careful math assistant. Solve the problem step by step. "
@@ -41,6 +49,15 @@ ROUNDTRIP_PROMPT = "Question: What is 2 + 2?\nAnswer:"
 PRODUCT_MIN_FORMAT = 0.80
 PRODUCT_MAX_TRUNCATION = 0.20
 PRODUCT_MAX_EMPTY = 0.05
+ACCURACY_RATIO_MIN = 0.70
+
+RECOVERY_GATE_KEYS = (
+    "roundtrip_passed",
+    "eval_format_ok",
+    "eval_truncation_ok",
+    "eval_empty_ok",
+    "accuracy_gate_passed",
+)
 
 
 def _expand(path: str) -> str:
@@ -192,6 +209,27 @@ def load_eval_examples(args: argparse.Namespace, tokenizer: Any) -> list[dict[st
     return examples
 
 
+def qa_path(path: str | Path | None = None) -> Path:
+    """Resolve the production-QA fixture (``--qa-jsonl`` wins over the repo)."""
+    if path:
+        return Path(path).expanduser()
+    repo = Path(__file__).resolve().parents[1] / DEFAULT_QA_JSONL
+    if repo.is_file():
+        return repo
+    return Path(DEFAULT_QA_JSONL)
+
+
+def load_qa_rows(path: str | Path | None = None) -> list[dict[str, Any]]:
+    """Load the 16 production-QA rows (``prompt`` / ``task`` / expectations)."""
+    source = qa_path(path)
+    if not source.is_file():
+        raise FileNotFoundError(
+            f"找不到产线 QA 数据: {source}；用 --qa-jsonl 指定，或提供 "
+            f"{DEFAULT_QA_JSONL}"
+        )
+    return load_jsonl_rows(source)
+
+
 # ---------------------------------------------------------------------------
 # Model loading / saving
 # ---------------------------------------------------------------------------
@@ -239,6 +277,33 @@ def save_model(model: Any, tokenizer: Any, model_dir: str | Path) -> str:
     return str(directory)
 
 
+def load_native_model(path: str | Path, *, device: str, dtype: str) -> tuple[Any, Any]:
+    """Load a plain HF causal LM + tokenizer for the native baseline."""
+    from transformers import AutoModelForCausalLM
+
+    from shadow_lab.shadow_only import load_shadow_tokenizer, resolve_dtype
+
+    torch_dtype = resolve_dtype(dtype)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(str(path), dtype=torch_dtype)
+    except TypeError:
+        model = AutoModelForCausalLM.from_pretrained(
+            str(path), torch_dtype=torch_dtype
+        )
+    model.eval().to(device=device, dtype=torch_dtype)
+    return model, load_shadow_tokenizer(path)
+
+
+def release_model(model: Any) -> None:
+    """Drop a loaded model and return its CUDA cache before the next one."""
+    del model
+    gc.collect()
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def _model_dir(args: argparse.Namespace) -> Path:
     if args.model_dir:
         return Path(args.model_dir).expanduser()
@@ -250,11 +315,58 @@ def _model_dir(args: argparse.Namespace) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def _accuracy_gate(
+    evaluation: Mapping[str, Any] | None,
+    baseline: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Gate the shadow on a native baseline measured with the same prompts.
+
+    No baseline, or a baseline with zero accuracy, can never pass: the ratio
+    would be fabricated.  ``accuracy_ratio`` stays ``None`` in both cases.
+    """
+    baseline_accuracy = None
+    if baseline is not None and baseline.get("status", "ok") == "ok":
+        baseline_accuracy = baseline.get("accuracy")
+    shadow_accuracy = None if evaluation is None else evaluation.get("accuracy")
+
+    if shadow_accuracy is None or baseline_accuracy is None:
+        return {
+            "accuracy_status": "not_run",
+            "baseline_accuracy": baseline_accuracy,
+            "accuracy_ratio": None,
+            "accuracy_gate_passed": False,
+        }
+    if float(baseline_accuracy) <= 0:
+        return {
+            "accuracy_status": "baseline_zero",
+            "baseline_accuracy": float(baseline_accuracy),
+            "accuracy_ratio": None,
+            "accuracy_gate_passed": False,
+        }
+
+    ratio = float(shadow_accuracy) / float(baseline_accuracy)
+    passed = ratio >= ACCURACY_RATIO_MIN
+    return {
+        "accuracy_status": "passed" if passed else "failed",
+        "baseline_accuracy": float(baseline_accuracy),
+        "accuracy_ratio": ratio,
+        "accuracy_gate_passed": passed,
+    }
+
+
 def _gate_summary(
     roundtrip: Mapping[str, Any] | None,
     diagnose: Mapping[str, Any] | None,
     evaluation: Mapping[str, Any] | None,
+    baseline: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Build the exp16 gates.
+
+    ``recovery_ready`` requires *every* key in :data:`RECOVERY_GATE_KEYS`:
+    round-trip, eval format, truncation, empty, and a native-baseline accuracy
+    ratio of at least 0.70.  A missing key (e.g. ``eval`` never runs a
+    round-trip) keeps it false rather than silently dropping the gate.
+    """
     gates: dict[str, Any] = {}
     if roundtrip is not None:
         gates["roundtrip_passed"] = bool(roundtrip.get("passed"))
@@ -272,19 +384,16 @@ def _gate_summary(
         gates["eval_empty_ok"] = (
             float(evaluation.get("empty_rate", 1.0)) <= PRODUCT_MAX_EMPTY
         )
-    gates["accuracy_gate"] = "n/a (needs a native 0.6B baseline report)"
-    recovery_keys = [
-        key
-        for key in ("roundtrip_passed", "eval_format_ok", "eval_truncation_ok", "eval_empty_ok")
-        if key in gates
-    ]
-    gates["recovery_ready"] = bool(recovery_keys) and all(
-        bool(gates[key]) for key in recovery_keys
+    gates.update(_accuracy_gate(evaluation, baseline))
+    gates["recovery_ready"] = all(
+        key in gates and bool(gates[key]) for key in RECOVERY_GATE_KEYS
     )
     return gates
 
 
 def _report_preamble(args: argparse.Namespace, command: str) -> dict[str, Any]:
+    baseline_model = getattr(args, "baseline_model", None)
+    qa_jsonl = getattr(args, "qa_jsonl", None)
     return {
         "experiment": EXPERIMENT,
         "issue": ISSUE,
@@ -294,21 +403,27 @@ def _report_preamble(args: argparse.Namespace, command: str) -> dict[str, Any]:
             "base_model": _expand(args.base_model),
             "shadow_model": _expand(args.shadow_model),
             "shadow_ckpt": _expand(args.shadow_ckpt),
+            "baseline_model": _expand(baseline_model) if baseline_model else None,
+            "qa_jsonl": str(qa_path(qa_jsonl)),
             "device": args.device,
             "dtype": args.dtype,
             "seed": args.seed,
             "dataset_jsonl": args.dataset_jsonl,
             "system_prompt": args.system_prompt,
+            "steps": getattr(args, "steps", None),
+            "epochs": getattr(args, "epochs", None),
         },
     }
 
 
-def _evaluate(
-    args: argparse.Namespace, model: Any, tokenizer: Any
+def _evaluate_examples(
+    args: argparse.Namespace,
+    model: Any,
+    tokenizer: Any,
+    examples: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     from shadow_lab.shadow_only import evaluate_shadow_only
 
-    examples = load_eval_examples(args, tokenizer)
     max_new_tokens = _resolve(args.max_new_tokens, 64, 512, args.smoke)
     batch_size = _resolve(args.eval_batch_size, 2, 4, args.smoke)
     result = evaluate_shadow_only(
@@ -322,6 +437,83 @@ def _evaluate(
     for record, example in zip(result["generations"], examples, strict=True):
         record["id"] = example["id"]
     return result
+
+
+def _evaluate(
+    args: argparse.Namespace, model: Any, tokenizer: Any
+) -> dict[str, Any]:
+    return _evaluate_examples(args, model, tokenizer, load_eval_examples(args, tokenizer))
+
+
+def _baseline_report(
+    args: argparse.Namespace, examples: Sequence[Mapping[str, Any]]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Run the native baseline on the exact shadow eval prompts, or not_run."""
+    baseline_model = getattr(args, "baseline_model", None)
+    if not baseline_model:
+        return (
+            {
+                "status": "not_run",
+                "model": None,
+                "reason": "--baseline-model 未提供；accuracy gate 不能通过",
+                "n": 0,
+                "accuracy": None,
+            },
+            [],
+        )
+
+    model, tokenizer = load_native_model(
+        _expand(baseline_model), device=args.device, dtype=args.dtype
+    )
+    try:
+        result = _evaluate_examples(args, model, tokenizer, examples)
+    finally:
+        release_model(model)
+
+    summary = {
+        "status": "ok",
+        "model": _expand(baseline_model),
+        **result["summary"],
+    }
+    return summary, result["generations"]
+
+
+def _evaluate_qa(
+    args: argparse.Namespace, model: Any, tokenizer: Any
+) -> dict[str, Any]:
+    """Grade the 16 production-QA rows as a diagnostic (never a gate)."""
+    from shadow_lab.shadow_only import evaluate_qa_only
+
+    source = qa_path(getattr(args, "qa_jsonl", None))
+    if not source.is_file():
+        return {
+            "summary": {
+                "status": "not_run",
+                "path": str(source),
+                "reason": f"找不到产线 QA 数据: {source}",
+                "n": 0,
+                "accuracy": None,
+                "format_rate": None,
+                "keyword_coverage": None,
+            },
+            "generations": [],
+        }
+
+    rows = load_qa_rows(source)
+    max_new_tokens = _resolve(
+        getattr(args, "qa_max_new_tokens", None), 64, 256, args.smoke
+    )
+    batch_size = _resolve(args.eval_batch_size, 2, 4, args.smoke)
+    result = evaluate_qa_only(
+        model,
+        tokenizer,
+        rows,
+        max_new_tokens=max_new_tokens,
+        batch_size=batch_size,
+        device=args.device,
+    )
+    summary = {"status": "ok", "path": str(source), **result["summary"]}
+    return {"summary": summary, "generations": result["generations"]}
 
 
 def _run_roundtrip(
@@ -348,12 +540,10 @@ def _train(
 
     rows = load_train_rows(args)
     config = ShadowOnlyTrainConfig(
-        base_model_path=_expand(args.base_model),
-        shadow_model_path=_expand(args.shadow_model),
-        shadow_ckpt=_expand(args.shadow_ckpt),
         train_scope=args.train_scope,
         lr=args.lr,
         steps=_resolve(args.steps, 2, 200, args.smoke),
+        epochs=args.epochs,
         batch_size=_resolve(args.train_batch_size, 2, 2, args.smoke),
         max_seq_len=_resolve(args.max_seq_len, 256, 1024, args.smoke),
         seed=args.seed,
@@ -437,20 +627,36 @@ def cmd_eval(args: argparse.Namespace) -> int:
         )
     else:
         model, tokenizer = load_exported(args)
-    result = _evaluate(args, model, tokenizer)
+    examples = load_eval_examples(args, tokenizer)
+    result = _evaluate_examples(args, model, tokenizer, examples)
+    evaluation = result["summary"]
+    baseline, baseline_generations = _baseline_report(args, examples)
+    qa = _evaluate_qa(args, model, tokenizer)
+
     report = _report_preamble(args, "eval")
-    report["generation"] = result["summary"]
-    report["gates"] = _gate_summary(None, None, result["summary"])
+    report["generation"] = evaluation
+    report["baseline"] = baseline
+    report["qa"] = qa["summary"]
+    report["gates"] = _gate_summary(None, None, evaluation, baseline)
+    report["baseline_accuracy"] = baseline.get("accuracy")
+    report["accuracy_ratio"] = report["gates"]["accuracy_ratio"]
+    report["accuracy_gate_passed"] = report["gates"]["accuracy_gate_passed"]
     report["model_dir"] = str(model_dir) if model_dir.exists() else "in-memory-export"
     _write_json(out / "report.json", report)
     _write_jsonl(out / "generations.jsonl", result["generations"])
+    _write_jsonl(out / "baseline_generations.jsonl", baseline_generations)
+    _write_jsonl(out / "qa_generations.jsonl", qa["generations"])
     print(
         json.dumps(
             {
                 "command": "eval",
-                "format_rate": result["summary"]["format_rate"],
-                "accuracy": result["summary"]["accuracy"],
-                "truncation_rate": result["summary"]["truncation_rate"],
+                "format_rate": evaluation["format_rate"],
+                "accuracy": evaluation["accuracy"],
+                "truncation_rate": evaluation["truncation_rate"],
+                "baseline_status": baseline["status"],
+                "accuracy_ratio": report["gates"]["accuracy_ratio"],
+                "qa_accuracy": qa["summary"]["accuracy"],
+                "recovery_ready": report["gates"]["recovery_ready"],
                 "out": str(out),
             },
             ensure_ascii=False,
@@ -470,29 +676,42 @@ def cmd_run(args: argparse.Namespace) -> int:
     diagnose = _evaluate(diagnose_args, model, tokenizer)
     model, stats = _train(args, model, tokenizer)
     model_dir = save_model(model, tokenizer, _model_dir(args))
-    evaluation = _evaluate(args, model, tokenizer)
+    examples = load_eval_examples(args, tokenizer)
+    evaluation = _evaluate_examples(args, model, tokenizer, examples)["summary"]
+    baseline, baseline_generations = _baseline_report(args, examples)
+    qa = _evaluate_qa(args, model, tokenizer)
 
     report = _report_preamble(args, "run")
     report["roundtrip"] = roundtrip
     report["diagnose"] = diagnose["summary"]
     report["train"] = stats
-    report["eval"] = evaluation["summary"]
+    report["eval"] = evaluation
+    report["baseline"] = baseline
+    report["qa"] = qa["summary"]
     report["gates"] = _gate_summary(
-        roundtrip, diagnose["summary"], evaluation["summary"]
+        roundtrip, diagnose["summary"], evaluation, baseline
     )
+    report["baseline_accuracy"] = baseline.get("accuracy")
+    report["accuracy_ratio"] = report["gates"]["accuracy_ratio"]
+    report["accuracy_gate_passed"] = report["gates"]["accuracy_gate_passed"]
     report["model_dir"] = model_dir
     _write_json(out / "report.json", report)
     _write_json(out / "train_stats.json", stats)
     _write_jsonl(out / "generations.jsonl", evaluation["generations"])
     _write_jsonl(out / "diagnose_generations.jsonl", diagnose["generations"])
+    _write_jsonl(out / "baseline_generations.jsonl", baseline_generations)
+    _write_jsonl(out / "qa_generations.jsonl", qa["generations"])
     print(
         json.dumps(
             {
                 "command": "run",
                 "roundtrip_passed": roundtrip["passed"],
                 "diagnose_format_rate": diagnose["summary"]["format_rate"],
-                "eval_format_rate": evaluation["summary"]["format_rate"],
-                "eval_accuracy": evaluation["summary"]["accuracy"],
+                "eval_format_rate": evaluation["format_rate"],
+                "eval_accuracy": evaluation["accuracy"],
+                "baseline_status": baseline["status"],
+                "accuracy_ratio": report["gates"]["accuracy_ratio"],
+                "qa_accuracy": qa["summary"]["accuracy"],
                 "recovery_ready": report["gates"]["recovery_ready"],
                 "out": str(out),
             },
@@ -534,6 +753,12 @@ def _add_diagnose_args(parser: argparse.ArgumentParser) -> None:
 def _add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--train-limit", type=int, default=None)
     parser.add_argument("--steps", type=int, default=None)
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="每轮 ceil(len(rows)/batch_size) 步；设置后忽略 --steps",
+    )
     parser.add_argument("--train-batch-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--max-seq-len", type=int, default=None)
@@ -549,12 +774,31 @@ def _add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model-dir", default=None)
 
 
+def _add_baseline_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--baseline-model",
+        default=None,
+        help="原生 baseline 模型路径（如 ~/models/Qwen3-0.6B）；不提供则 accuracy gate 记 not_run",
+    )
+
+
+def _add_qa_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--qa-jsonl",
+        default=None,
+        help=f"产线 QA 数据；默认仓库内 {DEFAULT_QA_JSONL}",
+    )
+    parser.add_argument("--qa-max-new-tokens", type=int, default=None)
+
+
 def _add_eval_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--max-new-tokens", type=int, default=None)
     parser.add_argument("--eval-batch-size", type=int, default=None)
     parser.add_argument("--eval-split", default="test")
     parser.add_argument("--model-dir", default=None)
+    _add_baseline_args(parser)
+    _add_qa_args(parser)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -581,6 +825,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(run)
     _add_diagnose_args(run)
     _add_train_args(run)
+    _add_baseline_args(run)
+    _add_qa_args(run)
     # ``run`` needs the eval limit separate from the diagnose limit.
     run.add_argument("--diagnose-limit", type=int, default=None)
 
