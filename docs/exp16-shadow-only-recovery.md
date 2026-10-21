@@ -2,7 +2,7 @@
 
 一句话收束：**导出的 exp7 影子（`Qwen3-0.6B-H4B` + `runs/exp7/e4b-seed0/ckpt-final`）现在可以保存/重载并做 shadow-only 指令 SFT；round-trip 在修复 rotary 缓冲 dtype 后逐位通过（logits max diff 0.0），但 8 条 GSM8K、2 步 SFT 的冒烟仍格式 0%、准确率 0%、截断 100%。这只是管线可用，不是恢复成功；完整 3–5 天训练未运行。**
 
-状态：**MVP 管线 + goooinext 冒烟已跑通（2026-10-22）；baseline/QA/epochs 修复已合入但尚未在 GB10 重跑**；完整 shadow-only SFT 恢复实验（约 3–5 个 GB10 天）未启动。
+状态：**MVP 管线 + goooinext 冒烟已跑通（2026-10-22）；baseline/QA/epochs 修复已合入并用 `--baseline-model` / QA 16 重跑**；完整 shadow-only SFT 恢复实验（约 3–5 个 GB10 天）未启动。
 
 ## 实验设置
 
@@ -17,7 +17,7 @@
 | 数据 | `openai/gsm8k` train 子集，8 条冒烟样本；chat template + prompt 位置 `labels=-100` |
 | 超参 | 2 步、batch 2、max_seq_len 256、lr 1e-5、seed 0、grad clip 1.0 |
 | 评测 | 8 条 GSM8K test，greedy，max_new_tokens 64 |
-| 原生 baseline | 本次 2 步冒烟未提供 `--baseline-model`，报告 `status="not_run"` |
+| 原生 baseline | `~/models/Qwen3-0.6B`，同一批 8 条 GSM8K prompts、64 token；baseline accuracy 0/8，报告 `accuracy_status="baseline_zero"` |
 | 产线 QA | 16 条 `data/pyrodash_stage0/production_qa.jsonl`，诊断项（不进门禁） |
 | 产物 | `runs-local/exp16/{report.json,diagnose_generations.jsonl,generations.jsonl,baseline_generations.jsonl,qa_generations.jsonl,train_stats.json,model/}` |
 
@@ -68,7 +68,21 @@ PYTHONPATH=/home/goooice/p4647-run/src \
 | mean repetition-4 | 0.253 | 0.334 |
 
 - 训练：2 步、8 行、560 token，loss 1.359 → 1.227；每步约 0.35 秒。2 步只能证明梯度/保存/加载链路通，不能改变生成行为。
-- `recovery_ready=false`：round-trip 通过，但格式和截断门禁未过；`accuracy_status="not_run"`、`accuracy_ratio=null`、`accuracy_gate_passed=false`，因为这次冒烟没有提供原生 0.6B baseline。现在 accuracy gate 是 recovery 硬条件：没有 baseline 就不可能为 true。
+- `recovery_ready=false`：round-trip 通过，但格式和截断门禁未过；原生 0.6B baseline 在同样 8 条、64 token 下也是 0/8（`accuracy_status="baseline_zero"`），因此 `accuracy_ratio=null`、`accuracy_gate_passed=false`。现在 accuracy gate 是 recovery 硬条件：没有 baseline 或 baseline 为 0 都不可能为 true。
+
+### 修复后重跑的 baseline 与 QA 16
+
+| 项 | 值 |
+|---|---:|
+| baseline n / accuracy / format / truncation | 8 / 0.0 / 0.0 / 1.0 |
+| shadow eval n / accuracy / format / truncation | 8 / 0.0 / 0.0 / 1.0 |
+| QA 16 n / accuracy / format / keyword coverage | 16 / 0.0625 / 0.625 / 0.2556 |
+| QA `keyword_full_rate` | 0.0 |
+| `accuracy_status` / `accuracy_ratio` | `baseline_zero` / `null` |
+| `recovery_ready` | `false` |
+
+- 原生 0.6B 在 64 token 预算下也是 0/8，说明这个冒烟预算太短，无法区分“影子差”与“预算不足”；正式评测必须用与 exp14 一致的 512 token 或更长，并报告 baseline 的格式/截断率。
+- QA 16 只有 1/16 正确（6.25%），且 `process_calc` 走 `extract_answer` 的首个数字规则；它只是诊断，不是恢复门禁。
 
 ### 修复后的门禁与诊断口径
 

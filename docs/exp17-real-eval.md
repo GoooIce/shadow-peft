@@ -16,7 +16,7 @@
 | RESTRAIN 判分 | 每条 rollout 只调用一次 `grade_structured`，同一份 outcomes 同时供 per-example 与 accuracy/consistency 聚合；口径不变 |
 | 统一入口 | CLI 与 `run_suites` 共用 `shadow_lab.real_eval.run_suite` 与 `data_missing_report`；新增 suite 只需改 `real_eval`（`SUITES`/默认值/选项键/数据集映射/一个分支），CLI 不再维护第二套分派 |
 
-本轮冒烟是修复前跑出的历史产物，表中 Hit@8 等价于 `hit_at_k`（k=8）；新的 `ppl_tokens/ppl_windows`、latency 与 selector 字段需要重跑才会出现在产物里。
+修复后已用同一批真实数据在 goooinext 重跑 GKD/S2T/RESTRAIN/JitRL；指标与修复前一致，报告现在包含 `hit_at_k`、`ppl_tokens/ppl_windows`、`memory_latency_ms_*`（JitRL data_missing 时为 null）。下表是修复后产物；S2T 的 `hit_at_8` 仅在 k=8 时作为弃用别名保留。
 
 ## 实验设置
 
