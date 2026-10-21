@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from dataclasses import fields
 from pathlib import Path
 
@@ -206,7 +207,7 @@ def test_all_strategies_share_the_result_schema_and_artifacts(tmp_path: Path) ->
     run = run_evaluation(samples, strategies=STRATEGIES, seed=5, n_boot=30)
 
     results = run.results
-    assert results["schema_version"] == "exp9-handoff-eval/v1"
+    assert results["schema_version"] == "exp9-handoff-eval/v2"
     assert results["seed"] == 5
     assert results["n"] == 8
     assert results["backend"]["kind"] == "synthetic"
@@ -442,7 +443,7 @@ def test_reader_accepts_a_real_backend_shape_and_rejects_bad_schemas(
     loaded = load_results(paths["results"])
 
     assert loaded["backend"]["kind"] == "transformers"
-    assert loaded["schema_version"] == "exp9-handoff-eval/v1"
+    assert loaded["schema_version"] == "exp9-handoff-eval/v2"
 
     payload = json.loads(paths["results"].read_text(encoding="utf-8"))
     payload["schema_version"] = "exp9-handoff-eval/v99"
@@ -455,3 +456,301 @@ def test_reader_accepts_a_real_backend_shape_and_rejects_bad_schemas(
 def test_unknown_strategy_is_rejected() -> None:
     with pytest.raises(ValueError, match="未知策略"):
         run_evaluation(synthetic_dataset(2), strategies=("edge_only", "magic"))
+
+
+def _paired_task_samples() -> list[EvalSample]:
+    """Two tasks that produce identical edge confidence (0.9472) on every row."""
+
+    answer = "判定：返修。依据 IPC-A-610 Class 2，空洞不超过 25%。"
+    return [
+        EvalSample(
+            sample_id=f"{task}-{index}",
+            prompt="回流焊峰值温度",
+            task=task,
+            expected=answer,
+            edge_answer=answer,
+            cloud_answer=answer,
+        )
+        for task in ("process_qa", "quality_verdict")
+        for index in range(3)
+    ]
+
+
+def test_per_task_thresholds_decide_legacy_escalation_per_task() -> None:
+    samples = _paired_task_samples()
+
+    run = run_evaluation(
+        samples,
+        strategies=("legacy",),
+        seed=1,
+        n_boot=0,
+        escalation_threshold_by_task={"process_qa": 0.0, "quality_verdict": 0.95},
+    )
+
+    legacy = [record for record in run.per_prompt if record["strategy"] == "legacy"]
+    assert {record["confidence"] for record in legacy} == {0.9472}
+    assert not any(record["escalated"] for record in legacy if record["task"] == "process_qa")
+    assert all(record["escalated"] for record in legacy if record["task"] == "quality_verdict")
+    assert run.results["strategies"]["legacy"]["escalation_rate"] == pytest.approx(0.5)
+
+
+def test_legacy_falls_back_to_the_global_threshold_for_unknown_tasks() -> None:
+    samples = _paired_task_samples()
+
+    run = run_evaluation(
+        samples,
+        strategies=("legacy",),
+        seed=1,
+        n_boot=0,
+        escalation_threshold=0.95,
+        escalation_threshold_by_task={"process_qa": 0.0},
+    )
+
+    legacy = [record for record in run.per_prompt if record["strategy"] == "legacy"]
+    assert not any(record["escalated"] for record in legacy if record["task"] == "process_qa")
+    assert all(record["escalated"] for record in legacy if record["task"] == "quality_verdict")
+
+
+def test_per_task_thresholds_leave_probe_and_oracle_untouched() -> None:
+    samples = _paired_task_samples()
+    strategies = ("probe", "oracle")
+
+    baseline = run_evaluation(samples, strategies=strategies, seed=1, n_boot=0)
+    tuned = run_evaluation(
+        samples,
+        strategies=strategies,
+        seed=1,
+        n_boot=0,
+        escalation_threshold_by_task={"process_qa": 0.0, "quality_verdict": 1.0},
+    )
+
+    assert tuned.results["strategies"] == baseline.results["strategies"]
+    assert tuned.results["curves"] == baseline.results["curves"]
+
+
+def test_per_task_metrics_aggregate_the_same_records_as_the_global_metrics() -> None:
+    samples = synthetic_dataset(8, seed=5)
+    run = run_evaluation(samples, strategies=STRATEGIES, seed=5, n_boot=0)
+
+    for strategy in STRATEGIES:
+        metrics = run.results["strategies"][strategy]
+        records = [record for record in run.per_prompt if record["strategy"] == strategy]
+        per_task = metrics["per_task"]
+        assert set(per_task) == {record["task"] for record in records}
+        assert metrics["n"] == len(records)
+        assert sum(entry["n"] for entry in per_task.values()) == metrics["n"]
+
+        for task, entry in per_task.items():
+            group = [record for record in records if record["task"] == task]
+            assert entry["n"] == len(group)
+            assert set(entry) == {
+                "n",
+                "accuracy",
+                "escalation_rate",
+                "total_cost",
+                "cost_per_request",
+                "cloud_calls",
+                "latency_p95",
+            }
+            accuracy = sum(1 for record in group if record["exact_match"]) / len(group)
+            escalation = sum(1 for record in group if record["escalated"]) / len(group)
+            total_cost = sum(record["cost"] for record in group)
+            latencies = [record["latency_ms"] for record in group]
+            assert entry["accuracy"] == pytest.approx(accuracy, abs=1e-6)
+            assert entry["escalation_rate"] == pytest.approx(escalation, abs=1e-6)
+            assert entry["total_cost"] == pytest.approx(total_cost, abs=1e-6)
+            assert entry["cost_per_request"] == pytest.approx(total_cost / len(group), abs=1e-6)
+            assert entry["cloud_calls"] == sum(record["cloud_calls"] for record in group)
+            assert min(latencies) <= entry["latency_p95"] <= max(latencies)
+
+
+def test_per_task_metrics_never_emit_nan_for_an_empty_task_name() -> None:
+    answer = "判定：返修。依据 IPC-A-610 Class 2，空洞不超过 25%。"
+    samples = [
+        EvalSample(
+            sample_id="s0000",
+            prompt="回流焊峰值温度",
+            task="",
+            expected=answer,
+            edge_answer=answer,
+            cloud_answer=answer,
+        ),
+        EvalSample(
+            sample_id="s0001",
+            prompt="回流焊峰值温度",
+            task="process_qa",
+            expected=answer,
+            edge_answer=answer,
+            cloud_answer=answer,
+        ),
+    ]
+
+    run = run_evaluation(samples, strategies=("edge_only", "legacy"), seed=1, n_boot=0)
+
+    for strategy in ("edge_only", "legacy"):
+        metrics = run.results["strategies"][strategy]
+        assert set(metrics["per_task"]) == {"", "process_qa"}
+        assert sum(entry["n"] for entry in metrics["per_task"].values()) == metrics["n"] == 2
+        for entry in metrics["per_task"].values():
+            for key in (
+                "accuracy",
+                "escalation_rate",
+                "total_cost",
+                "cost_per_request",
+                "latency_p95",
+            ):
+                assert math.isfinite(entry[key])
+
+    empty = run_evaluation([], strategies=("legacy",), seed=1, n_boot=0)
+    assert empty.results["strategies"]["legacy"]["per_task"] == {}
+    assert empty.results["strategies"]["legacy"]["n"] == 0
+
+
+def test_per_task_curves_mirror_the_global_curve_contract() -> None:
+    samples = synthetic_dataset(8, seed=6)
+    run = run_evaluation(samples, strategies=STRATEGIES, seed=6, n_boot=0)
+
+    for strategy in STRATEGIES:
+        global_curves = run.results["curves"][strategy]
+        assert {"risk_coverage", "cost_accuracy"} <= set(global_curves)
+        assert len(global_curves["risk_coverage"]) == len(samples)
+
+        records = [record for record in run.per_prompt if record["strategy"] == strategy]
+        per_task = global_curves["per_task"]
+        assert set(per_task) == {record["task"] for record in records}
+
+        for task, curves in per_task.items():
+            assert set(curves) == {"risk_coverage", "cost_accuracy"}
+            group = [record for record in records if record["task"] == task]
+
+            risk_curve = curves["risk_coverage"]
+            assert len(risk_curve) == len(group)
+            coverage = [point["coverage"] for point in risk_curve]
+            assert coverage == sorted(coverage)
+            assert coverage[-1] == 1.0
+            assert all(0.0 <= point["risk"] <= 1.0 for point in risk_curve)
+
+            cost_curve = curves["cost_accuracy"]
+            assert cost_curve
+            for point in cost_curve:
+                assert 0.0 <= point["accuracy"] <= 1.0
+                assert point["cost"] >= 0.0
+            if strategy == "edge_only":
+                assert len(cost_curve) == 1
+                metrics = run.results["strategies"][strategy]["per_task"][task]
+                assert cost_curve[0]["accuracy"] == pytest.approx(metrics["accuracy"], abs=1e-6)
+                assert cost_curve[0]["cost"] == pytest.approx(metrics["cost_per_request"], abs=1e-6)
+            elif strategy == "oracle":
+                assert all("cut" in point for point in cost_curve)
+            else:
+                assert all("threshold" in point for point in cost_curve)
+
+
+def test_results_record_schema_v2_and_the_threshold_mapping(tmp_path: Path) -> None:
+    samples = _paired_task_samples()
+
+    run = run_evaluation(
+        samples,
+        strategies=("legacy",),
+        seed=1,
+        n_boot=0,
+        escalation_threshold_by_task={"process_qa": 0.0, "quality_verdict": 0.4},
+    )
+
+    results = run.results
+    assert results["schema_version"] == "exp9-handoff-eval/v2"
+    assert results["config"]["escalation_threshold"] == 0.62
+    assert results["config"]["escalation_threshold_by_task"] == {
+        "process_qa": 0.0,
+        "quality_verdict": 0.4,
+    }
+    paths = write_outputs(run, tmp_path / "run")
+    assert load_results(paths["results"]) == results
+
+
+def test_equal_task_thresholds_match_the_global_metrics() -> None:
+    samples = synthetic_dataset(10, seed=7)
+    strategies = STRATEGIES
+
+    baseline = run_evaluation(samples, strategies=strategies, seed=7, n_boot=10)
+    tuned = run_evaluation(
+        samples,
+        strategies=strategies,
+        seed=7,
+        n_boot=10,
+        escalation_threshold_by_task={sample.task: 0.62 for sample in samples},
+    )
+
+    assert tuned.results["strategies"] == baseline.results["strategies"]
+    assert tuned.results["curves"] == baseline.results["curves"]
+    assert tuned.results["ci"] == baseline.results["ci"]
+    assert tuned.results["config"]["escalation_threshold_by_task"]
+
+
+def test_per_task_runs_produce_byte_identical_artifacts(tmp_path: Path) -> None:
+    samples = synthetic_dataset(10, seed=13)
+    mapping = {"process_qa": 0.3, "fault_diagnosis": 0.8}
+
+    first = run_evaluation(samples, seed=13, n_boot=25, escalation_threshold_by_task=mapping)
+    second = run_evaluation(samples, seed=13, n_boot=25, escalation_threshold_by_task=mapping)
+    first_paths = write_outputs(first, tmp_path / "first")
+    second_paths = write_outputs(second, tmp_path / "second")
+
+    for name in ("results", "summary", "curves", "per_prompt"):
+        assert first_paths[name].read_bytes() == second_paths[name].read_bytes(), name
+    assert first.results["config"]["escalation_threshold_by_task"] == mapping
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        {"process_qa": 1.5},
+        {"process_qa": -0.01},
+        {"process_qa": "0.5"},
+        {"process_qa": True},
+        {"process_qa": float("nan")},
+        {"process_qa": float("inf")},
+        ["process_qa"],
+    ],
+)
+def test_invalid_task_threshold_mappings_are_rejected(mapping: object) -> None:
+    with pytest.raises(ValueError):
+        run_evaluation(
+            synthetic_dataset(2, seed=1),
+            strategies=("legacy",),
+            seed=1,
+            n_boot=0,
+            escalation_threshold_by_task=mapping,
+        )
+
+
+def test_task_threshold_keys_are_stringified() -> None:
+    run = run_evaluation(
+        _paired_task_samples(),
+        strategies=("legacy",),
+        seed=1,
+        n_boot=0,
+        escalation_threshold_by_task={1: 0.0},
+    )
+
+    assert run.results["config"]["escalation_threshold_by_task"] == {"1": 0.0}
+
+
+def test_reader_requires_per_task_metrics_and_curves(tmp_path: Path) -> None:
+    samples = synthetic_dataset(4, seed=4)
+    run = run_evaluation(samples, seed=4, n_boot=0)
+    paths = write_outputs(run, tmp_path / "run")
+    payload = json.loads(paths["results"].read_text(encoding="utf-8"))
+
+    del payload["strategies"]["legacy"]["per_task"]
+    bad = tmp_path / "bad_metrics.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="per_task"):
+        load_results(bad)
+
+    payload = json.loads(paths["results"].read_text(encoding="utf-8"))
+    del payload["curves"]["legacy"]["per_task"]
+    bad = tmp_path / "bad_curves.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="per_task"):
+        load_results(bad)

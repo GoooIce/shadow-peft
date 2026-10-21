@@ -102,3 +102,37 @@ def test_default_config_roundtrips_without_changing_legacy_fields() -> None:
     assert restored == config
     assert restored.escalation_threshold == pytest.approx(0.62)
     assert restored.handoff_mode == "legacy"
+
+
+def test_escalation_threshold_by_task_defaults_empty_and_roundtrips() -> None:
+    assert EdgeConfig().escalation_threshold_by_task == {}
+
+    configured = EdgeConfig.from_dict(
+        {
+            "escalation_threshold": 0.5,
+            "escalation_threshold_by_task": {"fault_diag": 0.35, "process_qa": 0.7},
+        }
+    )
+    assert configured.escalation_threshold_by_task == {
+        "fault_diag": pytest.approx(0.35),
+        "process_qa": pytest.approx(0.7),
+    }
+
+    restored = EdgeConfig.from_dict(configured.to_dict())
+    assert restored == configured
+    assert restored.escalation_threshold_by_task == configured.escalation_threshold_by_task
+
+
+def test_escalation_threshold_by_task_stringifies_keys_and_numeric_values() -> None:
+    config = EdgeConfig(escalation_threshold_by_task={7: 0, "fault_diag": "0.25"})
+
+    assert config.escalation_threshold_by_task == {"7": 0.0, "fault_diag": 0.25}
+
+
+def test_config_rejects_invalid_escalation_threshold_by_task() -> None:
+    for bad_mapping in ([0.2], "process_calc", None, 0.3):
+        with pytest.raises(ValueError):
+            EdgeConfig(escalation_threshold_by_task=bad_mapping)
+    for bad_value in (-0.01, 1.01, "high", None, [0.5]):
+        with pytest.raises(ValueError):
+            EdgeConfig(escalation_threshold_by_task={"process_calc": bad_value})
