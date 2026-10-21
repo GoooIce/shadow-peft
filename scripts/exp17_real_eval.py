@@ -3,23 +3,24 @@
 
 This is the small, reusable entry point — not the full 2-4 day campaign. It
 loads real examples (GSM8K test by default, ``runs/exp12/heldout.jsonl`` for
-RESTRAIN), dispatches the requested suites from :mod:`shadow_lab.real_eval`
-and writes ``report.json`` / ``summary.csv`` / ``per_example.jsonl``.
+RESTRAIN), dispatches the requested suites through
+:func:`shadow_lab.real_eval.run_suite` (the same entry as ``run_suites``) and
+writes ``report.json`` / ``summary.csv`` / ``per_example.jsonl``.
 
 Examples::
 
-    # GSM8K test, GKD perplexity + task accuracy (first 50 rows)
+    # GSM8K test, GKD perplexity + task accuracy (first 50 rows, 8192 ppl tokens)
     PYTHONPATH=src python scripts/exp17_real_eval.py \
         --suite gkd --model /path/Qwen3-0.6B \
         --shadow-ckpt runs/exp7/e4b-seed0/ckpt-final \
-        --limit 50 --out runs-local/exp17/gkd
+        --limit 50 --token-budget 8192 --out runs-local/exp17/gkd
 
-    # S2T coverage on the same real prompts
+    # S2T coverage on the same real prompts; --selector adds selector_gain
     PYTHONPATH=src python scripts/exp17_real_eval.py \
         --suite s2t --model /path/Qwen3-4B \
         --shadow-ckpt runs/exp7/e4b-seed0/ckpt-final \
         --shadow-model /path/Qwen3-0.6B-H4B \
-        --limit 50 --out runs-local/exp17/s2t
+        --selector runs/exp11/selector --limit 50 --out runs-local/exp17/s2t
 
     # RESTRAIN structured hard cases (default dataset runs/exp12/heldout.jsonl)
     PYTHONPATH=src python scripts/exp17_real_eval.py \
@@ -46,7 +47,6 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_OUT = "runs/exp17-real-eval"
-DEFAULT_RESTRAIN_DATASET = "runs/exp12/heldout.jsonl"
 EXPERIMENT = "exp17-real-eval"
 SPEC = "GitHub issue #47"
 
@@ -113,6 +113,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Generation budget (defaults: gkd 128, s2t/restrain 32; smoke 16).",
     )
     parser.add_argument("--k", type=int, default=8, help="S2T candidate width.")
+    parser.add_argument(
+        "--selector",
+        default=None,
+        help=(
+            "S2T saved selector directory (selector.safetensors + "
+            "selector_config.json); adds selector_gain."
+        ),
+    )
+    parser.add_argument(
+        "--token-budget",
+        type=int,
+        default=None,
+        help=(
+            "GKD perplexity budget in scored target tokens; maps to "
+            "ceil(token_budget / seq_len) windows."
+        ),
+    )
     parser.add_argument(
         "--use-cache",
         action="store_true",
@@ -212,36 +229,28 @@ def _load_model(args: argparse.Namespace) -> tuple[Any | None, Any | None, str]:
     return model, tokenizer, "loaded"
 
 
-def _jsonl_exists(path: str | Path) -> bool:
-    return Path(path).expanduser().is_file()
-
-
 def _dataset_examples(
     args: argparse.Namespace,
     suite: str,
 ) -> tuple[list[Any], dict[str, Any], str | None]:
-    """Resolve the suite dataset; return ``(examples, metadata, error)``."""
+    """Resolve the suite dataset; return ``(examples, metadata, error)``.
 
-    from shadow_lab.real_eval import load_gsm8k_examples, load_jsonl_examples
+    The default source per suite comes from
+    :data:`shadow_lab.real_eval.SUITE_DEFAULT_DATASETS`, so adding a suite does
+    not require a new branch here.
+    """
+
+    from shadow_lab.real_eval import (
+        SUITE_DEFAULT_DATASETS,
+        load_gsm8k_examples,
+        load_jsonl_examples,
+    )
 
     requested = args.dataset
-    if requested in (None, "", "gsm8k"):
-        if suite in ("gkd", "s2t"):
-            examples = load_gsm8k_examples(limit=args.limit, seed=args.seed)
-            return (
-                examples,
-                {
-                    "name": "gsm8k",
-                    "split": "test",
-                    "limit": args.limit,
-                    "seed": args.seed,
-                },
-                None,
-            )
-        if suite == "restrain":
-            requested = DEFAULT_RESTRAIN_DATASET
-        else:
-            return [], {"name": None}, "jitrl requires --dataset (real examples)."
+    if requested in (None, ""):
+        requested = SUITE_DEFAULT_DATASETS.get(suite)
+        if requested is None:
+            return [], {"name": None}, f"{suite} requires --dataset (real examples)."
     if str(requested).lower() == "gsm8k":
         examples = load_gsm8k_examples(limit=args.limit, seed=args.seed)
         return (
@@ -277,42 +286,46 @@ def _build_jitrl_backend(args: argparse.Namespace) -> Any:
     return build_backend(payload)
 
 
-def _data_missing_report(suite: str, reason: str, examples: int = 0) -> Any:
-    from shadow_lab.real_eval import EVIDENCE_INSUFFICIENT, STATUS_DATA_MISSING, SuiteReport
-
-    return SuiteReport(
-        suite=suite,
-        status=STATUS_DATA_MISSING,
-        metrics={"n_examples": examples},
-        evidence=EVIDENCE_INSUFFICIENT,
-        notes=(reason,),
-    )
-
-
 def _run(args: argparse.Namespace) -> dict[str, Any]:
     from shadow_lab.real_eval import (
+        SUITES,
         build_report,
+        data_missing_report,
         dataset_fingerprint,
-        run_gkd_suite,
-        run_jitrl_suite,
-        run_restrain_suite,
-        run_s2t_suite,
+        run_suite,
         write_report,
     )
 
-    selected = (
-        ["gkd", "s2t", "restrain", "jitrl"] if args.suite == "all" else [args.suite]
-    )
+    selected = list(SUITES) if args.suite == "all" else [args.suite]
     model, tokenizer, load_status = _load_model(args)
+    # One flat option mapping feeds the shared dispatch; each suite picks the
+    # keys it accepts and falls back to its own defaults.
+    options = {
+        "max_new_tokens": args.max_new_tokens,
+        "token_budget": args.token_budget,
+        "k": args.k,
+        "use_cache": args.use_cache,
+        "selector": args.selector,
+        "n": args.n,
+        "temperature": args.temperature,
+        "kappa": args.kappa,
+        "alpha": args.alpha,
+        "threshold": args.threshold,
+        "top_k": args.top_k,
+        "min_support": args.min_support,
+        "tenant": args.tenant,
+        "adapter_version": args.adapter_version,
+        "seed": args.seed,
+        "n_boot": 200,
+    }
 
     reports: dict[str, Any] = {}
     datasets: dict[str, Any] = {}
-    dataset_errors: dict[str, str] = {}
     all_examples: dict[str, Any] = {}
     for suite in selected:
         if suite != "jitrl" and model is None:
             datasets[suite] = {}
-            dataset_errors[suite] = load_status
+            reports[suite] = data_missing_report(suite, load_status)
             continue
         examples, metadata, error = _dataset_examples(args, suite)
         if examples:
@@ -325,77 +338,29 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 all_examples[example.id] = example
         datasets[suite] = metadata
         if error:
-            dataset_errors[suite] = error
+            reports[suite] = data_missing_report(
+                suite, error, examples=len(examples)
+            )
             continue
-        max_new_tokens = args.max_new_tokens
-        if max_new_tokens is None:
-            max_new_tokens = 128 if suite == "gkd" else 32
-        n = args.n if args.n is not None else (4 if suite in ("restrain", "jitrl") else None)
-
-        if suite == "gkd":
-            reports[suite] = run_gkd_suite(
-                model,
-                tokenizer,
-                examples,
-                shadow_ckpt=args.shadow_ckpt,
-                max_new_tokens=max_new_tokens,
-                limit=None,
-                seed=args.seed,
-                n_boot=200,
+        if suite == "s2t" and not args.shadow_ckpt:
+            reports[suite] = data_missing_report(
+                "s2t",
+                "s2t needs --shadow-ckpt for shadow_logits.",
+                examples=len(examples),
             )
-        elif suite == "s2t":
-            if model is not None and not args.shadow_ckpt:
-                reports[suite] = _data_missing_report(
-                    "s2t", "s2t needs --shadow-ckpt for shadow_logits.", len(examples)
-                )
-            else:
-                reports[suite] = run_s2t_suite(
-                    model,
-                    tokenizer,
-                    examples,
-                    shadow_ckpt=args.shadow_ckpt,
-                    shadow_model_path=args.shadow_model_path,
-                    max_new_tokens=min(max_new_tokens, 64),
-                    k=args.k,
-                    use_cache=args.use_cache,
-                    limit=None,
-                    seed=args.seed,
-                )
-        elif suite == "restrain":
-            reports[suite] = run_restrain_suite(
-                model,
-                tokenizer,
-                examples,
-                adapter=args.adapter or args.shadow_ckpt,
-                n=int(n or 4),
-                max_new_tokens=min(max_new_tokens, 64),
-                temperature=args.temperature,
-                kappa=args.kappa,
-                limit=None,
-                seed=args.seed,
-            )
-        else:
-            reports[suite] = run_jitrl_suite(
-                examples,
-                memory=args.memory,
-                backend=_build_jitrl_backend(args),
-                n=int(n or 4),
-                alpha=args.alpha,
-                threshold=args.threshold,
-                top_k=args.top_k,
-                min_support=args.min_support,
-                tenant=args.tenant,
-                adapter_version=args.adapter_version,
-                limit=None,
-                seed=args.seed,
-            )
-
-    for suite in selected:
-        if suite in reports:
             continue
-        reason = dataset_errors.get(suite) or f"{suite}: no runnable inputs."
-        reports[suite] = _data_missing_report(
-            suite, reason, int(datasets.get(suite, {}).get("n_available", 0))
+        reports[suite] = run_suite(
+            suite,
+            examples,
+            model=model,
+            tokenizer=tokenizer,
+            shadow_ckpt=args.shadow_ckpt,
+            shadow_model_path=args.shadow_model_path,
+            adapter=args.adapter or args.shadow_ckpt,
+            memory=args.memory,
+            backend=_build_jitrl_backend(args) if suite == "jitrl" else None,
+            cloud=None,
+            options=options,
         )
 
     dataset_summary = {
@@ -415,6 +380,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             "model": args.model,
             "shadow_ckpt": args.shadow_ckpt,
             "shadow_model_path": args.shadow_model_path,
+            "selector": args.selector,
+            "token_budget": args.token_budget,
             "device": args.device,
             "dtype": args.dtype,
             "limit": args.limit,

@@ -5,14 +5,18 @@ turns real examples into four uniform suite reports:
 
 - ``gkd``: joint/shadow perplexity on held-out text plus structured task
   accuracy, reusing :func:`shadow_lab.onpolicy_eval.evaluate_ppl` and
-  :func:`shadow_lab.onpolicy_eval.grade_task`.
-- ``s2t``: candidate coverage diagnostics (Hit@8 / Agree@1), reusing
+  :func:`shadow_lab.onpolicy_eval.grade_task`. ``token_budget`` caps the
+  perplexity windows (``ceil(token_budget / seq_len)``).
+- ``s2t``: candidate coverage diagnostics (Hit@K / Agree@1), reusing
   :func:`shadow_lab.s2t_diagnose.diagnose` and
-  :func:`shadow_lab.s2t.build_report`.
+  :func:`shadow_lab.s2t.build_report`. An optional selector head
+  (``--selector``) adds ``selector_gain`` via
+  :mod:`shadow_lab.s2t_selector`.
 - ``restrain``: structured rollout grading and vote consistency, reusing
   ``shadow_lab.restrain`` and :mod:`shadow_lab.restrain_eval`.
-- ``jitrl``: no-memory vs memory-reranked accuracy, false-bias and cloud calls
-  over an n-best backend, driven by :func:`edge_cloud.rerank.rerank`.
+- ``jitrl``: no-memory vs memory-reranked accuracy, false-bias, cloud calls
+  and memory latency over an n-best backend, driven by
+  :func:`edge_cloud.rerank.rerank`.
 
 Design rules
 ------------
@@ -20,8 +24,8 @@ Design rules
   example yields ``status="data_missing"`` with a note; metrics that cannot be
   measured stay ``None``.
 - **Small samples cannot claim gains.** ``claims_gain`` is always ``False`` in
-  this harness (it has no baseline arm), and fewer than
-  :data:`EVIDENCE_MIN_EXAMPLES` examples leave the evidence label at
+  this harness (it has no baseline arm), and fewer than the per-suite evidence
+  bar (:data:`EVIDENCE_MIN_EXAMPLES_BY_SUITE`) leave the evidence label at
   :data:`EVIDENCE_INSUFFICIENT`.
 - **No models or datasets at import.** The module reuses the existing
   torch-backed eval helpers but never loads weights; ``datasets`` is imported
@@ -40,6 +44,7 @@ import io
 import json
 import math
 import random
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,6 +65,7 @@ from shadow_lab.restrain_eval import (
 from shadow_lab.restrain_eval import (
     build_report as build_restrain_report,
 )
+from shadow_lab.s2t import bootstrap_ci as s2t_bootstrap_ci
 from shadow_lab.s2t import build_report as build_s2t_report
 from shadow_lab.s2t_diagnose import diagnose
 
@@ -68,19 +74,88 @@ REPORT_FILENAME = "report.json"
 SUMMARY_FILENAME = "summary.csv"
 PER_EXAMPLE_FILENAME = "per_example.jsonl"
 SUITES: tuple[str, ...] = ("gkd", "s2t", "restrain", "jitrl")
+DEFAULT_RESTRAIN_DATASET = "runs/exp12/heldout.jsonl"
 
 STATUS_OK = "ok"
 STATUS_DATA_MISSING = "data_missing"
 EVIDENCE_INSUFFICIENT = "evidence_insufficient"
 EVIDENCE_COLLECTED = "evidence_collected"
-# Mirrors the RESTRAIN ticket's >=100 structured hard-case bar. Below this a
+# Per-suite evidence bars. GKD/S2T/JitRL mirror the ticket's >=200 held-out
+# examples; RESTRAIN keeps its >=100 structured hard-case bar. Below the bar a
 # suite may describe mechanism behaviour but never a gain.
-EVIDENCE_MIN_EXAMPLES = 100
+EVIDENCE_MIN_EXAMPLES_BY_SUITE: dict[str, int] = {
+    "gkd": 200,
+    "s2t": 200,
+    "restrain": 100,
+    "jitrl": 200,
+}
 DEFAULT_CI_BOOTSTRAP = 200
 CLAIM_NOTE = (
     "claims_gain is false: this MVP harness evaluates a single model/path and "
     "does not run a baseline-vs-treatment campaign."
 )
+
+# Per-suite defaults and the flat option keys each suite accepts. ``run_suite``
+# is the single dispatch point shared by ``run_suites`` and the CLI, so adding
+# a suite means updating this table plus :data:`SUITES` and the branch below.
+SUITE_DEFAULTS: dict[str, dict[str, Any]] = {
+    "gkd": {"max_new_tokens": 128},
+    "s2t": {"max_new_tokens": 32},
+    "restrain": {"max_new_tokens": 32, "n": 4},
+    "jitrl": {"n": 4},
+}
+SUITE_OPTION_KEYS: dict[str, tuple[str, ...]] = {
+    "gkd": (
+        "seq_len",
+        "max_windows",
+        "max_new_tokens",
+        "token_budget",
+        "limit",
+        "n_boot",
+        "seed",
+    ),
+    "s2t": (
+        "max_new_tokens",
+        "k",
+        "use_cache",
+        "selector",
+        "limit",
+        "n_boot",
+        "seed",
+    ),
+    "restrain": (
+        "n",
+        "max_new_tokens",
+        "temperature",
+        "kappa",
+        "sigma",
+        "limit",
+        "n_boot",
+        "seed",
+    ),
+    "jitrl": (
+        "n",
+        "alpha",
+        "threshold",
+        "top_k",
+        "min_support",
+        "min_return",
+        "tenant",
+        "adapter_version",
+        "escalation_threshold",
+        "limit",
+        "n_boot",
+        "seed",
+    ),
+}
+# Default dataset source per suite, consumed by the exp17 CLI. ``None`` means
+# the suite requires an explicit ``--dataset`` (JitRL's real feedback corpus).
+SUITE_DEFAULT_DATASETS: dict[str, str | None] = {
+    "gkd": "gsm8k",
+    "s2t": "gsm8k",
+    "restrain": DEFAULT_RESTRAIN_DATASET,
+    "jitrl": None,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -130,32 +205,52 @@ class SuiteReport:
         }
 
 
-def _evidence_for(count: int) -> str:
+def evidence_min_examples(suite: str) -> int:
+    """Return the per-suite evidence bar in examples."""
+
+    try:
+        return EVIDENCE_MIN_EXAMPLES_BY_SUITE[suite]
+    except KeyError:
+        raise ValueError(
+            f"unknown suite: {suite!r}; expected one of {SUITES}"
+        ) from None
+
+
+def evidence_for(suite: str, count: int) -> str:
+    """Label the evidence level for ``count`` examples of ``suite``."""
+
     return (
         EVIDENCE_COLLECTED
-        if count >= EVIDENCE_MIN_EXAMPLES
+        if count >= evidence_min_examples(suite)
         else EVIDENCE_INSUFFICIENT
     )
 
 
-def _data_missing(
+def data_missing_report(
     suite: str,
     reason: str,
     *,
     config: Mapping[str, Any] | None = None,
     examples: int = 0,
+    metrics: Mapping[str, Any] | None = None,
 ) -> SuiteReport:
+    """Shared ``data_missing`` constructor used by every dispatch path."""
+
+    payload: dict[str, Any] = {
+        "n_examples": int(examples),
+        "accuracy": None,
+        "joint_ppl": None,
+        "shadow_ppl": None,
+        "hit_at_k": None,
+        "agree_at_1": None,
+        "memory_latency_ms_p95": None,
+        "memory_latency_ms_max": None,
+    }
+    payload.update(dict(metrics or {}))
     return SuiteReport(
         suite=suite,
         status=STATUS_DATA_MISSING,
-        metrics={
-            "n_examples": int(examples),
-            "accuracy": None,
-            "joint_ppl": None,
-            "shadow_ppl": None,
-            "hit_at_8": None,
-            "agree_at_1": None,
-        },
+        metrics=payload,
         config=dict(config or {}),
         claims_gain=False,
         evidence=EVIDENCE_INSUFFICIENT,
@@ -455,6 +550,23 @@ def _mean(values: Sequence[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+def _percentile(values: Sequence[float], quantile: float) -> float | None:
+    """Linear-interpolated percentile (same convention as onpolicy_eval)."""
+
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * quantile
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
 def _ppl_interval(
     losses: Sequence[float],
     window_tokens: Sequence[int] | None,
@@ -482,6 +594,18 @@ def _apply_limit(examples: Sequence[EvalExample], limit: int | None) -> list[Eva
 # ---------------------------------------------------------------------------
 
 
+def _max_windows_for_token_budget(token_budget: int, seq_len: int) -> int:
+    """Windows needed to score at most ``token_budget`` target tokens."""
+
+    if isinstance(token_budget, bool) or not isinstance(token_budget, int):
+        raise ValueError(f"token_budget must be an integer, got {token_budget!r}")
+    if token_budget < 1:
+        raise ValueError(f"token_budget must be >= 1, got {token_budget!r}")
+    if seq_len < 2:
+        raise ValueError(f"seq_len must be >= 2, got {seq_len!r}")
+    return max(1, math.ceil(token_budget / seq_len))
+
+
 def run_gkd_suite(
     model: Any,
     tokenizer: Any,
@@ -490,6 +614,7 @@ def run_gkd_suite(
     shadow_ckpt: str | None = None,
     seq_len: int = 2048,
     max_windows: int | None = None,
+    token_budget: int | None = None,
     max_new_tokens: int = 128,
     limit: int | None = None,
     n_boot: int = DEFAULT_CI_BOOTSTRAP,
@@ -499,23 +624,28 @@ def run_gkd_suite(
 
     Perplexity is measured on ``prompt + reference`` with
     :func:`evaluate_ppl`; task accuracy comes from greedy/sampled answers
-    graded by :func:`grade_task`. A model or tokenizer that cannot score the
-    corpus yields ``data_missing`` rather than a made-up number.
+    graded by :func:`grade_task`. ``token_budget`` caps the scored target
+    tokens by mapping to ``ceil(token_budget / seq_len)`` windows (whichever of
+    ``token_budget``/``max_windows`` is tighter wins); the actual
+    ``ppl_tokens``/``ppl_windows`` are reported. A model or tokenizer that
+    cannot score the corpus yields ``data_missing`` rather than a made-up
+    number.
     """
 
     if model is None or tokenizer is None:
-        return _data_missing(
+        return data_missing_report(
             "gkd",
             "gkd needs a loaded model and tokenizer (--model/--shadow-ckpt).",
             examples=len(examples),
         )
     items = _apply_limit(examples, limit)
     if not items:
-        return _data_missing("gkd", "gkd received no examples.", examples=0)
+        return data_missing_report("gkd", "gkd received no examples.", examples=0)
     config = {
         "shadow_ckpt": shadow_ckpt,
         "seq_len": int(seq_len),
         "max_windows": max_windows,
+        "token_budget": token_budget,
         "max_new_tokens": int(max_new_tokens),
         "limit": limit,
         "n_boot": int(n_boot),
@@ -536,6 +666,14 @@ def run_gkd_suite(
         "task_accuracy_ci": None,
     }
 
+    if token_budget is not None:
+        budget_windows = _max_windows_for_token_budget(token_budget, seq_len)
+        max_windows = (
+            budget_windows
+            if max_windows is None
+            else min(int(max_windows), budget_windows)
+        )
+        config["max_windows"] = max_windows
     texts = [_reference_text(example) for example in items]
     try:
         ppl = evaluate_ppl(
@@ -552,6 +690,12 @@ def run_gkd_suite(
         metrics["shadow_ppl"] = float(ppl["shadow_ppl"])
         metrics["ppl_tokens"] = int(ppl["tokens"])
         metrics["ppl_windows"] = len(ppl["window_tokens"])
+        if token_budget is not None:
+            notes.append(
+                f"token_budget={token_budget} mapped to max_windows="
+                f"{config['max_windows']}; actual ppl_tokens={metrics['ppl_tokens']}, "
+                f"ppl_windows={metrics['ppl_windows']}."
+            )
         metrics["joint_ppl_ci"] = _ppl_interval(
             ppl["joint_losses"],
             ppl["window_tokens"],
@@ -620,7 +764,7 @@ def run_gkd_suite(
         per_example=tuple(per_example),
         config=config,
         claims_gain=False,
-        evidence=_evidence_for(len(items)),
+        evidence=evidence_for("gkd", len(items)),
         notes=tuple(notes),
     )
 
@@ -628,6 +772,110 @@ def run_gkd_suite(
 # ---------------------------------------------------------------------------
 # S2T suite
 # ---------------------------------------------------------------------------
+
+
+def _load_selector_head(selector: Any, *, device: Any = None) -> Any:
+    from shadow_lab.s2t_selector import load_selector
+
+    if isinstance(selector, (str, Path)):
+        return load_selector(selector, device=device if device is not None else "cpu")
+    if callable(getattr(selector, "to", None)) and device is not None:
+        selector.to(device)
+    if callable(getattr(selector, "eval", None)):
+        selector.eval()
+    if not callable(getattr(selector, "score", None)):
+        raise TypeError(
+            "selector must be a saved selector directory or expose "
+            "score(h_t, candidate_ids, candidate_weight)"
+        )
+    return selector
+
+
+def _s2t_records_from_selector(
+    model: Any,
+    tokenizer: Any,
+    prompts: Sequence[Mapping[str, Any]],
+    *,
+    max_new_tokens: int,
+    k: int,
+    seed: int,
+) -> tuple[list[dict[str, Any]], list[Any]]:
+    """Collect selector examples and convert them into S2T report records.
+
+    ``collect_selector_examples`` follows the same greedy base-prefix decoding
+    as :func:`diagnose` (base top-1 advances the context, shadow top-K is the
+    candidate set), but additionally keeps the initial shadow hidden ``h_t``
+    that the selector needs. The synthetic records expose the fields
+    :func:`shadow_lab.s2t.build_report` consumes.
+    """
+
+    from shadow_lab.s2t_selector import collect_selector_examples
+
+    collected = collect_selector_examples(
+        model,
+        tokenizer,
+        prompts,
+        max_new_tokens=max_new_tokens,
+        k=k,
+        seed=seed,
+    )
+    records = [
+        {
+            "prompt_id": example.prompt_id,
+            "task": example.task,
+            "position": example.position,
+            "base_top1": int(example.base_top1),
+            "shadow_topk_ids": [int(token) for token in example.candidate_ids.tolist()],
+        }
+        for example in collected
+    ]
+    return records, collected
+
+
+def _selector_gain(
+    model: Any,
+    selector: Any,
+    collected: Sequence[Any],
+) -> dict[str, Any]:
+    """Selector vs. shadow-greedy Agree@1 on the same base-prefix tokens."""
+
+    from shadow_lab.s2t_selector import select_candidate
+
+    weight = getattr(getattr(model, "shadow_lm_head", None), "weight", None)
+    if weight is None or getattr(weight, "ndim", None) != 2:
+        raise ValueError("selector scoring needs model.shadow_lm_head.weight")
+    device = weight.device
+    if callable(getattr(selector, "to", None)):
+        selector.to(device)
+    if callable(getattr(selector, "eval", None)):
+        selector.eval()
+    torch = _import_torch()
+    selector_agrees = 0
+    greedy_agrees = 0
+    with torch.inference_mode():
+        for example in collected:
+            candidate_ids = example.candidate_ids.to(device)
+            hidden = example.h_t.to(device=device, dtype=weight.dtype)
+            scores = selector.score(hidden, candidate_ids, weight)
+            selected = int(select_candidate(scores, candidate_ids).item())
+            selector_agrees += int(selected == example.base_top1)
+            greedy_agrees += int(example.shadow_top1 == example.base_top1)
+    n_tokens = len(collected)
+    if not n_tokens:
+        return {
+            "selector_agree_at_1": None,
+            "greedy_agree_at_1": None,
+            "selector_gain": None,
+            "n_selector_tokens": 0,
+        }
+    selector_rate = selector_agrees / n_tokens
+    greedy_rate = greedy_agrees / n_tokens
+    return {
+        "selector_agree_at_1": selector_rate,
+        "greedy_agree_at_1": greedy_rate,
+        "selector_gain": selector_rate - greedy_rate,
+        "n_selector_tokens": n_tokens,
+    }
 
 
 def run_s2t_suite(
@@ -640,6 +888,7 @@ def run_s2t_suite(
     max_new_tokens: int = 32,
     k: int = 8,
     use_cache: bool = False,
+    selector: Any = None,
     limit: int | None = None,
     n_boot: int = DEFAULT_CI_BOOTSTRAP,
     seed: int = 0,
@@ -647,25 +896,38 @@ def run_s2t_suite(
     """Hit@K / Agree@1 candidate coverage on real prompts (issue #3).
 
     Reuses the diagnostic runner (initial shadow hidden) and the S2T report
-    builder. ``selector_gain`` is not measurable without a selector head and
-    stays ``None``.
+    builder. ``hit_at_k`` is the hit rate at the configured ``k`` (reported
+    beside the ``k`` field); ``hit_at_8`` is only emitted as a deprecated
+    alias when ``k == 8``. A saved selector head (``selector=``) adds
+    ``selector_gain``, measured against the shadow-greedy Agree@1 on the same
+    base-prefix tokens.
     """
 
     if model is None or tokenizer is None:
-        return _data_missing(
+        return data_missing_report(
             "s2t",
             "s2t needs a loaded base_shadow model and tokenizer.",
             examples=len(examples),
+            metrics={"k": int(k)},
         )
     items = _apply_limit(examples, limit)
     if not items:
-        return _data_missing("s2t", "s2t received no examples.", examples=0)
+        return data_missing_report(
+            "s2t", "s2t received no examples.", examples=0, metrics={"k": int(k)}
+        )
     config = {
         "shadow_ckpt": shadow_ckpt,
         "shadow_model_path": shadow_model_path,
         "max_new_tokens": int(max_new_tokens),
         "k": int(k),
         "use_cache": bool(use_cache),
+        "selector": (
+            None
+            if selector is None
+            else str(selector)
+            if isinstance(selector, (str, Path))
+            else type(selector).__name__
+        ),
         "limit": limit,
         "n_boot": int(n_boot),
         "seed": int(seed),
@@ -678,23 +940,38 @@ def run_s2t_suite(
         }
         for example in items
     ]
-    records = diagnose(
-        model,
-        tokenizer,
-        prompts,
-        max_new_tokens=max_new_tokens,
-        k=k,
-        seed=seed,
-        use_cache=use_cache,
-    )
+    selector_head = None
+    selector_examples: list[Any] = []
+    if selector is None:
+        records = diagnose(
+            model,
+            tokenizer,
+            prompts,
+            max_new_tokens=max_new_tokens,
+            k=k,
+            seed=seed,
+            use_cache=use_cache,
+        )
+    else:
+        selector_head = _load_selector_head(selector, device=_device_of(model))
+        records, selector_examples = _s2t_records_from_selector(
+            model,
+            tokenizer,
+            prompts,
+            max_new_tokens=max_new_tokens,
+            k=k,
+            seed=seed,
+        )
     if not records:
-        return _data_missing(
+        return data_missing_report(
             "s2t",
             "s2t diagnostic produced no tokens; check prompts and max_new_tokens.",
             config=config,
             examples=len(items),
+            metrics={"k": int(k)},
         )
     report = build_s2t_report(records, ks=(k,), n_boot=n_boot, seed=seed)
+    hit_ci = s2t_bootstrap_ci(records, metric=f"hit@{k}", n_boot=n_boot, seed=seed)
 
     per_prompt: dict[str, dict[str, Any]] = {}
     for record in records:
@@ -709,13 +986,11 @@ def run_s2t_suite(
                 "agree_at_1": 0,
             },
         )
+        base_top1 = int(record.get("base_top1"))
+        candidate_ids = [int(token) for token in record.get("shadow_topk_ids") or ()]
         row["n_tokens"] += 1
-        row["hit_at_k"] += int(int(record.get("base_top1_rank_in_shadow", k + 1)) <= k)
-        row["agree_at_1"] += int(
-            int(record.get("base_top1")) == int(record.get("shadow_topk_ids")[0])
-            if record.get("shadow_topk_ids")
-            else 0
-        )
+        row["hit_at_k"] += int(base_top1 in candidate_ids[:k])
+        row["agree_at_1"] += int(bool(candidate_ids) and candidate_ids[0] == base_top1)
     for row in per_prompt.values():
         tokens = max(1, int(row["n_tokens"]))
         row["hit_at_k"] = row["hit_at_k"] / tokens
@@ -724,25 +999,48 @@ def run_s2t_suite(
     notes = [
         "Hit@K/Agree@1 come from the initial shadow hidden state, not the "
         "injected deployment path.",
-        "selector_gain is null: this MVP runs no selector head.",
+        f"hit_at_k is the hit rate at the configured k={int(k)}.",
         CLAIM_NOTE,
     ]
-    if k < 8:
-        notes.append(f"K={k} < 8, so hit_at_8 is capped at the captured width.")
-
-    metrics = {
+    metrics: dict[str, Any] = {
         "n_examples": len(items),
         "n_prompts_with_tokens": int(report.get("n_prompts") or 0),
         "n_tokens": int(report.get("n_tokens") or 0),
         "k": int(k),
-        "hit_at_8": report.get("hit_at_8"),
-        "hit_at_8_ci": report.get("hit_at_8_ci"),
+        "hit_at_k": report.get(f"hit_at_{k}"),
+        "hit_at_k_ci": [hit_ci.low, hit_ci.high],
         "agree_at_1": report.get("agree_at_1"),
         "agree_at_1_ci": report.get("agree_at_1_ci"),
         "rank_all_p95": report.get("rank_all_p95"),
         "go_no_go": report.get("go_no_go"),
         "selector_gain": None,
+        "selector_agree_at_1": None,
+        "greedy_agree_at_1": None,
+        "n_selector_tokens": 0,
     }
+    if int(k) == 8:
+        metrics["hit_at_8"] = metrics["hit_at_k"]
+        metrics["hit_at_8_ci"] = metrics["hit_at_k_ci"]
+        notes.append("hit_at_8 is a deprecated alias of hit_at_k (k == 8).")
+    if selector_head is not None:
+        metrics.update(_selector_gain(model, selector_head, selector_examples))
+        notes.append(
+            "selector_gain = selector Agree@1 - shadow-greedy Agree@1 on the "
+            "same base-prefix tokens; scorer sees the initial shadow hidden."
+        )
+        notes.append(
+            "selector mode keeps only captured candidates, so rank_all_* is "
+            "limited to hits inside the captured top-k."
+        )
+        if use_cache:
+            notes.append(
+                "use_cache is ignored with selector: collect_selector_examples "
+                "recomputes the prefix each step."
+            )
+    else:
+        notes.append(
+            "selector_gain is null: pass --selector to score a saved selector head."
+        )
     return SuiteReport(
         suite="s2t",
         status=STATUS_OK,
@@ -750,7 +1048,7 @@ def run_s2t_suite(
         per_example=tuple(per_prompt.values()),
         config=config,
         claims_gain=False,
-        evidence=_evidence_for(len(items)),
+        evidence=evidence_for("s2t", len(items)),
         notes=tuple(notes),
     )
 
@@ -812,7 +1110,7 @@ def run_restrain_suite(
     """
 
     if model is None or tokenizer is None:
-        return _data_missing(
+        return data_missing_report(
             "restrain",
             "restrain needs a loaded model and tokenizer.",
             examples=len(examples),
@@ -821,7 +1119,7 @@ def run_restrain_suite(
         raise ValueError(f"n must be >= 1, got {n!r}")
     items = _apply_limit(examples, limit)
     if not items:
-        return _data_missing("restrain", "restrain received no examples.", examples=0)
+        return data_missing_report("restrain", "restrain received no examples.", examples=0)
     config = {
         "adapter": adapter,
         "n": int(n),
@@ -836,7 +1134,7 @@ def run_restrain_suite(
 
     torch = _import_torch()
     torch.manual_seed(seed)
-    records: list[dict[str, Any]] = []
+    outcomes: list[bool] = []
     counts_rows: list[dict[str, Any]] = []
     per_example: list[dict[str, Any]] = []
     entropy_values: list[float] = []
@@ -866,16 +1164,12 @@ def run_restrain_suite(
             top1_values.append(top1_share(cluster.counts))
         graded: list[bool | None] = []
         for answer in answers:
+            # Grade each rollout exactly once; the same outcomes feed both the
+            # per-example rows and the report aggregation.
             correct = grade_structured(answer, example.expected, example.task)
             graded.append(correct)
             if correct is not None:
-                records.append(
-                    {
-                        "task": example.task,
-                        "expected": example.expected,
-                        "answer": answer,
-                    }
-                )
+                outcomes.append(bool(correct))
         per_example.append(
             {
                 "id": example.id,
@@ -891,14 +1185,6 @@ def run_restrain_suite(
             }
         )
 
-    outcomes = [
-        bool(value)
-        for value in (
-            grade_structured(record["answer"], record["expected"], record["task"])
-            for record in records
-        )
-        if value is not None
-    ]
     accuracy = sum(outcomes) / len(outcomes) if outcomes else None
     report = build_restrain_report(
         accuracy=accuracy,
@@ -943,7 +1229,7 @@ def run_restrain_suite(
         per_example=tuple(per_example),
         config=config,
         claims_gain=bool(report.get("claims_gain", False)),
-        evidence=_evidence_for(len(items)),
+        evidence=evidence_for("restrain", len(items)),
         notes=tuple(notes),
     )
 
@@ -1088,7 +1374,7 @@ def run_jitrl_suite(
         "cloud_measured": cloud is not None,
     }
     if backend is None or not callable(getattr(backend, "generate_nbest", None)):
-        return _data_missing(
+        return data_missing_report(
             "jitrl",
             "jitrl needs an n-best backend exposing generate_nbest(request, n).",
             config=config,
@@ -1096,7 +1382,7 @@ def run_jitrl_suite(
         )
     loaded_memory, memory_error = _coerce_memory(memory)
     if loaded_memory is None:
-        return _data_missing(
+        return data_missing_report(
             "jitrl",
             memory_error or "jitrl memory unavailable.",
             config=config,
@@ -1104,7 +1390,7 @@ def run_jitrl_suite(
         )
     items = _apply_limit(examples, limit)
     if not items:
-        return _data_missing("jitrl", "jitrl received no examples.", config=config)
+        return data_missing_report("jitrl", "jitrl received no examples.", config=config)
 
     from edge_cloud.confidence import ConfidenceEstimator
 
@@ -1117,6 +1403,7 @@ def run_jitrl_suite(
     reranked_cases = 0
     false_bias_count = 0
     false_bias_denominator = 0
+    memory_latencies_ms: list[float] = []
 
     for example in items:
         task = example.task or "general"
@@ -1159,6 +1446,7 @@ def run_jitrl_suite(
             for generation in generations
         ]
         baseline_index = _best_index(candidates)
+        memory_started = time.perf_counter()
         hits = loaded_memory.retrieve(
             example.prompt,
             task=task,
@@ -1174,6 +1462,8 @@ def run_jitrl_suite(
             min_support=min_support,
             min_return=min_return,
         )
+        memory_latency_ms = (time.perf_counter() - memory_started) * 1000.0
+        memory_latencies_ms.append(memory_latency_ms)
         baseline_generation = generations[baseline_index]
         rerank_generation = generations[result.index]
         memory_hits += int(bool(hits))
@@ -1231,6 +1521,7 @@ def run_jitrl_suite(
                 "rerank_correct": rerank_correct,
                 "memory_hits": len(hits),
                 "memory_entry_ids": [hit.entry.entry_id for hit in hits],
+                "memory_latency_ms": memory_latency_ms,
                 "reranked": bool(reranked),
                 "rerank_reason": result.reason,
                 "cloud_called_no_memory": cloud_used["no_memory"],
@@ -1282,11 +1573,19 @@ def run_jitrl_suite(
         ),
         "memory_hits": memory_hits,
         "reranked_cases": reranked_cases,
+        "memory_latency_ms_p50": _percentile(memory_latencies_ms, 0.50),
+        "memory_latency_ms_p95": _percentile(memory_latencies_ms, 0.95),
+        "memory_latency_ms_max": (
+            max(memory_latencies_ms) if memory_latencies_ms else None
+        ),
+        "memory_latency_ms_n": len(memory_latencies_ms),
     }
     notes = [
         "accuracy is structured-only (quality_verdict/process_calc); "
         "open-ended examples are ungradable.",
         "cloud_calls are null when no cloud client is supplied.",
+        "memory_latency_ms covers memory retrieve + rerank per example; "
+        "p95/max are reported (linear-interpolated percentile).",
         CLAIM_NOTE,
     ]
     if not outcomes["no_memory"]:
@@ -1297,7 +1596,7 @@ def run_jitrl_suite(
             "task, adapter_version and threshold against the memory file."
         )
     if not any(not row.get("error") for row in per_example):
-        return _data_missing(
+        return data_missing_report(
             "jitrl",
             "n-best backend produced no usable candidates for any example.",
             config=config,
@@ -1310,7 +1609,7 @@ def run_jitrl_suite(
         per_example=tuple(per_example),
         config=config,
         claims_gain=False,
-        evidence=_evidence_for(len(items)),
+        evidence=evidence_for("jitrl", len(items)),
         notes=tuple(notes),
     )
 
@@ -1318,6 +1617,74 @@ def run_jitrl_suite(
 # ---------------------------------------------------------------------------
 # Dispatch and unified report
 # ---------------------------------------------------------------------------
+
+
+def run_suite(
+    suite: str,
+    examples: Sequence[EvalExample],
+    *,
+    model: Any = None,
+    tokenizer: Any = None,
+    shadow_ckpt: str | None = None,
+    shadow_model_path: str | None = None,
+    adapter: str | None = None,
+    memory: ExperienceMemory | str | Path | None = None,
+    backend: Any = None,
+    cloud: Any = None,
+    options: Mapping[str, Any] | None = None,
+) -> SuiteReport:
+    """Run one suite through the shared dispatch point.
+
+    Suite defaults (:data:`SUITE_DEFAULTS`) are applied first, then the
+    ``options`` keys accepted by that suite (:data:`SUITE_OPTION_KEYS`).
+    Unknown or ``None`` keys are ignored so the CLI can pass one flat option
+    mapping to every suite. Missing model/tokenizer still yields a
+    ``data_missing`` report from the suite itself.
+    """
+
+    if suite not in SUITES:
+        raise ValueError(f"unknown suite: {suite!r}; expected {SUITES}")
+    merged = dict(SUITE_DEFAULTS.get(suite, {}))
+    merged.update(
+        {key: value for key, value in dict(options or {}).items() if value is not None}
+    )
+    kwargs = {
+        key: merged[key]
+        for key in SUITE_OPTION_KEYS[suite]
+        if key in merged and merged[key] is not None
+    }
+    if suite == "gkd":
+        return run_gkd_suite(
+            model,
+            tokenizer,
+            examples,
+            shadow_ckpt=shadow_ckpt,
+            **kwargs,
+        )
+    if suite == "s2t":
+        return run_s2t_suite(
+            model,
+            tokenizer,
+            examples,
+            shadow_ckpt=shadow_ckpt,
+            shadow_model_path=shadow_model_path,
+            **kwargs,
+        )
+    if suite == "restrain":
+        return run_restrain_suite(
+            model,
+            tokenizer,
+            examples,
+            adapter=adapter,
+            **kwargs,
+        )
+    return run_jitrl_suite(
+        examples,
+        memory=memory,
+        backend=backend,
+        cloud=cloud,
+        **kwargs,
+    )
 
 
 def run_suites(
@@ -1332,16 +1699,18 @@ def run_suites(
     memory: ExperienceMemory | str | Path | None = None,
     backend: Any = None,
     cloud: Any = None,
+    options: Mapping[str, Any] | None = None,
     gkd_options: Mapping[str, Any] | None = None,
     s2t_options: Mapping[str, Any] | None = None,
     restrain_options: Mapping[str, Any] | None = None,
     jitrl_options: Mapping[str, Any] | None = None,
 ) -> dict[str, SuiteReport]:
-    """Dispatch suites and preserve the canonical ``SUITES`` order.
+    """Dispatch suites through :func:`run_suite` in canonical ``SUITES`` order.
 
-    ``"all"`` expands to every suite. Missing model/tokenizer for the
-    model-backed suites becomes a ``data_missing`` report, so ``--suite all``
-    can still run the data-driven JitRL arm.
+    ``"all"`` expands to every suite. ``options`` is a flat mapping shared by
+    every suite; ``<suite>_options`` override it per suite. Missing
+    model/tokenizer for the model-backed suites becomes a ``data_missing``
+    report, so ``--suite all`` can still run the data-driven JitRL arm.
     """
 
     requested = [suites] if isinstance(suites, str) else list(suites)
@@ -1351,46 +1720,29 @@ def run_suites(
     if unknown:
         raise ValueError(f"unknown suite(s): {', '.join(unknown)}; expected {SUITES}")
     selected = [suite for suite in SUITES if suite in requested]
-    gkd_options = dict(gkd_options or {})
-    s2t_options = dict(s2t_options or {})
-    restrain_options = dict(restrain_options or {})
-    jitrl_options = dict(jitrl_options or {})
+    common = dict(options or {})
+    per_suite = {
+        "gkd": dict(gkd_options or {}),
+        "s2t": dict(s2t_options or {}),
+        "restrain": dict(restrain_options or {}),
+        "jitrl": dict(jitrl_options or {}),
+    }
 
     reports: dict[str, SuiteReport] = {}
     for suite in selected:
-        if suite == "gkd":
-            reports[suite] = run_gkd_suite(
-                model,
-                tokenizer,
-                examples,
-                shadow_ckpt=shadow_ckpt,
-                **gkd_options,
-            )
-        elif suite == "s2t":
-            reports[suite] = run_s2t_suite(
-                model,
-                tokenizer,
-                examples,
-                shadow_ckpt=shadow_ckpt,
-                shadow_model_path=shadow_model_path,
-                **s2t_options,
-            )
-        elif suite == "restrain":
-            reports[suite] = run_restrain_suite(
-                model,
-                tokenizer,
-                examples,
-                adapter=adapter,
-                **restrain_options,
-            )
-        else:
-            reports[suite] = run_jitrl_suite(
-                examples,
-                memory=memory,
-                backend=backend,
-                cloud=cloud,
-                **jitrl_options,
-            )
+        reports[suite] = run_suite(
+            suite,
+            examples,
+            model=model,
+            tokenizer=tokenizer,
+            shadow_ckpt=shadow_ckpt,
+            shadow_model_path=shadow_model_path,
+            adapter=adapter,
+            memory=memory,
+            backend=backend,
+            cloud=cloud,
+            options={**common, **per_suite[suite]},
+        )
     return reports
 
 
@@ -1450,6 +1802,12 @@ def build_report(
     notes = [
         "Small smoke samples are evidence_insufficient; they do not extrapolate "
         "to production gain.",
+        "Evidence bars (examples): "
+        + ", ".join(
+            f"{suite}>={minimum}"
+            for suite, minimum in EVIDENCE_MIN_EXAMPLES_BY_SUITE.items()
+        )
+        + ".",
         CLAIM_NOTE,
     ]
     for report in report_items:
@@ -1480,9 +1838,14 @@ _SUMMARY_FIELDS: tuple[str, ...] = (
     "evidence",
     "claims_gain",
     "n_examples",
+    "k",
     "joint_ppl",
     "shadow_ppl",
+    "ppl_tokens",
+    "ppl_windows",
     "task_accuracy",
+    "hit_at_k",
+    # Deprecated compatibility alias, populated only when k == 8.
     "hit_at_8",
     "agree_at_1",
     "accuracy",
@@ -1491,6 +1854,8 @@ _SUMMARY_FIELDS: tuple[str, ...] = (
     "no_memory_accuracy",
     "rerank_accuracy",
     "false_bias_rate",
+    "memory_latency_ms_p95",
+    "memory_latency_ms_max",
 )
 
 
@@ -1569,9 +1934,10 @@ def write_report(
 __all__ = [
     "CLAIM_NOTE",
     "DEFAULT_CI_BOOTSTRAP",
+    "DEFAULT_RESTRAIN_DATASET",
     "EVIDENCE_COLLECTED",
     "EVIDENCE_INSUFFICIENT",
-    "EVIDENCE_MIN_EXAMPLES",
+    "EVIDENCE_MIN_EXAMPLES_BY_SUITE",
     "EvalExample",
     "PER_EXAMPLE_FILENAME",
     "REPORT_FILENAME",
@@ -1579,16 +1945,23 @@ __all__ = [
     "STATUS_DATA_MISSING",
     "STATUS_OK",
     "SUITES",
+    "SUITE_DEFAULTS",
+    "SUITE_DEFAULT_DATASETS",
+    "SUITE_OPTION_KEYS",
     "SUMMARY_FILENAME",
     "SuiteReport",
     "build_report",
+    "data_missing_report",
     "dataset_fingerprint",
+    "evidence_for",
+    "evidence_min_examples",
     "load_gsm8k_examples",
     "load_jsonl_examples",
     "run_gkd_suite",
     "run_jitrl_suite",
     "run_restrain_suite",
     "run_s2t_suite",
+    "run_suite",
     "run_suites",
     "write_report",
 ]

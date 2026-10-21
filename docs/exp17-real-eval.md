@@ -4,6 +4,20 @@
 
 状态：**MVP harness + goooinext 冒烟已跑通（2026-10-22）**；#2–#5 的完整真实复评（3 seeds、≥200 held-out、≥100 hard-case、真实反馈日志）未启动。
 
+## 修复后的评测口径（2026-10-22 code review）
+
+| 项 | 口径 |
+|---|---|
+| evidence 阈值 | 按 suite 判定（`EVIDENCE_MIN_EXAMPLES_BY_SUITE`）：GKD/S2T/JitRL ≥ **200** 条，RESTRAIN ≥ **100** 条；低于阈值一律 `evidence_insufficient` |
+| S2T 指标名 | `hit_at_k` + `k` 字段；仅当 `k == 8` 额外输出 `hit_at_8`/`hit_at_8_ci` 作为**弃用兼容别名**。K≠8 时不再给出会被误读的 Hit@8 |
+| GKD token budget | `--token-budget N` 映射为 `ceil(N / seq_len)` 个 ppl 窗口，并与 `max_windows` 取更紧者；报告实际 `ppl_tokens`/`ppl_windows`。不传时维持“全部窗口”现状 |
+| S2T selector_gain | 已实现：`--selector <dir>` 通过 `shadow_lab.s2t_selector.load_selector` 加载 selector，用 `collect_selector_examples` 采集初始 shadow hidden，计算 `selector_gain = selector Agree@1 − shadow-greedy Agree@1`；不传 selector 时保持 `null`。selector 模式忽略 `--use-cache`（`collect_selector_examples` 每步重算 prefix），note 会写明 |
+| JitRL latency | 每个示例记录 `memory_latency_ms`（memory retrieve + rerank），summary/report 给出 `memory_latency_ms_p50/p95/max`；无 memory 时仍为 `data_missing`，延迟字段为 `null` |
+| RESTRAIN 判分 | 每条 rollout 只调用一次 `grade_structured`，同一份 outcomes 同时供 per-example 与 accuracy/consistency 聚合；口径不变 |
+| 统一入口 | CLI 与 `run_suites` 共用 `shadow_lab.real_eval.run_suite` 与 `data_missing_report`；新增 suite 只需改 `real_eval`（`SUITES`/默认值/选项键/数据集映射/一个分支），CLI 不再维护第二套分派 |
+
+本轮冒烟是修复前跑出的历史产物，表中 Hit@8 等价于 `hit_at_k`（k=8）；新的 `ppl_tokens/ppl_windows`、latency 与 selector 字段需要重跑才会出现在产物里。
+
 ## 实验设置
 
 | 项 | 值 |
@@ -30,7 +44,7 @@ PYTHONPATH=/home/goooice/p4647-run/src \
   --limit 8 --smoke --device cuda --dtype bfloat16 \
   --out /home/goooice/p4647-run/exp17-gkd-smoke
 
-# S2T
+# S2T（--selector 可选；指向 exp11 保存的 selector 目录才会计算 selector_gain）
 PYTHONPATH=/home/goooice/p4647-run/src \
   /home/goooice/Code/shadow-peft/.venv/bin/python \
   /home/goooice/p4647-run/scripts/exp17_real_eval.py \
@@ -60,36 +74,49 @@ PYTHONPATH=/home/goooice/p4647-run/src \
   --out /home/goooice/p4647-run/exp17-jitrl-smoke
 ```
 
+新参数（需重跑才会出现在产物中）：
+
+```bash
+# GKD：最多评 8192 个 ppl target token（seq_len=2048 时即 4 个窗口）
+... --suite gkd ... --token-budget 8192
+
+# S2T：加载 exp11 selector，报告 selector_gain
+... --suite s2t ... --selector runs/exp11/s2t-selector
+```
+
 ## 结果
 
 | suite | 数据/规模 | 关键指标 | 状态 |
 |---|---|---|---|
 | GKD | GSM8K test 8 条，1077 ppl token | joint ppl **5.567** [4.573, 7.145]；shadow ppl **167,148** [144,310, 206,846]；task accuracy **0/8** | `ok`，evidence insufficient |
-| S2T | 4 prompts，64 token，K=8 | Hit@8 **0.922** [0.844, 0.969]；Agree@1 **0.500** [0.359, 0.610]；`selector_gain=null` | `ok`，evidence insufficient |
+| S2T | 4 prompts，64 token，K=8 | Hit@k（k=8，`hit_at_8` 别名）**0.922** [0.844, 0.969]；Agree@1 **0.500** [0.359, 0.610]；`selector_gain=null`（未传 `--selector`） | `ok`，evidence insufficient |
 | RESTRAIN | exp12 held-out 8 条，16 rollouts | accuracy **0.0**；low consistency **1.0**；mean consistency 0.277；skip rate **0.875**；top1 share 0.667 | `ok`，evidence insufficient |
-| JitRL | 无数据/记忆/后端 | — | `data_missing` |
+| JitRL | 无数据/记忆/后端 | —（`memory_latency_ms_p50/p95/max` 均为 null） | `data_missing` |
 
-所有报告：`claims_gain=false`、`evidence=insufficient`。S2T 的 `go_no_go=go` 是 S2T 自身的局部诊断（Hit@8 阈值），不代表本轮 64 token 冒烟有统计意义。
+所有报告：`claims_gain=false`、`evidence=insufficient`。S2T 的 `go_no_go=go` 是 S2T 自身的局部诊断（Hit@8 阈值），不代表本轮 64 token 冒烟有统计意义；在 summary 里该数值以 `hit_at_k`（k=8）呈现。
 
 ## 解释与后续
 
 1. **Harness 可用**：四个 suite 的统一入口、数据指纹、per-example、summary/report 都能跑；缺数据时不会伪造结果。
 2. **2-step/exp10 adapter 不是结论**：GKD 的 shadow ppl 167k、RESTRAIN 的 accuracy 0/low consistency 1.0，与 exp10 smoke/exp14 Stage 0 的 shadow-only 失败一致；S2T 的 0.922/0.5 只是 64 token 的局部诊断，不能外推。
-3. **完整复评需要**：GKD 固定 token 预算 + 3 seeds；S2T ≥200 条 held-out + 64-hidden selector 重训；RESTRAIN ≥100 条结构化 hard-case；JitRL 真实反馈日志/记忆/n-best 后端。总计约 2–4 个 GB10 天 + 人工抽检，需要单独预算/审批。
-4. **下一步**：优先用 #46 的 shadow-only SFT 恢复管线训练一个可用的 shadow，再跑 GKD/S2T 的真实复评；否则真实复评只会重复确认 shadow-only 不可用。
+3. **完整复评需要（仍未做）**：GKD 固定 token 预算（`--token-budget`）+ **3 seeds**；S2T ≥200 条 held-out + 64-hidden selector 重训（可用 `--selector` 直接复用已有 head）；RESTRAIN ≥100 条结构化 hard-case；JitRL 真实反馈日志/记忆/n-best 后端，并记录 memory latency。总计约 2–4 个 GB10 天 + 人工抽检，需要单独预算/审批。
+4. **仍未做 baseline vs treatment campaign**：本轮只有一个模型/路径，`claims_gain=false`；3 seeds、对照臂与显著性检验都没有跑，不能据此声称 #2–#5 的真实收益或失败。
+5. **下一步**：优先用 #46 的 shadow-only SFT 恢复管线训练一个可用的 shadow，再跑 GKD/S2T 的真实复评；否则真实复评只会重复确认 shadow-only 不可用。
 
 ## 已知限制
 
 - 样本极小（8/4/8）、生成预算 16 token，所有置信区间都很宽；不能做显著性结论。
 - GKD/RESTRAIN 使用 2-step/exp12 adapter，不是完整训练模型；adapter 选择会影响结果。
 - GKD 只用数值容差评最终答案，不校验推理过程；分数/小数可能误判。
-- JitRL 的 cloud 升级是简化阈值，不是完整生产 Router；本轮没有真实记忆/后端，直接 `data_missing`。
+- `--token-budget` 只限制 ppl target token，不限制生成 token；实际窗口数受语料长度影响，报告会给出真实 `ppl_tokens/ppl_windows`。
+- S2T selector_gain 只在显式传 `--selector` 时计算；selector 模式走 `collect_selector_examples`，忽略 `--use-cache`，且 metrics 基于初始 shadow hidden（不是注入部署路径）。
+- JitRL 的 cloud 升级是简化阈值，不是完整生产 Router；本轮没有真实记忆/后端，直接 `data_missing`，latency 字段为 null。
 - `claims_gain=false` 是设计使然：MVP harness 没有 baseline-vs-treatment 对照臂。
-- 没有跑完整 2–4 天 campaign，因此不能声称 #2–#5 的真实收益或失败。
+- 没有跑完整 2–4 天 campaign（3 seeds/baseline），因此不能声称 #2–#5 的真实收益或失败。
 
 ## 产物
 
 - 模块：`src/shadow_lab/real_eval.py`
 - 脚本：`scripts/exp17_real_eval.py`
-- 测试：`tests/lab/test_real_eval.py`（23 个）
+- 测试：`tests/lab/test_real_eval.py`（28 个）
 - 冒烟产物：`runs-local/exp17/{gkd,restrain,s2t,jitrl}/`（`report.json`、`summary.csv`、`per_example.jsonl`）

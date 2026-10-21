@@ -28,7 +28,9 @@ import pytest
 import torch
 
 from shadow_lab.real_eval import (
+    EVIDENCE_COLLECTED,
     EVIDENCE_INSUFFICIENT,
+    EVIDENCE_MIN_EXAMPLES_BY_SUITE,
     PER_EXAMPLE_FILENAME,
     REPORT_FILENAME,
     SCHEMA_VERSION,
@@ -36,12 +38,15 @@ from shadow_lab.real_eval import (
     SUMMARY_FILENAME,
     EvalExample,
     build_report,
+    evidence_for,
+    evidence_min_examples,
     load_gsm8k_examples,
     load_jsonl_examples,
     run_gkd_suite,
     run_jitrl_suite,
     run_restrain_suite,
     run_s2t_suite,
+    run_suite,
     run_suites,
     write_report,
 )
@@ -305,6 +310,35 @@ def test_run_suites_rejects_unknown_suite() -> None:
         run_suites(["nope"], examples=[_example()])
 
 
+def test_evidence_bars_are_per_suite() -> None:
+    assert set(EVIDENCE_MIN_EXAMPLES_BY_SUITE) == set(SUITES)
+    assert evidence_min_examples("gkd") == 200
+    assert evidence_min_examples("s2t") == 200
+    assert evidence_min_examples("jitrl") == 200
+    assert evidence_min_examples("restrain") == 100
+    assert evidence_for("gkd", 199) == EVIDENCE_INSUFFICIENT
+    assert evidence_for("gkd", 200) == EVIDENCE_COLLECTED
+    assert evidence_for("restrain", 99) == EVIDENCE_INSUFFICIENT
+    assert evidence_for("restrain", 100) == EVIDENCE_COLLECTED
+    with pytest.raises(ValueError, match="unknown suite"):
+        evidence_min_examples("nope")
+
+
+def test_run_suite_shares_options_and_defaults_with_run_suites() -> None:
+    reports = run_suite(
+        "gkd",
+        [_example(task="process_calc", expected="4", prompt="2+2=?")],
+        model=FakeShadowModel(),
+        tokenizer=FixedAnswerTokenizer("4"),
+        options={"max_new_tokens": 2, "seq_len": 8, "max_windows": 1},
+    )
+
+    assert reports.status == "ok"
+    assert reports.metrics["task_accuracy"] == 1.0
+    with pytest.raises(ValueError, match="unknown suite"):
+        run_suite("nope", [_example()])
+
+
 # ---------------------------------------------------------------------------
 # Suite metric aggregation
 # ---------------------------------------------------------------------------
@@ -344,7 +378,42 @@ def test_run_gkd_suite_reports_ppl_and_task_accuracy() -> None:
     assert report.evidence == EVIDENCE_INSUFFICIENT
 
 
-def test_run_s2t_suite_reports_hit_and_agree_fractions() -> None:
+def test_run_gkd_suite_token_budget_caps_ppl_windows() -> None:
+    examples = [
+        _example(
+            example_id=f"e{index}",
+            task="process_calc",
+            expected="4",
+            prompt="x" * 40,
+        )
+        for index in range(3)
+    ]
+
+    report = run_gkd_suite(
+        FakeShadowModel(),
+        FixedAnswerTokenizer("4"),
+        examples,
+        max_new_tokens=2,
+        seq_len=8,
+        token_budget=16,
+        n_boot=10,
+    )
+
+    assert report.metrics["ppl_windows"] == 2
+    assert report.metrics["ppl_tokens"] == 16
+    assert report.config["token_budget"] == 16
+    with pytest.raises(ValueError, match="token_budget"):
+        run_gkd_suite(
+            FakeShadowModel(),
+            FixedAnswerTokenizer("4"),
+            examples,
+            max_new_tokens=2,
+            seq_len=8,
+            token_budget=0,
+        )
+
+
+def test_run_s2t_suite_reports_hit_at_k_and_agree_fractions() -> None:
     examples = [_example(prompt="a", task="quality_verdict")]
     agreeing = run_s2t_suite(
         FakeShadowModel(shadow_agrees=True),
@@ -363,12 +432,29 @@ def test_run_s2t_suite_reports_hit_and_agree_fractions() -> None:
         n_boot=10,
     )
 
-    assert agreeing.metrics["hit_at_8"] == 1.0
+    assert agreeing.metrics["k"] == 8
+    assert agreeing.metrics["hit_at_k"] == 1.0
+    assert agreeing.metrics["hit_at_8"] == agreeing.metrics["hit_at_k"]
     assert agreeing.metrics["agree_at_1"] == 1.0
-    assert disagreeing.metrics["hit_at_8"] == 1.0
+    assert disagreeing.metrics["hit_at_k"] == 1.0
     assert disagreeing.metrics["agree_at_1"] == 0.0
     assert agreeing.metrics["selector_gain"] is None
     assert agreeing.per_example[0]["hit_at_k"] == 1.0
+
+
+def test_run_s2t_suite_k_below_8_has_no_hit_at_8_alias() -> None:
+    report = run_s2t_suite(
+        FakeShadowModel(),
+        CharTokenizer(),
+        [_example(prompt="a")],
+        max_new_tokens=2,
+        k=4,
+        n_boot=10,
+    )
+
+    assert report.metrics["k"] == 4
+    assert report.metrics["hit_at_k"] == 1.0
+    assert "hit_at_8" not in report.metrics
 
 
 def test_run_restrain_suite_aggregates_consistency_and_accuracy() -> None:
@@ -465,6 +551,14 @@ def test_run_jitrl_suite_reranks_with_memory_and_counts_false_bias() -> None:
     assert report.metrics["false_bias_rate"] is None
     assert report.metrics["memory_hits"] == 1
     assert report.metrics["reranked_cases"] == 1
+    assert report.metrics["memory_latency_ms_n"] == 1
+    assert report.metrics["memory_latency_ms_p95"] is not None
+    assert (
+        report.metrics["memory_latency_ms_max"]
+        >= report.metrics["memory_latency_ms_p95"]
+        >= 0.0
+    )
+    assert report.per_example[0]["memory_latency_ms"] >= 0.0
     assert report.metrics["cloud_calls_no_memory"] is None
     assert report.per_example[0]["reranked"] is True
 
@@ -534,6 +628,8 @@ def test_run_jitrl_suite_data_missing_for_missing_memory_file(tmp_path: Path) ->
 
     assert report.status == "data_missing"
     assert "memory" in report.notes[0].lower()
+    assert report.metrics["memory_latency_ms_p95"] is None
+    assert report.metrics["memory_latency_ms_max"] is None
 
 
 def test_run_jitrl_suite_data_missing_without_nbest_backend() -> None:
@@ -580,9 +676,12 @@ def test_build_report_and_write_report_schema(tmp_path: Path) -> None:
 
     on_disk = json.loads(Path(paths["report"]).read_text(encoding="utf-8"))
     assert on_disk["schema_version"] == SCHEMA_VERSION
+    assert any("Evidence bars" in note for note in on_disk["notes"])
     csv_text = Path(paths["summary"]).read_text(encoding="utf-8")
     header = csv_text.splitlines()[0].split(",")
     assert header[:4] == ["suite", "status", "evidence", "claims_gain"]
+    for field in ("k", "hit_at_k", "ppl_tokens", "ppl_windows", "memory_latency_ms_p95"):
+        assert field in header
     example_rows = [
         json.loads(line)
         for line in Path(paths["per_example"]).read_text(encoding="utf-8").splitlines()
@@ -641,6 +740,10 @@ def test_cli_parser_accepts_issue_scope_flags() -> None:
             "--out",
             "o",
             "--smoke",
+            "--token-budget",
+            "4096",
+            "--selector",
+            "selector-dir",
         ]
     )
     cli._resolve_smoke(args)
@@ -649,6 +752,8 @@ def test_cli_parser_accepts_issue_scope_flags() -> None:
     assert args.limit == 5
     assert args.max_new_tokens == 16
     assert args.n == 2
+    assert args.token_budget == 4096
+    assert args.selector == "selector-dir"
 
 
 def test_cli_without_model_writes_data_missing_report(
@@ -698,8 +803,8 @@ def test_cli_all_without_model_never_loads_gsm8k(
     )
 
 
-def test_tiny_shadow_model_runs_real_wrapper_paths() -> None:
-    """Exercise evaluate_ppl/generate/diagnose on a random tiny ShadowPEFT model."""
+def _tiny_shadow_model() -> Any:
+    """Random tiny ShadowPEFT model that exercises the real wrapper paths."""
 
     from transformers import LlamaConfig, LlamaForCausalLM
 
@@ -717,7 +822,7 @@ def test_tiny_shadow_model_runs_real_wrapper_paths() -> None:
             max_position_embeddings=128,
         )
     )
-    model = ShadowForCausalLM(
+    return ShadowForCausalLM(
         get_shadow_model(
             base,
             ShadowConfig(
@@ -730,6 +835,12 @@ def test_tiny_shadow_model_runs_real_wrapper_paths() -> None:
         ),
         inference_mode="base_shadow",
     ).eval()
+
+
+def test_tiny_shadow_model_runs_real_wrapper_paths() -> None:
+    """Exercise evaluate_ppl/generate/diagnose on a random tiny ShadowPEFT model."""
+
+    model = _tiny_shadow_model()
     tokenizer = FixedAnswerTokenizer("4")
     examples = [
         _example(example_id="m1", task="process_calc", expected="4", prompt="2+2?"),
@@ -752,5 +863,45 @@ def test_tiny_shadow_model_runs_real_wrapper_paths() -> None:
     assert gkd.metrics["shadow_ppl"] > 0
     assert gkd.metrics["task_accuracy"] == 0.5
     assert s2t.status == "ok"
-    assert 0.0 <= s2t.metrics["hit_at_8"] <= 1.0
+    assert 0.0 <= s2t.metrics["hit_at_k"] <= 1.0
+    assert s2t.metrics["hit_at_8"] == s2t.metrics["hit_at_k"]
     assert 0.0 <= s2t.metrics["agree_at_1"] <= 1.0
+
+
+def test_run_s2t_suite_selector_gain_from_saved_selector(tmp_path: Path) -> None:
+    from shadow_lab.s2t_selector import SelectorHead, save_selector
+
+    model = _tiny_shadow_model()
+    torch.manual_seed(0)
+    head = SelectorHead(hidden_size=32, mlp_hidden=8)
+    save_selector(head, tmp_path / "selector", k=8)
+    examples = [
+        _example(example_id="m1", task="process_calc", expected="4", prompt="2+2?"),
+        _example(example_id="m2", task="process_calc", expected="6", prompt="3+3?"),
+    ]
+
+    report = run_s2t_suite(
+        model,
+        FixedAnswerTokenizer("4"),
+        examples,
+        max_new_tokens=2,
+        k=8,
+        selector=str(tmp_path / "selector"),
+        n_boot=10,
+    )
+
+    assert report.status == "ok"
+    assert report.config["selector"].endswith("selector")
+    assert report.metrics["n_selector_tokens"] > 0
+    assert report.metrics["selector_gain"] == pytest.approx(
+        report.metrics["selector_agree_at_1"] - report.metrics["greedy_agree_at_1"]
+    )
+    with pytest.raises(FileNotFoundError, match="selector"):
+        run_s2t_suite(
+            model,
+            FixedAnswerTokenizer("4"),
+            examples,
+            max_new_tokens=2,
+            k=8,
+            selector=str(tmp_path / "missing"),
+        )
