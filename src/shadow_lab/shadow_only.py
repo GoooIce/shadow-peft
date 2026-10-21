@@ -28,6 +28,8 @@ from typing import Any
 IGNORE_INDEX = -100
 TRAIN_SCOPES = ("backbone", "head", "all", "none")
 PROMPT_MASK = IGNORE_INDEX
+QA_KEYWORD_PASS_COVERAGE = 0.5
+_QA_STRUCTURED_TASKS = ("quality_verdict", "process_calc")
 
 _DTYPE_NAMES = {
     "bfloat16": "bfloat16",
@@ -66,14 +68,16 @@ class ShadowOnlyTrainConfig:
     - ``head``: train projection + LM head only.
     - ``all``: train every exported parameter.
     - ``none``: freeze everything (diagnose / dry-run).
+
+    ``epochs`` and ``steps`` are alternative ways to size the loop: when
+    ``epochs`` is set, the loop runs ``ceil(rows / batch_size) * epochs`` steps
+    and ``steps`` is ignored; otherwise it runs exactly ``steps`` steps.
     """
 
-    base_model_path: str = ""
-    shadow_model_path: str = ""
-    shadow_ckpt: str = ""
     train_scope: str = "backbone"
     lr: float = 1e-5
     steps: int = 100
+    epochs: int | None = None
     batch_size: int = 1
     max_seq_len: int = 1024
     seed: int = 0
@@ -89,7 +93,10 @@ class ShadowOnlyTrainConfig:
             raise ValueError(
                 f"train_scope 必须是 {TRAIN_SCOPES} 之一，收到 {self.train_scope!r}"
             )
-        if self.steps < 1:
+        if self.epochs is not None:
+            if self.epochs < 1:
+                raise ValueError(f"epochs 必须 >= 1 或为 None，收到 {self.epochs}")
+        elif self.steps < 1:
             raise ValueError(f"steps 必须 >= 1，收到 {self.steps}")
         if self.batch_size < 1:
             raise ValueError(f"batch_size 必须 >= 1，收到 {self.batch_size}")
@@ -101,10 +108,14 @@ class ShadowOnlyTrainConfig:
             raise ValueError(f"grad_clip 必须 >= 0，收到 {self.grad_clip}")
         if self.weight_decay < 0:
             raise ValueError(f"weight_decay 必须 >= 0，收到 {self.weight_decay}")
-        if not 0 <= self.warmup_steps <= self.steps:
+        if self.warmup_steps < 0:
+            raise ValueError(f"warmup_steps 必须 >= 0，收到 {self.warmup_steps}")
+        if self.epochs is None and self.warmup_steps > self.steps:
             raise ValueError(
                 f"warmup_steps 必须在 [0, steps={self.steps}] 内，收到 {self.warmup_steps}"
             )
+        if self.log_every < 1:
+            raise ValueError(f"log_every 必须 >= 1，收到 {self.log_every}")
         if self.seed < 0:
             raise ValueError(f"seed 必须 >= 0，收到 {self.seed}")
         if self.dtype not in _DTYPE_NAMES:
@@ -238,8 +249,7 @@ def set_trainable_scope(model: Any, scope: str) -> TrainableScopeReport:
         for name, module in heads:
             enable(name, module)
 
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total = sum(p.numel() for p in model.parameters())
+    trainable, total = count_parameters(model)
     if scope != "none" and trainable == 0:
         raise ValueError(
             f"scope={scope!r} 没有启用任何参数；检查模型结构或改用 scope='all'"
@@ -995,11 +1005,202 @@ def evaluate_shadow_only(
     }
 
 
+# ---------------------------------------------------------------------------
+# Production QA grading (pure, RESTRAIN-aware)
+# ---------------------------------------------------------------------------
+
+
+def keyword_coverage(text: str | None, keywords: Sequence[str]) -> float:
+    """Fraction of expected keywords present in ``text`` (case-insensitive)."""
+    if not keywords:
+        return 0.0
+    lowered = ("" if text is None else str(text)).lower()
+    hits = sum(1 for keyword in keywords if str(keyword).lower() in lowered)
+    return hits / len(keywords)
+
+
+def _calc_answers_match(
+    predicted: str | tuple[float, str] | None,
+    gold: str | tuple[float, str] | None,
+) -> bool:
+    """Compare two ``extract_answer(..., "process_calc")`` results."""
+    if not isinstance(predicted, tuple) or not isinstance(gold, tuple):
+        return False
+    predicted_value, predicted_unit = predicted
+    gold_value, gold_unit = gold
+    if gold_unit and predicted_unit != gold_unit:
+        return False
+    return math.isclose(predicted_value, gold_value, rel_tol=1e-6, abs_tol=1e-9)
+
+
+def grade_qa_output(
+    row: Mapping[str, Any], output: str | None
+) -> dict[str, Any]:
+    """Grade one production-QA generation against its fixture row.
+
+    ``quality_verdict`` / ``process_calc`` rows are graded through
+    :func:`shadow_lab.restrain.extract_answer`; any other task is graded by
+    keyword coverage and passes at ``QA_KEYWORD_PASS_COVERAGE`` (0.5), matching
+    the exp14 Stage 0 fixture convention.  ``format_valid`` means the output
+    was parseable by its task's extractor (or non-empty for keyword rows).
+    """
+    task = str(row.get("task") or "")
+    expected = row.get("expected")
+    keywords = [str(keyword) for keyword in (row.get("expected_keywords") or ())]
+    text = "" if output is None else str(output)
+    coverage: float | None = None
+
+    if task in _QA_STRUCTURED_TASKS and expected is not None:
+        from shadow_lab.restrain import extract_answer
+
+        predicted = extract_answer(text, task)
+        gold = extract_answer(str(expected), task)
+        if task == "quality_verdict":
+            correct = predicted is not None and predicted == gold
+        else:
+            correct = _calc_answers_match(predicted, gold)
+        format_valid = predicted is not None
+    elif keywords:
+        coverage = keyword_coverage(text, keywords)
+        correct = bool(text.strip()) and coverage >= QA_KEYWORD_PASS_COVERAGE
+        format_valid = bool(text.strip())
+    else:
+        correct = False
+        format_valid = bool(text.strip())
+
+    return {
+        "task": task,
+        "correct": bool(correct),
+        "format_valid": bool(format_valid),
+        "keyword_coverage": coverage,
+        "empty": not text.strip(),
+    }
+
+
+def summarize_qa(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Aggregate graded production-QA records into one diagnostic summary.
+
+    ``keyword_coverage`` / ``keyword_full_rate`` cover only rows that carry
+    ``expected_keywords`` and are ``None`` when the fixture has none.
+    """
+    total = len(records)
+    if total == 0:
+        return {
+            "n": 0,
+            "accuracy": 0.0,
+            "format_rate": 0.0,
+            "keyword_coverage": None,
+            "keyword_full_rate": None,
+            "n_keyword_rows": 0,
+            "by_task": {},
+        }
+
+    correct = sum(1 for record in records if record.get("correct"))
+    formatted = sum(1 for record in records if record.get("format_valid"))
+    coverages = [
+        float(record["keyword_coverage"])
+        for record in records
+        if record.get("keyword_coverage") is not None
+    ]
+
+    by_task: dict[str, dict[str, Any]] = {}
+    for record in records:
+        task = str(record.get("task") or "")
+        bucket = by_task.setdefault(task, {"n": 0, "correct": 0, "formatted": 0})
+        bucket["n"] += 1
+        bucket["correct"] += int(bool(record.get("correct")))
+        bucket["formatted"] += int(bool(record.get("format_valid")))
+    for bucket in by_task.values():
+        bucket["accuracy"] = bucket["correct"] / bucket["n"]
+        bucket["format_rate"] = bucket["formatted"] / bucket["n"]
+
+    return {
+        "n": total,
+        "accuracy": correct / total,
+        "format_rate": formatted / total,
+        "keyword_coverage": (
+            sum(coverages) / len(coverages) if coverages else None
+        ),
+        "keyword_full_rate": (
+            sum(1 for value in coverages if value >= 1.0) / len(coverages)
+            if coverages
+            else None
+        ),
+        "n_keyword_rows": len(coverages),
+        "by_task": by_task,
+    }
+
+
+def evaluate_qa_only(
+    model: Any,
+    tokenizer: Any,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    max_new_tokens: int = 256,
+    batch_size: int = 4,
+    device: str = "cpu",
+    generate_fn: Callable[..., list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Generate and grade the production-QA fixture with the shadow.
+
+    This is a diagnostic, not a recovery gate input.  ``generate_fn`` is the
+    decoding seam (defaults to :func:`generate_shadow_only`).
+    """
+    materialized = list(rows)
+    if not materialized:
+        return {"summary": summarize_qa([]), "generations": []}
+
+    prompts: list[str] = []
+    for index, row in enumerate(materialized):
+        if not isinstance(row, Mapping) or "prompt" not in row:
+            raise ValueError(f"QA row {index} 需要 prompt 字段")
+        prompts.append(
+            format_chat_prompt(
+                tokenizer, [{"role": "user", "content": str(row["prompt"])}]
+            )
+        )
+
+    generator = generate_fn or generate_shadow_only
+    generated = generator(
+        model,
+        tokenizer,
+        prompts,
+        max_new_tokens=max_new_tokens,
+        batch_size=batch_size,
+        device=device,
+    )
+    if len(generated) != len(materialized):
+        raise ValueError(
+            f"QA 生成条数不匹配：{len(generated)} 条输出对 {len(materialized)} 条 prompt"
+        )
+
+    records: list[dict[str, Any]] = []
+    for index, (row, output) in enumerate(
+        zip(materialized, generated, strict=True)
+    ):
+        text = str(output.get("text") or "")
+        record = grade_qa_output(row, text)
+        record.update(
+            {
+                "index": index,
+                "id": str(row.get("id") or f"qa-{index}"),
+                "prompt": str(row.get("prompt") or ""),
+                "output": text,
+                "truncated": bool(output.get("truncated", False)),
+                "n_new_tokens": int(output.get("n_new_tokens") or 0),
+                "error": output.get("error"),
+            }
+        )
+        records.append(record)
+    return {"summary": summarize_qa(records), "generations": records}
+
+
 @dataclass
 class ShadowOnlyTrainStats:
     """Outcome of a shadow-only SFT run."""
 
     steps: int
+    epochs: int | None
     rows: int
     tokens: int
     loss_mean: float
@@ -1057,6 +1258,13 @@ def _forward_loss(outputs: Any) -> Any:
     return loss
 
 
+def _resolved_steps(row_count: int, config: ShadowOnlyTrainConfig) -> int:
+    """Steps for the SFT loop: ``epochs`` wins, otherwise ``config.steps``."""
+    if config.epochs is None:
+        return config.steps
+    return math.ceil(row_count / config.batch_size) * config.epochs
+
+
 def train_shadow_only_sft(
     model: Any,
     tokenizer: Any,
@@ -1086,6 +1294,11 @@ def train_shadow_only_sft(
         )
 
     dataset = build_sft_rows(materialized, tokenizer, config.max_seq_len)
+    steps = _resolved_steps(len(dataset), config)
+    if config.warmup_steps > steps:
+        raise ValueError(
+            f"warmup_steps={config.warmup_steps} 超过实际训练步数 {steps}"
+        )
     parameters = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
         parameters, lr=config.lr, weight_decay=config.weight_decay
@@ -1116,7 +1329,7 @@ def train_shadow_only_sft(
     losses: list[float] = []
     tokens = 0
     started = time.perf_counter()
-    for _ in range(config.steps):
+    for step_index in range(steps):
         batch_rows = []
         while len(batch_rows) < config.batch_size:
             if cursor >= len(order):
@@ -1143,13 +1356,25 @@ def train_shadow_only_sft(
         if scheduler is not None:
             scheduler.step()
 
-        losses.append(float(loss.detach().cpu()))
+        loss_value = float(loss.detach().cpu())
+        losses.append(loss_value)
         tokens += int((batch["labels"] != IGNORE_INDEX).sum().item())
+        step_number = step_index + 1
+        if (
+            step_number == 1
+            or step_number % config.log_every == 0
+            or step_number == steps
+        ):
+            print(
+                f"[shadow-only] step {step_number}/{steps} loss={loss_value:.4f}",
+                flush=True,
+            )
 
     seconds = time.perf_counter() - started
     model.eval()
     return ShadowOnlyTrainStats(
-        steps=config.steps,
+        steps=steps,
+        epochs=config.epochs,
         rows=len(dataset),
         tokens=tokens,
         loss_mean=sum(losses) / len(losses),
@@ -1171,6 +1396,7 @@ def train_shadow_only_sft(
 
 __all__ = [
     "IGNORE_INDEX",
+    "QA_KEYWORD_PASS_COVERAGE",
     "TRAIN_SCOPES",
     "ShadowOnlyTrainConfig",
     "ShadowOnlyTrainStats",
@@ -1178,11 +1404,14 @@ __all__ = [
     "build_sft_rows",
     "count_parameters",
     "distinct_n",
+    "evaluate_qa_only",
     "evaluate_shadow_only",
     "export_roundtrip_check",
     "format_chat_prompt",
     "format_is_valid",
     "generate_shadow_only",
+    "grade_qa_output",
+    "keyword_coverage",
     "load_exported_shadow",
     "load_shadow_tokenizer",
     "normalize_token_ids",
@@ -1192,5 +1421,6 @@ __all__ = [
     "resolve_dtype",
     "set_trainable_scope",
     "summarize_generations",
+    "summarize_qa",
     "train_shadow_only_sft",
 ]
