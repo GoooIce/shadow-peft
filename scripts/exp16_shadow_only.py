@@ -224,7 +224,9 @@ def load_saved(model_dir: str | Path, *, device: str, dtype: str) -> tuple[Any, 
         model = AutoModelForCausalLM.from_pretrained(
             str(model_dir), torch_dtype=torch_dtype
         )
-    model.eval().to(device)
+    # Cast non-persistent buffers too; from_pretrained loads parameters in
+    # torch_dtype but leaves rotary inv_freq in fp32.
+    model.eval().to(device=device, dtype=torch_dtype)
     tokenizer = load_shadow_tokenizer(model_dir)
     return model, tokenizer
 

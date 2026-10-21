@@ -364,7 +364,12 @@ def export_roundtrip_check(
         reloaded = loader(directory, dtype=torch_dtype)
         if hasattr(reloaded, "eval"):
             reloaded.eval()
-        reloaded.to(device)
+        # ``from_pretrained(dtype=...)`` loads parameters in the requested
+        # dtype, but non-persistent buffers (e.g. Qwen3's rotary inv_freq) are
+        # re-initialized in fp32 during module construction.  Cast them back so
+        # a bf16 export is compared against a bf16 reload, not bf16 weights with
+        # fp32 RoPE tables.
+        reloaded.to(device=device, dtype=torch_dtype)
 
         encoded = tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
         token_ids = normalize_token_ids(encoded)

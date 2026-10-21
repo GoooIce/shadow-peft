@@ -493,6 +493,34 @@ def _roundtrip_loader(bump: float):
     return load
 
 
+class FakeBufferModel(FakeRoundtripModel):
+    """Fake model with a non-persistent-style floating buffer."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("rotary", torch.ones(2, dtype=torch.float32))
+
+
+def test_export_roundtrip_check_casts_non_persistent_buffers(tmp_path):
+    loaded = FakeBufferModel()
+
+    def loader(path, dtype=None):
+        del path, dtype
+        return loaded
+
+    report = export_roundtrip_check(
+        FakeBufferModel(),
+        StubTokenizer(),
+        prompt="hello",
+        save_dir=tmp_path / "buffers",
+        dtype="bfloat16",
+        model_loader=loader,
+    )
+
+    assert report["passed"] is True
+    assert loaded.rotary.dtype == torch.bfloat16
+
+
 def test_export_roundtrip_check_reports_schema_and_passes(tmp_path):
     model = FakeRoundtripModel()
     save_dir = tmp_path / "roundtrip"
