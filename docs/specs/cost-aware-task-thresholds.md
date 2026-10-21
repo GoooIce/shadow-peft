@@ -51,7 +51,7 @@ Source: https://github.com/GoooIce/shadow-peft/issues/48
 - 新字段只服务 legacy/fallback 整段升级；probe 的 `handoff_threshold_by_task` 保持原语义，不合并、不重命名。
 - 校验：必须是对象；key 转字符串；value 必须在 [0,1]，非法值抛 `ValueError`；空对象等价于不配置。
 - `EdgeConfig` 的序列化/反序列化 round-trip 必须保留该字段。
-- Router trace 记录本次实际使用的阈值和 task，例如 `触发升级：low_confidence（task=process_calc 阈值 0.35）`。
+- Router trace 记录本次实际使用的阈值和 task，例如 `触发升级：low_confidence（task=process_calc 阈值 0.35）`；per-task 映射为空时保留旧 trace 格式，以保持逐位兼容。
 
 ### 2. Replay 样本 schema
 
@@ -67,7 +67,7 @@ Source: https://github.com/GoooIce/shadow-peft/issues/48
 - `split: "train" | "val"` — 显式切分；拟合器不自行切分。
 - 可选 `sample_id: str`、`edge_latency_ms: float`、`escalated_latency_ms: float`，只用于报告/P95。
 
-成本由 `CostModel` 计算，不引入新的价格字段；真实 replay 的 token 数必须记录来源。没有 `cloud_correct` 的样本不能进入训练（只能进入“证据不足”报告）。
+成本由 `CostModel` 计算，不引入新的价格字段；真实 replay 的 token 数必须记录来源。缺少 `cloud_correct` 的 replay 文件直接拒绝（数据不完整）；“证据不足”由样本量/切分门禁表达。
 
 ### 3. 纯成本策略拟合器
 
@@ -82,7 +82,7 @@ Source: https://github.com/GoooIce/shadow-peft/issues/48
 - 目标函数：对每个候选阈值，`chosen_correct = edge_correct if score >= threshold else cloud_correct`，`chosen_cost = edge_cost if score >= threshold else escalated_cost`；`cost_norm = mean(chosen_cost) / mean(cloud_only_cost)`；`objective = accuracy − cost_weight * cost_norm`。
 - `cost_weight` 必须 ≥0；`cost_norm` 以 cloud-only 为分母，落在 [0,1] 附近（允许 >1，报告要显示）。
 - 默认阈值网格 0.00–1.00、步长 0.05；允许显式覆盖。目标相同时选更低的阈值（更少升级、更低成本；`score >= threshold` 留在端侧，所以低阈值才更少升级），并在报告中记录 tie-break。
-- 先在全量 train 上拟合全局阈值，再对每个 task 单独拟合；task 的 train 样本数 < `min_samples` 时回退全局阈值，`fallback_reason="insufficient_samples"`。
+- 先在 eligible train（排除 `require_cloud_tasks` 中的任务）上拟合全局阈值，再对每个 task 单独拟合；task 的 train 样本数 < `min_samples` 时回退全局阈值，`fallback_reason="insufficient_samples"`。`require_cloud_tasks` 永远升级，不参与阈值选择。
 - `require_cloud_tasks` 中的任务不拟合阈值，固定为永远升级；报告中标 `always_cloud=true`。
 - 空 train 数据、非有限 score、负成本、非法 split 直接抛 `ValueError`。
 - 输出 `CostPolicyFit`：`global_threshold`、`thresholds_by_task`、`cost_weight`、`min_samples`、`always_cloud_tasks`、per-task fit report（n、threshold、accuracy、cost、cost_norm、objective、fallback_reason）。
@@ -124,7 +124,7 @@ Source: https://github.com/GoooIce/shadow-peft/issues/48
 - Go 条件（满足其一）：
   - accuracy 不低于 baseline −0.5 pp，且 cost ≤ baseline × 0.8；或
   - cost ≤ baseline × 1.05，且 accuracy ≥ baseline +1 pp。
-- 附加条件：没有任何 task 的 val escalation rate > 0.6（可配置）；被拟合 task 的 val 样本 ≥`min_samples`；per-task 的 val objective 不出现“train 提升、val 下降”的方向反转。
+- 附加条件：没有任何非 always-cloud task 的 val escalation rate > 0.6（可配置；always-cloud 任务按设计豁免）；被拟合 task 的 val 样本 ≥`min_samples`；per-task 的 val objective 不出现“train 提升、val 下降”的方向反转。
 - 任一附加条件不满足 → `no_go` 或 `evidence_insufficient`，并在报告里列出原因。
 - synthetic 模式永远不输出 go/no-go，只输出管线状态。
 
@@ -191,8 +191,6 @@ Source: https://github.com/GoooIce/shadow-peft/issues/48
 - 公平 baseline 很重要：如果只和“当前默认 0.62”比，per-task 的收益会混入“阈值重新调参”的收益；必须和同 train split、同 λ 拟合的全局阈值比。
 - Counterfactual 偏差：真实日志里只有被升级的请求有云端答案；没有随机探索时，replay 会高估/低估策略收益。报告必须显式写偏差方向，不能声称因果收益。
 - 样本量：synthetic 只验证管线；真实结论至少 500 条、每任务 ≥30 条 train/val。低于此阈值只能算 `evidence_insufficient`。
-- 成本口径：`CostModel` 的价格是配置值，不是真实账单；go/no-go 同时报告 cost_norm 和原始 token/call 数，避免价格假设主导结论。
+- 成本口径：`CostModel` 的价格是配置值，不是真实账单；go/no-go 同时报告 cost_norm、cloud_calls 和 cost_per_request；原始 token 数由 replay 导出方记录，不强制出现在 policy 报告。
 - 安全边界：`require_cloud_tasks` 不受 per-task 阈值影响；任何 per-task 配置都不能绕过它。
 - 首轮验收口径：同准确率成本 −20%，或同成本准确率 +1 pp；无任务升级率 >0.6；val 上方向不反转。任一不满足就停在报告，不进入生产。
-
-

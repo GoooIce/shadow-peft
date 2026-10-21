@@ -1,5 +1,6 @@
 {
   "edge": {
+    "note": "escalation_threshold_by_task is synthetic/illustrative (exp15); fit it on replay data before production.",
     "edge_id": "line-a-01",
     "backend": {
       "kind": "transformers",
@@ -15,11 +16,13 @@
     "cloud_url": "https://cloud.example.com",
     "agent_port": 8080,
     "cloud_timeout_ms": 8000,
-    "escalation_threshold": 0.62,
+    "escalation_threshold": 0.45,
     "escalation_threshold_by_task": {
-      "fault_diagnosis": 0.45,
+      "fault_diagnosis": 0.35,
+      "improvement": 0.4,
       "process_calc": 0.35,
-      "standard_qa": 0.5
+      "process_qa": 0.0,
+      "standard_qa": 0.45
     },
     "require_cloud_tasks": [
       "quality_verdict",

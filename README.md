@@ -672,13 +672,17 @@ The synthetic round, its numbers, curves, bootstrap intervals and known limitati
 
 `edge.escalation_threshold_by_task` gives the legacy whole-answer path a threshold per task; tasks missing from the map fall back to `edge.escalation_threshold`, and `edge.require_cloud_tasks` still wins (those tasks always escalate). An empty map reproduces the previous behavior, and the probe path keeps using `handoff_threshold_by_task` independently.
 
+The values below are the **synthetic/illustrative** exp15 output; fit the policy on replay data with exp15 before using it in production. `quality_verdict` and `safety` are listed in `require_cloud_tasks`, so they always escalate and take no per-task threshold.
+
 ```json
 {
   "escalation_threshold": 0.45,
   "escalation_threshold_by_task": {
     "fault_diagnosis": 0.35,
+    "improvement": 0.4,
     "process_calc": 0.35,
-    "process_qa": 0.0
+    "process_qa": 0.0,
+    "standard_qa": 0.45
   }
 }
 ```

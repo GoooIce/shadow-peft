@@ -1,6 +1,6 @@
 # exp15 成本感知 per-task 升级阈值（spec #48 / issue #52 + #53）
 
-一句话收束：**exp15 的“拟合 → 配置 → 评测”管线已在 `goooinext` 跑通：8 个合成任务 × 60 变体（480 条，train/val 各 240）在 λ=0.1 下拟合出全局阈值 0.45 和 6 个 per-task 阈值，`policy.json` 可被 `EdgeConfig` 接受；但 `dataset_source=synthetic`、`claims_gain=false`、`evidence=insufficient`、`go_no_go=pipeline_only`，本轮只验证流程，不构成真实收益证据，也没有改动任何生产默认值。**
+一句话收束：**exp15 的“拟合 → 配置 → 评测”管线已在 `goooinext` 跑通：8 个合成条目（7 个任务）× 60 变体（480 条，train/val 各 240）在 λ=0.1 下拟合出全局阈值 0.45 和 6 个 per-task 阈值，`policy.json` 可被 `EdgeConfig` 接受；但 `dataset_source=synthetic`、`claims_gain=false`、`evidence=insufficient`、`go_no_go=pipeline_only`，本轮只验证流程，不构成真实收益证据，也没有改动任何生产默认值。**
 
 状态：**synthetic 管线在 `goooinext` 跑完（2026-10-21）**；真实 replay 集（≥500 条、每任务 train/val 各 ≥30 条）**尚未提供**，因此 per-task 阈值相对全局阈值是否真有收益仍无结论。
 
@@ -9,15 +9,15 @@
 | 项 | 值 |
 |---|---|
 | 机器 | `goooinext`（dc4a，DGX Spark GB10，121 GB 统一内存），Linux 6.17.0-1032-nvidia aarch64，20 核 |
-| 代码 | 工作树 `p16-t5`，分支 `ticket/p16-t5`，基于集成分支 `feat/p1-6-cost-policy` @ `ab2586a`（T4 #52 已合入） |
-| 运行时 | `~/Code/shadow-peft/.venv/bin/python`，Python 3.12.3；只传 `src/edge_cloud/` 与 `scripts/exp15_cost_policy.py` 到临时目录，未覆盖远端仓库 |
-| 数据 | `--synthetic`：`edge_cloud.knowledge.ENTRIES` 8 个条目 × 每目 60 个确定性 prompt 变体 = 480 条 `CostSample`；偶数变体 train、奇数变体 val，每个条目 train/val 各 30 |
+| 代码 | 工作树 `p16-fix`，分支 `ticket/p16-fix`，基于集成分支 `feat/p1-6-cost-policy` @ `8be5012` + review fixes |
+| 运行时 | `~/Code/shadow-peft/.venv/bin/python`，Python 3.12.3；只传 `src/edge_cloud/` 与 `scripts/exp15_cost_policy.py` 到 `/home/goooice/p16-fix-run/`，未覆盖远端仓库 |
+| 数据 | `--synthetic`：`edge_cloud.knowledge.ENTRIES` 8 个条目 × 每条目 60 个确定性 prompt 变体 = 480 条 `CostSample`；偶数变体 train、奇数变体 val，每个条目 train/val 各 30 |
 | 任务分布 | `process_qa`、`fault_diagnosis`（2 条目）、`quality_verdict`、`standard_qa`、`process_calc`、`improvement`、`safety` 共 7 个任务，val 240 条 |
 | 成本 | `CostModel` 默认配置价：edge token 0.000002、cloud input 0.000004、cloud output 0.000012、每次 call 0.0005、RTT 120 ms；延迟用闭式 `LatencyModel`（非墙钟） |
 | 策略参数 | λ 网格 `0, 0.05, 0.1, 0.2, 0.5, 1.0`，写入 `policy.json` 的 λ=0.1；`min_samples=30`；阈值网格 0.00–1.00 步长 0.05；`require_cloud_tasks=quality_verdict`；每任务 val 升级率上限 0.6 |
 | seed / bootstrap | seed 15；val bootstrap 1000 次 |
-| 产物指纹 | `report.json` `sha256:0650f1e7c3e3c2e83172251b6f0f4940bab3679f73a2d253744729ac42f400f4`；`policy.json` `sha256:e0ee8240cfd7a46d21ac341c6b04d485c8ecc2a5487924abcec11e8d5de532ee`；`dataset.jsonl` `sha256:7a05c9630e03821184c0f7377c949fdcf51bd31befa5e14e4a8b4d0ced723ce2` |
-| 确定性 | 同参数连续跑两次，五个产物在 `goooinext` 与本地逐 byte 相同（sha256 一致） |
+| 产物指纹 | `report.json` `sha256:b064d812567042a148facd68727ee2958745359d8b24c886f7d05aa2b9b63d0f`；`policy.json` `sha256:e0ee8240cfd7a46d21ac341c6b04d485c8ecc2a5487924abcec11e8d5de532ee`；`dataset.jsonl` `sha256:7a05c9630e03821184c0f7377c949fdcf51bd31befa5e14e4a8b4d0ced723ce2`；`summary.csv` `sha256:fddf09652a1cfbcf296d8a1d91ef407ce46583029711956724277840c3c22070`；`curves.csv` `sha256:2453a1c8327c230d2c929582b05a0feae2548a048bb810b4ac01f3d6fbfffc7e` |
+| 确定性 | 在 `goooinext` 上同参数连续跑两次，五个产物逐 byte 相同（sha256 一致）；回传本地后三个关键文件 sha256 不变 |
 
 ### 合成样本口径
 
@@ -41,27 +41,32 @@
 - 决策与 Router legacy 路径一致：`score >= threshold` 留在端侧，`score < threshold` 整段升级；`require_cloud_tasks` 永远升级，不参与阈值拟合，也不计入 per-task 升级率上限。
 - 目标：`objective = accuracy − λ · cost_norm`，`cost_norm = mean(chosen_cost) / mean(cloud_only_cost)`；目标相同时取更低阈值（更少升级）。
 - Baseline：在**同一 train split、同一 λ、同一阈值网格**上拟合的全局阈值；per-task 只有赢过它才算收益，不能只和“当前默认 0.62”比。
-- Go 条件（真实 replay 才评估）：同准确率成本 ≤ baseline × 0.8，或同成本准确率 ≥ baseline + 1 pp；且无任务 val 升级率 > 0.6、被拟合任务 val 样本 ≥30、val 方向不反转。
+- Go 条件（真实 replay 才评估）：同准确率成本 ≤ baseline × 0.8，或同成本准确率 ≥ baseline + 1 pp；且没有任何非 always-cloud 任务的 val 升级率 > 0.6、被拟合任务 val 样本 ≥30、per-task 的 val objective 不出现方向反转；整体 objective 的 train/val 反转只作为 `overall_inverted` 诊断字段，不参与 no-go 判定。
 - synthetic 模式固定输出 `pipeline_only`，不输出 `go`/`no_go`；`claims_gain` 永远为 `false`。
 
 ## 命令
 
 ```bash
 # 远端临时目录（不覆盖 ~/Code/shadow-peft 的未提交改动）
-ssh -J gooo goooinext 'mkdir -p /home/goooice/p16-run/src /home/goooice/p16-run/scripts'
+ssh -J gooo goooinext 'mkdir -p /home/goooice/p16-fix-run/src /home/goooice/p16-fix-run/scripts'
 rsync -az --exclude '__pycache__' -e 'ssh -J gooo' \
-  src/edge_cloud/ goooinext:/home/goooice/p16-run/src/edge_cloud/
+  src/edge_cloud/ goooinext:/home/goooice/p16-fix-run/src/edge_cloud/
 rsync -az -e 'ssh -J gooo' \
-  scripts/exp15_cost_policy.py goooinext:/home/goooice/p16-run/scripts/
+  scripts/exp15_cost_policy.py goooinext:/home/goooice/p16-fix-run/scripts/
 
-# 评测（goooinext；实测约 2 秒）
+# 评测（goooinext；实测约 2 秒），连续跑两次验证确定性
 ssh -J gooo goooinext 'cd /home/goooice/Code/shadow-peft && \
-  PYTHONPATH=/home/goooice/p16-run/src .venv/bin/python \
-  /home/goooice/p16-run/scripts/exp15_cost_policy.py \
-  --synthetic --out /home/goooice/p16-run/exp15 --bootstrap 1000'
+  PYTHONPATH=/home/goooice/p16-fix-run/src .venv/bin/python \
+  /home/goooice/p16-fix-run/scripts/exp15_cost_policy.py \
+  --synthetic --out /home/goooice/p16-fix-run/run1 --bootstrap 1000'
+ssh -J gooo goooinext 'cd /home/goooice/Code/shadow-peft && \
+  PYTHONPATH=/home/goooice/p16-fix-run/src .venv/bin/python \
+  /home/goooice/p16-fix-run/scripts/exp15_cost_policy.py \
+  --synthetic --out /home/goooice/p16-fix-run/run2 --bootstrap 1000'
+ssh -J gooo goooinext 'cd /home/goooice/p16-fix-run && sha256sum run1/* run2/* && diff -r run1 run2'
 
 # 回传
-rsync -az -e 'ssh -J gooo' goooinext:/home/goooice/p16-run/exp15/ runs-local/exp15/
+rsync -az -e 'ssh -J gooo' goooinext:/home/goooice/p16-fix-run/run1/ runs-local/exp15/
 
 # 本地单测与静态检查
 PYTHONPATH=src /Users/devel0per/Code/shadow-peft/.venv/bin/python \
@@ -133,12 +138,12 @@ PYTHONPATH=src /Users/devel0per/Code/shadow-peft/.venv/bin/python \
 | 参照 | accuracy | 95% CI | cost/请求 | cost_norm | 升级率 | P95 ms |
 |---|---:|---|---:|---:|---:|---:|
 | edge-only | 0.500 | [0.442, 0.558] | 0.000053 | 0.0311 | 0.000 | 456.0 |
-| cloud-only（整段升级） | 1.000 | [1.000, 1.000] | 0.001846 | 1.0933 | 1.000 | 2955.2 |
+| cloud-only（直连云端） | 1.000 | — | 0.001689 | 1.0000 | 1.000 | — |
 | 当前默认 0.62 | 1.000 | [1.000, 1.000] | 0.001172 | 0.6937 | 0.625 | 2955.2 |
 | per-task / 全局 0.45 | 1.000 | [1.000, 1.000] | 0.001172 | 0.6937 | 0.625 | 2955.2 |
 
 - `edge-only` 只有 4 个高质量条目（120/240）答对，准确率 0.5；成本几乎可以忽略。
-- 本实现的 `cloud_only` 参照是“每个请求都整段升级”，走 `escalated_cost`（含端侧完整答案 token），不是直连云端成本；因此它的 `cost_norm=1.0933 > 1`。真正的直连云端成本是 `cloud_only_cost`，即 `cost_norm` 的分母。
+- `cloud_only` 参照直接按 `cloud_only_cost`（prompt prefill + decode + call）计算，`cost_norm` 恒为 1.0；它不包含端侧答案 token，因此成本 0.001689 低于 always-escalate 的 `escalated_cost`。旧版本用 always-cloud 策略取 `escalated_cost`，得到 `cost_norm=1.0933`，本次已修正。该参照不报告 bootstrap CI/P95：`CostSample` 没有 cloud-only 延迟字段，参照本身是逐条成本的确定性均值。
 - `current_0.62` 与全局 0.45 在本数据上决策完全相同，原因同上：分数只落在 0.30–0.42 与 0.90–0.94 两簇。
 
 ### λ 扫描（val）
@@ -173,10 +178,11 @@ PYTHONPATH=src /Users/devel0per/Code/shadow-peft/.venv/bin/python \
 2. **不是真实准确率**：`edge_quality`/`cloud_quality` 是知识库的人工设定值，`edge_correct`/`cloud_correct` 只是 `>=0.5` 的阈值化，不代表模型在真实 prompt 上的表现。
 3. **Counterfactual 与选择偏差**：真实日志通常只有被升级请求的云端答案；replay 的 `cloud_correct` 依赖导出方补齐反事实标签，没有随机探索时不能把 replay 收益当作无偏因果收益，偏差方向取决于导出样本。
 4. **样本量门槛**：真实 replay 至少 500 条，且每个被拟合任务的 train/val 各 ≥30 条，才允许 `claims_gain=true`；否则只输出 `evidence_insufficient`。小 replay fixture（<500 条）已有单测覆盖。
-5. **`require_cloud_tasks` 豁免**：`quality_verdict` 永远升级，不受 per-task 阈值影响，也不计入 0.6 的升级率上限；本报告的总体升级率 0.625 包含它的 30/240。
-6. **`cloud_only` 参照不是直连云端**：它是 always-escalate 的整段升级成本，含端侧答案 token；看成本端点时要区分 `escalated_cost` 与 `cloud_only_cost`。
-7. **价格是配置值**：`CostModel` 的单价不是云厂商账单；判断时同时看 `cost_norm` 与原始 token/call 数。
-8. **没有生产默认值变更**：`policy.json` 只是审核产物；仓库的 `EdgeConfig` 默认 `escalation_threshold=0.62`、`escalation_threshold_by_task={}` 不变，脚本不写 Router 状态、不联网、不自动加载策略。
+5. **`require_cloud_tasks` 豁免**：`quality_verdict` 永远升级，不受 per-task 阈值影响，也不计入 0.6 的升级率上限；本报告的总体升级率 0.625 包含它的 30/240。go/no-go 的升级率门禁按 spec 只统计非 always-cloud 任务。
+6. **`cloud_only` 参照是直连云端**：它按 `cloud_only_cost` 计算，`cost_norm=1.0`；与 always-escalate 的 `escalated_cost`（含端侧答案 token）不是同一个口径。
+7. **价格是配置值**：`CostModel` 的单价不是云厂商账单；判断时同时看 `cost_norm`、`cloud_calls` 与 `cost_per_request`。policy 报告不强制原始 token 数，token 来源由 replay 导出方记录。
+8. **缺少 `cloud_correct` 的 replay 文件直接拒绝**：`load_cost_samples` 在入口报错，不会把不完整样本带进拟合；“证据不足”只由样本量/切分门禁表达。
+9. **没有生产默认值变更**：`policy.json` 只是审核产物；仓库的 `EdgeConfig` 默认 `escalation_threshold=0.62`、`escalation_threshold_by_task={}` 不变，脚本不写 Router 状态、不联网、不自动加载策略。
 
 ## 复现与产物
 
@@ -189,11 +195,11 @@ runs-local/exp15/curves.csv      # 147 行：全局与每任务的阈值曲线�
 runs-local/exp15/dataset.jsonl   # 480 条 CostSample（含 split、counterfactual 标签与成本）
 ```
 
-同 seed、同输入重复运行五个文件 byte-identical；换机重跑时以 `report.json`/`policy.json` 的 sha256 对齐。
+在 `goooinext` 上同参数连续跑两次，五个文件 byte-identical；回传本地后 `report.json`/`policy.json`/`dataset.jsonl` 的 sha256 与远端一致。
 
 ## 后续（需要真实数据）
 
-- 从真实日志导出 replay：`task/score/edge_correct/cloud_correct/edge_cost/escalated_cost/cloud_only_cost/split`，并记录 token 数来源；没有 `cloud_correct` 的行不能进训练。
+- 从真实日志导出 replay：`task/score/edge_correct/cloud_correct/edge_cost/escalated_cost/cloud_only_cost/split`，并记录 token 数来源；缺少 `cloud_correct` 的文件会被直接拒绝。
 - 先用小 fixture 验证 `claims_gain=false`，再用 ≥500 条、每任务 ≥30 条的数据跑 `--dataset <jsonl>`；只有门禁全过才把 `policy.json` 交给人工审核。
 - 上线仍由人工修改 `EdgeConfig`；回滚只需清空 `escalation_threshold_by_task`。
 

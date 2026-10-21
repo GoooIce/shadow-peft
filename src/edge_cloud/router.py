@@ -1208,10 +1208,12 @@ class Router:
         report: ConfidenceReport | None,
         edge_error: str | None,
     ) -> str | None:
-        if edge_error is not None:
-            return "edge_unavailable"
+        # Spec #48 §1 lookup order: require_cloud_tasks wins even when the edge
+        # call failed, so forced-cloud tasks keep a task_requires_cloud reason.
         if request.require_cloud or request.task in set(self.config.require_cloud_tasks):
             return "task_requires_cloud"
+        if edge_error is not None:
+            return "edge_unavailable"
         if report is None:
             return "no_edge_result"
         if report.signals.get("format_ok", 1.0) == 0.0:
