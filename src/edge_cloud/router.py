@@ -646,7 +646,13 @@ class Router:
 
         self.metrics.incr("escalation_total")
         self.metrics.incr(f"escalation_reason_{reason}")
-        trace.append(f"触发升级：{reason}（阈值 {self.config.escalation_threshold:.2f}）")
+        threshold = self._escalation_threshold_for(request.task)
+        if self.config.escalation_threshold_by_task:
+            trace.append(
+                f"触发升级：{reason}（task={request.task} 阈值 {threshold:.2f}）"
+            )
+        else:
+            trace.append(f"触发升级：{reason}（阈值 {threshold:.2f}）")
 
         edge_response = self._edge_response(
             request,
@@ -1186,6 +1192,15 @@ class Router:
             edge_tokens=edge_tokens
         ).to_dict()
 
+    def _escalation_threshold_for(self, task: str) -> float:
+        """Whole-segment threshold for *task*, falling back to the global one."""
+
+        return float(
+            self.config.escalation_threshold_by_task.get(
+                task, self.config.escalation_threshold
+            )
+        )
+
     def _escalation_reason(
         self,
         request: InferRequest,
@@ -1193,15 +1208,17 @@ class Router:
         report: ConfidenceReport | None,
         edge_error: str | None,
     ) -> str | None:
-        if edge_error is not None:
-            return "edge_unavailable"
+        # Spec #48 §1 lookup order: require_cloud_tasks wins even when the edge
+        # call failed, so forced-cloud tasks keep a task_requires_cloud reason.
         if request.require_cloud or request.task in set(self.config.require_cloud_tasks):
             return "task_requires_cloud"
+        if edge_error is not None:
+            return "edge_unavailable"
         if report is None:
             return "no_edge_result"
         if report.signals.get("format_ok", 1.0) == 0.0:
             return "format_invalid"
-        if report.score < self.config.escalation_threshold:
+        if report.score < self._escalation_threshold_for(request.task):
             return "low_confidence"
         return None
 
