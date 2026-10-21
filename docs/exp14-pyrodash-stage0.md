@@ -2,7 +2,7 @@
 
 一句话收束：**在 GSM8K test 的 100 条 prompt 上，原生 `Qwen3-0.6B` 准确率 45.0%、格式合法率 94.0%，`Qwen3-4B-Instruct-2507` 准确率 73.0%（73 个正确答案全部带 `####`），而 exp7 导出的显式影子（`Qwen3-0.6B-H4B` + `runs/exp7/e4b-seed0/ckpt-final`）准确率 0.0%、格式合法率 0.0%；Stage 0 判定 `mechanism_only`——任务与判分可用、机制可以在有能力的 SLM 上测，但 exp7 的导出影子不能生成可判分的推理轨迹，因此不进入 Stage 1 的词表/embedding 训练。**
 
-状态：**Stage 0 已在 `goooinext`（GB10）跑完（2026-10-21）**；Stage 1–3 未启动；没有扩词表、没有训练控制 token、没有改库行为。
+状态：**Stage 0 已在 `goooinext`（GB10）跑完（2026-10-21）**；同日按 no-go 停止控制 token 路线，Stage 1–3 未启动；没有扩词表、没有训练控制 token、没有改库行为。
 
 ## 实验设置
 
@@ -128,9 +128,9 @@ PYTHONPATH=src /Users/devel0per/Code/shadow-peft/.venv/bin/python \
   - `prompts.jsonl`：116 条输入与 gold。
 - 复现：先按上表同步脚本/数据，再执行“命令”一节的两条命令；`--report-from --regrade` 可在不重新加载模型的情况下重算报告。
 
-## 后续
+## 后续（2026-10-21 决定）
 
-- **issue #41**：以本报告关闭。
-- **issue #6**：保留为 umbrella，等待人工决定是否要转向“原生 0.6B/4B-Instruct 的机制验证”或直接停止；不自动启动 #42/#43。
-- **issue #42/#43/#44**：保持 blocked/`ready-for-human`；Stage 1 的前置条件“Stage 0 影子可用”未满足。
+- **issue #41**：已以本报告关闭。
+- **issue #6**：按 no-go 关闭；控制 token 路线停止，不转向“原生 0.6B/4B-Instruct 的机制验证”。如果未来要做机制验证，另开规格，不在本路线内继续。
+- **issue #42/#43/#44**：以 `wontfix` 关闭；Stage 0 的“影子可用”前置条件未满足。
 - **issue #1 probe**：继续作为在线 handoff 的默认路线；本次没有改它的行为。
