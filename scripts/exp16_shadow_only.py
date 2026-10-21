@@ -677,7 +677,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     model, stats = _train(args, model, tokenizer)
     model_dir = save_model(model, tokenizer, _model_dir(args))
     examples = load_eval_examples(args, tokenizer)
-    evaluation = _evaluate_examples(args, model, tokenizer, examples)["summary"]
+    evaluation_result = _evaluate_examples(args, model, tokenizer, examples)
+    evaluation = evaluation_result["summary"]
     baseline, baseline_generations = _baseline_report(args, examples)
     qa = _evaluate_qa(args, model, tokenizer)
 
@@ -697,7 +698,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     report["model_dir"] = model_dir
     _write_json(out / "report.json", report)
     _write_json(out / "train_stats.json", stats)
-    _write_jsonl(out / "generations.jsonl", evaluation["generations"])
+    _write_jsonl(out / "generations.jsonl", evaluation_result["generations"])
     _write_jsonl(out / "diagnose_generations.jsonl", diagnose["generations"])
     _write_jsonl(out / "baseline_generations.jsonl", baseline_generations)
     _write_jsonl(out / "qa_generations.jsonl", qa["generations"])
