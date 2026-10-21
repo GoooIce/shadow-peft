@@ -16,6 +16,11 @@
     "agent_port": 8080,
     "cloud_timeout_ms": 8000,
     "escalation_threshold": 0.62,
+    "escalation_threshold_by_task": {
+      "fault_diagnosis": 0.45,
+      "process_calc": 0.35,
+      "standard_qa": 0.5
+    },
     "require_cloud_tasks": [
       "quality_verdict",
       "safety"
