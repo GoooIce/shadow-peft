@@ -61,7 +61,7 @@ from .policies import OraclePolicy, ProbePolicy
 from .probe import PROBE_VERSION, fit_probe, write_probe  # noqa: F401 - re-exported for scripts
 from .protocol import InferRequest
 
-SCHEMA_VERSION = "exp9-handoff-eval/v1"
+SCHEMA_VERSION = "exp9-handoff-eval/v2"
 STRATEGIES: tuple[str, ...] = ("edge_only", "legacy", "probe", "oracle")
 BOUNDARY_KINDS: tuple[str, ...] = ("token", "sentence", "newline", "step", "json_field")
 
@@ -430,6 +430,7 @@ def _evaluate_sample(
     factory: Callable[[EvalSample], Backend],
     probe_path: str | None,
     escalation_threshold: float,
+    escalation_threshold_by_task: Mapping[str, float],
     cost_model: CostModel,
     latency_model: LatencyModel,
 ) -> dict[str, Any]:
@@ -491,7 +492,12 @@ def _evaluate_sample(
 
     escalate = handoff_taken
     if not escalate and strategy != "edge_only":
-        escalate = confidence.score < escalation_threshold
+        # Only the legacy path reads per-task thresholds; probe and oracle keep
+        # their existing semantics (the global threshold is still the fallback).
+        threshold = escalation_threshold
+        if strategy == "legacy":
+            threshold = escalation_threshold_by_task.get(sample.task, escalation_threshold)
+        escalate = confidence.score < threshold
 
     final_text = generation.text
     continuation = ""
@@ -593,6 +599,41 @@ def _mean(values: Sequence[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def _task_groups(
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, list[Mapping[str, Any]]]:
+    """Group records by task, sorted so the report is deterministic."""
+
+    groups: dict[str, list[Mapping[str, Any]]] = {}
+    for record in records:
+        groups.setdefault(str(record["task"]), []).append(record)
+    return dict(sorted(groups.items()))
+
+
+def _task_metrics(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    latencies = sorted(float(record["latency_ms"]) for record in records)
+    total_cost = sum(float(record["cost"]) for record in records)
+    return {
+        "n": len(records),
+        "accuracy": _round(_mean([1.0 if r["exact_match"] else 0.0 for r in records])),
+        "escalation_rate": _round(
+            _mean([1.0 if r["escalated"] else 0.0 for r in records])
+        ),
+        "total_cost": _round(total_cost),
+        "cost_per_request": _round(total_cost / len(records)) if records else 0.0,
+        "cloud_calls": int(sum(int(record["cloud_calls"]) for record in records)),
+        "latency_p95": _round(_quantile(latencies, 0.95)),
+    }
+
+
+def _per_task_metrics(
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    return {
+        task: _task_metrics(group) for task, group in _task_groups(records).items()
+    }
+
+
 def _strategy_metrics(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     n = len(records)
     positions = sorted(
@@ -640,6 +681,7 @@ def _strategy_metrics(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "continuation_mismatch_rate": _round(
             _mean([1.0 if r["continuation_mismatch"] else 0.0 for r in records])
         ),
+        "per_task": _per_task_metrics(records),
     }
 
 
@@ -749,6 +791,24 @@ def _cost_accuracy_curve(
     return points
 
 
+def _strategy_curves(
+    strategy: str, records: Sequence[Mapping[str, Any]], cost_model: CostModel
+) -> dict[str, Any]:
+    """Global curves plus the same sweep restricted to each task's records."""
+
+    return {
+        "risk_coverage": _risk_coverage_curve(records),
+        "cost_accuracy": _cost_accuracy_curve(strategy, records, cost_model),
+        "per_task": {
+            task: {
+                "risk_coverage": _risk_coverage_curve(group),
+                "cost_accuracy": _cost_accuracy_curve(strategy, group, cost_model),
+            }
+            for task, group in _task_groups(records).items()
+        },
+    }
+
+
 def _percentile_sorted(ordered: Sequence[float], q: float) -> float:
     if len(ordered) == 1:
         return ordered[0]
@@ -808,6 +868,31 @@ def _dataset_digest(samples: Sequence[EvalSample]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _normalize_threshold_by_task(
+    mapping: Mapping[str, float] | None,
+) -> dict[str, float]:
+    """Validate the per-task threshold mapping at the evaluation entry point.
+
+    Keys are coerced to strings and values must be finite numbers in ``[0, 1]``;
+    an absent or empty mapping means every task uses the global threshold.
+    """
+
+    if mapping is None:
+        return {}
+    if not isinstance(mapping, Mapping):
+        raise ValueError("escalation_threshold_by_task 必须是对象")
+    normalized: dict[str, float] = {}
+    for key, value in mapping.items():
+        task = str(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"escalation_threshold_by_task[{task!r}] 必须是数值")
+        number = float(value)
+        if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+            raise ValueError(f"escalation_threshold_by_task[{task!r}] 必须在 [0, 1] 内")
+        normalized[task] = number
+    return dict(sorted(normalized.items()))
+
+
 def run_evaluation(
     samples: Sequence[EvalSample],
     *,
@@ -816,6 +901,7 @@ def run_evaluation(
     n_boot: int = 200,
     probe_path: str | Path | None = None,
     escalation_threshold: float = 0.62,
+    escalation_threshold_by_task: Mapping[str, float] | None = None,
     backend_kind: str = "synthetic",
     backend_factory: Callable[[EvalSample], Backend] | None = None,
     cost_model: CostModel | None = None,
@@ -830,6 +916,7 @@ def run_evaluation(
         raise ValueError(f"未知策略: {', '.join(unknown)}")
     if not 0.0 <= float(escalation_threshold) <= 1.0:
         raise ValueError("escalation_threshold 必须在 [0, 1] 内")
+    threshold_by_task = _normalize_threshold_by_task(escalation_threshold_by_task)
 
     factory = backend_factory or _mock_backend_factory
     cost = cost_model or DEFAULT_COST_MODEL
@@ -846,6 +933,7 @@ def run_evaluation(
                 factory=factory,
                 probe_path=probe,
                 escalation_threshold=float(escalation_threshold),
+                escalation_threshold_by_task=threshold_by_task,
                 cost_model=cost,
                 latency_model=latency,
             )
@@ -858,12 +946,7 @@ def run_evaluation(
         strategy: _strategy_metrics(per_strategy[strategy]) for strategy in strategy_list
     }
     curves = {
-        strategy: {
-            "risk_coverage": _risk_coverage_curve(per_strategy[strategy]),
-            "cost_accuracy": _cost_accuracy_curve(
-                strategy, per_strategy[strategy], cost
-            ),
-        }
+        strategy: _strategy_curves(strategy, per_strategy[strategy], cost)
         for strategy in strategy_list
     }
     ci = {
@@ -901,6 +984,7 @@ def run_evaluation(
         "ci": ci,
         "config": {
             "escalation_threshold": float(escalation_threshold),
+            "escalation_threshold_by_task": threshold_by_task,
             "probe_path": probe,
             "cost_model": asdict(cost),
             "latency_model": asdict(latency),
@@ -1081,6 +1165,18 @@ _METRIC_REQUIRED = frozenset(
         "degraded_rate",
         "probe_fallback_rate",
         "continuation_mismatch_rate",
+        "per_task",
+    }
+)
+_PER_TASK_METRIC_REQUIRED = frozenset(
+    {
+        "n",
+        "accuracy",
+        "escalation_rate",
+        "total_cost",
+        "cost_per_request",
+        "cloud_calls",
+        "latency_p95",
     }
 )
 
@@ -1117,10 +1213,35 @@ def load_results(path: str | Path) -> dict[str, Any]:
             raise ValueError(
                 f"results.strategies.{name} 缺少指标: {', '.join(missing_metrics)}"
             )
+        per_task = metrics["per_task"]
+        if not isinstance(per_task, Mapping):
+            raise ValueError(f"results.strategies.{name}.per_task 必须是对象")
+        for task, entry in per_task.items():
+            if not isinstance(entry, Mapping):
+                raise ValueError(f"results.strategies.{name}.per_task.{task} 必须是对象")
+            missing_task_metrics = sorted(_PER_TASK_METRIC_REQUIRED - set(entry))
+            if missing_task_metrics:
+                raise ValueError(
+                    f"results.strategies.{name}.per_task.{task} 缺少指标: "
+                    f"{', '.join(missing_task_metrics)}"
+                )
         if name not in curves or name not in ci:
             raise ValueError(f"results 缺少策略 {name!r} 的 curves/ci")
-        if not {"risk_coverage", "cost_accuracy"} <= set(curves[name]):
+        curve_entry = curves[name]
+        if not isinstance(curve_entry, Mapping) or not {
+            "risk_coverage",
+            "cost_accuracy",
+        } <= set(curve_entry):
             raise ValueError(f"results.curves.{name} 缺少曲线")
+        per_task_curves = curve_entry.get("per_task")
+        if not isinstance(per_task_curves, Mapping):
+            raise ValueError(f"results.curves.{name}.per_task 必须是对象")
+        for task, entry in per_task_curves.items():
+            if not isinstance(entry, Mapping) or not {
+                "risk_coverage",
+                "cost_accuracy",
+            } <= set(entry):
+                raise ValueError(f"results.curves.{name}.per_task.{task} 缺少曲线")
         if not {"accuracy", "cost"} <= set(ci[name]):
             raise ValueError(f"results.ci.{name} 缺少置信区间")
     return dict(data)
