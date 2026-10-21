@@ -127,6 +127,75 @@ def test_router_forces_cloud_for_quality_verdict(tmp_path: Path) -> None:
     assert response.escalation_reason == "task_requires_cloud"
 
 
+def test_per_task_escalation_thresholds_use_the_request_task(tmp_path: Path) -> None:
+    config = edge_config(
+        tmp_path,
+        escalation_threshold=0.62,
+        escalation_threshold_by_task={"fault_diag": 0.35, "process_qa": 0.5},
+    )
+    router = Router(MockEdgeBackend(), config, cloud_client=FakeCloud())
+
+    stays_on_edge = router.infer(InferRequest(prompt=HARD_PROMPT, task="fault_diag"))
+    escalated = router.infer(InferRequest(prompt=HARD_PROMPT, task="process_qa"))
+
+    assert stays_on_edge.source == "edge"
+    assert stays_on_edge.escalated is False
+    assert stays_on_edge.escalation_reason is None
+    assert escalated.escalated is True
+    assert escalated.escalation_reason == "low_confidence"
+    assert escalated.edge_confidence == pytest.approx(stays_on_edge.confidence)
+    assert "触发升级：low_confidence（task=process_qa 阈值 0.50）" in escalated.trace
+
+
+def test_per_task_escalation_thresholds_fall_back_to_global_for_unknown_task(
+    tmp_path: Path,
+) -> None:
+    config = edge_config(
+        tmp_path,
+        escalation_threshold=0.62,
+        escalation_threshold_by_task={"fault_diag": 0.35},
+    )
+    router = Router(MockEdgeBackend(), config, cloud_client=FakeCloud())
+
+    response = router.infer(InferRequest(prompt=HARD_PROMPT, task="unmapped_task"))
+
+    assert response.escalated is True
+    assert response.escalation_reason == "low_confidence"
+    assert "触发升级：low_confidence（task=unmapped_task 阈值 0.62）" in response.trace
+
+
+def test_empty_per_task_escalation_thresholds_keep_legacy_behavior(
+    tmp_path: Path,
+) -> None:
+    router = Router(MockEdgeBackend(), edge_config(tmp_path), cloud_client=FakeCloud())
+
+    response = router.infer(InferRequest(prompt=HARD_PROMPT, task="fault_diag"))
+
+    assert response.escalated is True
+    assert response.escalation_reason == "low_confidence"
+    assert "触发升级：low_confidence（阈值 0.62）" in response.trace
+    assert all("task=" not in line for line in response.trace)
+
+
+@pytest.mark.parametrize("override", [0.0, 1.0])
+def test_require_cloud_tasks_win_over_per_task_escalation_thresholds(
+    tmp_path: Path, override: float
+) -> None:
+    config = edge_config(
+        tmp_path,
+        escalation_threshold_by_task={"quality_verdict": override},
+    )
+    router = Router(MockEdgeBackend(), config, cloud_client=FakeCloud())
+
+    response = router.infer(
+        InferRequest(prompt=EASY_PROMPT, task="quality_verdict")
+    )
+
+    assert response.source == "cloud"
+    assert response.escalated is True
+    assert response.escalation_reason == "task_requires_cloud"
+
+
 def test_router_offline_mode_queues_then_flushes(tmp_path: Path) -> None:
     config = edge_config(tmp_path, offline=True)
     outbox = Outbox(config.outbox_path)

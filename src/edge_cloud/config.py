@@ -58,6 +58,7 @@ class EdgeConfig:
     agent_port: int = 8080
     cloud_timeout_ms: int = 8000
     escalation_threshold: float = 0.62
+    escalation_threshold_by_task: dict[str, float] = field(default_factory=dict)
     require_cloud_tasks: list[str] = field(default_factory=lambda: ["quality_verdict"])
     max_cloud_calls_per_min: int = 60
     max_cloud_ratio: float = 0.6
@@ -101,6 +102,12 @@ class EdgeConfig:
 
     def __post_init__(self) -> None:
         self.escalation_threshold = max(0.0, min(1.0, float(self.escalation_threshold)))
+        if not isinstance(self.escalation_threshold_by_task, dict):
+            raise ValueError("escalation_threshold_by_task 必须是对象")
+        self.escalation_threshold_by_task = {
+            str(task): _unit_interval(value, name=f"escalation_threshold_by_task.{task}")
+            for task, value in self.escalation_threshold_by_task.items()
+        }
         self.max_cloud_ratio = max(0.0, min(1.0, float(self.max_cloud_ratio)))
         self.require_cloud_tasks = [str(task) for task in self.require_cloud_tasks]
         mode = str(self.handoff_mode).strip().lower()
