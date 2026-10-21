@@ -364,6 +364,8 @@ class TaskEvalReport:
     objective: float
     escalation_rate: float
     cloud_calls: int = 0
+    threshold: float | None = None
+    always_cloud: bool = False
     latency_p95_ms: float | None = None
 
     @property
@@ -441,8 +443,8 @@ def _normalize_samples(samples: Iterable[CostSample]) -> list[CostSample]:
 
 
 def _is_escalated(item: CostSample, threshold: float | None, always_cloud: bool) -> bool:
-    if threshold is None:
-        return always_cloud
+    if always_cloud or threshold is None:
+        return True
     return item.score < threshold
 
 
@@ -686,6 +688,8 @@ def _task_eval_report(
         objective=metrics["objective"],
         escalation_rate=metrics["escalation_rate"],
         cloud_calls=metrics["cloud_calls"],
+        threshold=threshold,
+        always_cloud=always_cloud,
         latency_p95_ms=_p95(latencies),
     )
 

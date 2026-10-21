@@ -242,9 +242,13 @@ def test_evaluate_uses_per_task_thresholds_and_always_cloud() -> None:
     report = evaluate_cost_policy(policy, samples)
 
     assert report.per_task["task_a"].escalation_rate == pytest.approx(0.0)
+    assert report.per_task["task_a"].threshold == pytest.approx(0.2)
     assert report.per_task["task_b"].escalation_rate == pytest.approx(1.0)
     assert report.per_task["quality_verdict"].escalation_rate == pytest.approx(1.0)
+    assert report.per_task["quality_verdict"].always_cloud is True
+    assert report.per_task["quality_verdict"].threshold is None
     assert report.per_task["unknown_task"].escalation_rate == pytest.approx(0.0)
+    assert report.per_task["unknown_task"].threshold == pytest.approx(0.5)
     assert report.escalation_rate == pytest.approx(0.5)
     assert report.cloud_calls == 2
     assert report.accuracy == pytest.approx(0.75)
