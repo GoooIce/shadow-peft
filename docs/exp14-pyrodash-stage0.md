@@ -134,3 +134,4 @@ PYTHONPATH=src /Users/devel0per/Code/shadow-peft/.venv/bin/python \
 - **issue #6**：按 no-go 关闭；控制 token 路线停止，不转向“原生 0.6B/4B-Instruct 的机制验证”。如果未来要做机制验证，另开规格，不在本路线内继续。
 - **issue #42/#43/#44**：以 `wontfix` 关闭；Stage 0 的“影子可用”前置条件未满足。
 - **issue #1 probe**：继续作为在线 handoff 的默认路线；本次没有改它的行为。
+- **跟踪**：[#45](https://github.com/GoooIce/shadow-peft/issues/45) 汇总 no-go 决定、已关闭工作项与未授权的后续选项；只跟踪，不代表路线重启。
