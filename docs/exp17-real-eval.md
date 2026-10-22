@@ -1,8 +1,8 @@
 # exp17 真实语料/真实模型复评 harness（issue #47）
 
-一句话收束：**real-eval harness 现在支持两条路径：adapter（`ShadowForCausalLM`）和 standalone（直接加载 exp16 导出的 recovered shadow）。在真实 GSM8K test 上，recovered `all` 模型 100 条评测：shadow ppl **3.600**（旧 adapter 167,148）、任务准确率 **36.0%**；S2T 20 prompts / 320 token：Hit@8 **0.941**、Agree@1 **0.569**；RESTRAIN 8 条 ×4 rollouts 仍是 accuracy 0 / skip 1.0。全部 `claims_gain=false`、`evidence=insufficient`，不能当作完整 campaign 结论。**
+一句话收束：**real-eval harness 支持 adapter（`ShadowForCausalLM`）和 standalone（直接加载 exp16 导出的 recovered shadow）。达到证据门槛的评测结果：GKD 200 条 GSM8K、`all` 臂 shadow ppl **3.524** / 准确率 **41.0%**（`backbone` 3.594 / 39.0%，旧 adapter shadow ppl 167,148）；S2T 200 prompts / 3200 token，Hit@8 **0.923** / Agree@1 **0.562**；RESTRAIN 100 条 GSM8K 结构化题 ×3 seeds，accuracy **1.75%** / low consistency **98–100%** / skip **73–84%**。GKD/S2T/RESTRAIN 均 `evidence_collected`，但 `claims_gain=false`（无完整 baseline-vs-treatment），JitRL 仍 `data_missing`。**
 
-状态：**adapter/standalone 路径 + 100/20/8 条中等规模评测已跑通（2026-10-22）**；#2–#5 的完整真实复评（3 seeds、≥200 held-out、≥100 hard-case、真实反馈日志、baseline 对照）未启动。
+状态：**adapter/standalone 路径 + 证据门槛规模评测已完成（2026-10-22）**；GKD/S2T 各 200、RESTRAIN 100×3 seeds。仍缺 JitRL 真实反馈日志、S2T selector/baseline 对照、3-seed 训练侧重复；#47 保持 ready-for-human。
 
 ## 修复后的评测口径（2026-10-22 code review）
 
@@ -74,6 +74,22 @@ PYTHONPATH=src python scripts/exp17_real_eval.py --suite restrain \
 - S2T 从 4 prompts 的 0.938/0.516 变成 20 prompts 的 0.941/0.569；覆盖稳定在 0.94，Agree@1 仍只有约 0.57，选择问题没有解决。
 - RESTRAIN 在 32 token 下 **8/8 不可聚类**，skip rate 从 0.875 升到 1.0；16 条产线 QA 仍然不能靠这个 shadow 修复。
 - 证据门槛：GKD 100 < 200、S2T 20 < 200、RESTRAIN 8 < 100，所以全部 `evidence=insufficient`；没有 3 seeds、baseline-vs-treatment 或真实反馈日志。
+
+### 结果（证据门槛规模：GKD 200 / S2T 200 / RESTRAIN 100×3 seeds）
+
+| suite | 规模 | 结果 | evidence |
+|---|---|---|---|
+| GKD `all` | GSM8K test 200，37,863 ppl token / 200 窗口，256 token | base ppl **4.475**、shadow ppl **3.524**、joint **4.765**、task accuracy **41.0%** [34.5, 48.0] | collected |
+| GKD `backbone` | 同上 | base ppl 4.475、shadow ppl **3.594**、joint 4.771、task accuracy **39.0%** [32.5, 45.0] | collected |
+| S2T `all` | 200 prompts / 3,200 token，K=8 | Hit@8 **0.923** [0.914, 0.931]、Agree@1 **0.562** [0.548, 0.578]、`selector_gain=null` | collected |
+| RESTRAIN seed 0 | 100 条 GSM8K 结构化题 ×4 rollouts，64 token | accuracy **1.75%**、low consistency 0.99、skip 0.80、consistency 0.407 | collected |
+| RESTRAIN seed 1 | 同上 | accuracy **1.75%**、low consistency 1.00、skip 0.84、consistency 0.410 | collected |
+| RESTRAIN seed 2 | 同上 | accuracy **1.75%**、low consistency 0.98、skip 0.73、consistency 0.426 | collected |
+
+- **GKD**：`all` 比 `backbone` 的 shadow ppl 低 0.070（约 −1.9%），任务准确率高 2.0 pp（41% vs 39%）；但 95% CI 重叠，不能声称显著。两臂都远好于旧 adapter 的 shadow ppl 167,148。
+- **S2T**：200 prompts 上 Hit@8 0.923、Agree@1 0.562，和 20/4-prompt 冒烟一致；覆盖稳定，选择仍是瓶颈。
+- **RESTRAIN**：在 100 条 GSM8K 结构化题上 accuracy 只有 1.75%，low consistency 98–100%，skip 73–84%；这是明确的 no-go。影子是在 GSM8K solution 上 SFT 的，但 64 token 内很少产出可解析的最终数字，`process_calc` 的 first-number 判分也会放大误差。生产 QA 16 条仍是 0% / 1.0 / 0.875，两个域都没有改善。
+- 证据门槛已满足（GKD/S2T 200、RESTRAIN 100），但 `claims_gain` 仍为 false：没有完整 baseline-vs-treatment campaign；JitRL 仍缺真实反馈日志/记忆/n-best 后端。
 
 ## 实验设置
 
@@ -182,21 +198,21 @@ PYTHONPATH=/home/goooice/p4647-run/src \
 ## 解释与后续
 
 1. **Harness 可用**：四个 suite 的统一入口、数据指纹、per-example、summary/report 都能跑；缺数据时不会伪造结果。
-2. **2-step/exp10 adapter 不是结论**：GKD 的 shadow ppl 167k、RESTRAIN 的 accuracy 0/low consistency 1.0，与 exp10 smoke/exp14 Stage 0 的 shadow-only 失败一致；S2T 的 0.922/0.5 只是 64 token 的局部诊断，不能外推。
-3. **完整复评需要（仍未做）**：GKD 固定 token 预算（`--token-budget`）+ **3 seeds**；S2T ≥200 条 held-out + 64-hidden selector 重训（可用 `--selector` 直接复用已有 head）；RESTRAIN ≥100 条结构化 hard-case；JitRL 真实反馈日志/记忆/n-best 后端，并记录 memory latency。总计约 2–4 个 GB10 天 + 人工抽检，需要单独预算/审批。
-4. **仍未做 baseline vs treatment campaign**：本轮只有一个模型/路径，`claims_gain=false`；3 seeds、对照臂与显著性检验都没有跑，不能据此声称 #2–#5 的真实收益或失败。
-5. **下一步**：优先用 #46 的 shadow-only SFT 恢复管线训练一个可用的 shadow，再跑 GKD/S2T 的真实复评；否则真实复评只会重复确认 shadow-only 不可用。
+2. **recovered standalone 的结论**：GKD 200 条上 `all` 3.524 ppl / 41.0%、`backbone` 3.594 / 39.0%，都远好于旧 adapter 的 167k；S2T 200 prompts 上 Hit@8 0.923 / Agree@1 0.562；RESTRAIN 100 条 GSM8K 结构化题 ×3 seeds 只有 1.75% accuracy、98–100% low consistency、73–84% skip。**GKD/S2T 可用，RESTRAIN no-go。**
+3. **GKD 两臂对比**：`all` 比 `backbone` 的 shadow ppl 低约 1.9%、准确率高 2.0 pp，但 CI 重叠；不能声称显著。`all` 训练了 4B head，成本更高；如果只需要格式/成本，`backbone` 仍是合理选择。
+4. **S2T 仍是选择瓶颈**：Hit@8 稳定在 0.92，Agree@1 只有 0.56；和 exp11 的 selector no-go 一致。下一步应重训/评估 selector，而不是继续加 K。
+5. **仍未做**：JitRL 缺真实反馈日志/记忆/n-best 后端（`data_missing`）；S2T selector/baseline 对照；GKD/S2T 的 3-seed 训练侧重复（eval 是 greedy，seed 不改变结果）；`claims_gain=false` 仍然成立。
 
 ## 已知限制
 
-- 样本极小（8/4/8）、生成预算 16 token，所有置信区间都很宽；不能做显著性结论。
-- GKD/RESTRAIN 使用 2-step/exp12 adapter，不是完整训练模型；adapter 选择会影响结果。
+- GKD/S2T 各 200 条、RESTRAIN 100 条；GKD 生成预算 256 token、S2T 16 token、RESTRAIN 64 token。RESTRAIN 有 3 seeds，GKD/S2T 是 greedy，seed 不改变结果。
 - GKD 只用数值容差评最终答案，不校验推理过程；分数/小数可能误判。
+- RESTRAIN 的 100 条是 **GSM8K 派生的 `process_calc` 结构化题**，不是产线 QA；`process_calc` 的 first-number 判分可能放大误差。生产 QA 16 条仍是 0% / 1.0 / 0.875。
 - `--token-budget` 只限制 ppl target token，不限制生成 token；实际窗口数受语料长度影响，报告会给出真实 `ppl_tokens/ppl_windows`。
 - S2T selector_gain 只在显式传 `--selector` 时计算；selector 模式走 `collect_selector_examples`，忽略 `--use-cache`，且 metrics 基于初始 shadow hidden（不是注入部署路径）。
 - JitRL 的 cloud 升级是简化阈值，不是完整生产 Router；本轮没有真实记忆/后端，直接 `data_missing`，latency 字段为 null。
-- `claims_gain=false` 是设计使然：MVP harness 没有 baseline-vs-treatment 对照臂。
-- 没有跑完整 2–4 天 campaign（3 seeds/baseline），因此不能声称 #2–#5 的真实收益或失败。
+- `claims_gain=false` 是设计使然：harness 没有 baseline-vs-treatment 对照臂；GKD `all` vs `backbone` 是手工补充对比，不是完整 campaign。
+- 没有跑 3-seed 训练侧重复、S2T selector/baseline 或 JitRL 真实数据，因此不能声称 #2–#5 的真实收益或失败。
 
 ## 产物
 
@@ -204,3 +220,5 @@ PYTHONPATH=/home/goooice/p4647-run/src \
 - 脚本：`scripts/exp17_real_eval.py`
 - 测试：`tests/lab/test_real_eval.py`（44 个，含 standalone/projected tiny-model 用例）
 - 冒烟产物：`runs-local/exp17/{gkd,restrain,s2t,jitrl}/`（`report.json`、`summary.csv`、`per_example.jsonl`）
+- standalone 产物：`runs-local/exp17/standalone/`
+- 证据门槛规模产物：`runs-local/exp17/large/{gkd-200-all,gkd-200-backbone,s2t-200-all,restrain-gsm8k-seed0,restrain-gsm8k-seed1,restrain-gsm8k-seed2}/`
