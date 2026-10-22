@@ -34,6 +34,18 @@ Examples::
         --memory runs/exp13/memory.jsonl \
         --backend-config runs/exp13/backend.json --out runs-local/exp17/jitrl
 
+    # Standalone recovered shadow (exp16 export, no adapter repack): the base
+    # 4B supplies base logits/base_ppl and generation runs on the shadow.
+    PYTHONPATH=src python scripts/exp17_real_eval.py \
+        --suite gkd --model /path/Qwen3-4B \
+        --shadow-model-dir ~/exp16-full/runs/all/model \
+        --limit 50 --token-budget 8192 --out runs-local/exp17/gkd-standalone
+
+    # RESTRAIN standalone needs only the recovered shadow (no --model).
+    PYTHONPATH=src python scripts/exp17_real_eval.py \
+        --suite restrain --shadow-model-dir ~/exp16-full/runs/all/model \
+        --limit 8 --n 4 --out runs-local/exp17/restrain-standalone
+
 ``--smoke`` only shrinks the sample/generation budget; it never invents data.
 Missing inputs yield ``status="data_missing"`` in the report.
 """
@@ -74,10 +86,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--model", default=None, help="Base model path or HF id.")
-    parser.add_argument(
+    shadow_group = parser.add_mutually_exclusive_group()
+    shadow_group.add_argument(
         "--shadow-ckpt",
         default=None,
         help="ShadowPEFT adapter checkpoint; required for shadow/joint metrics.",
+    )
+    shadow_group.add_argument(
+        "--shadow-model-dir",
+        default=None,
+        help=(
+            "exp16 exported standalone shadow directory "
+            "(AutoModelForCausalLMWithHiddenProjection + tokenizer), e.g. "
+            "~/exp16-full/runs/all/model. Mutually exclusive with --shadow-ckpt; "
+            "GKD/S2T also need --model as the base LM, RESTRAIN needs only this."
+        ),
     )
     parser.add_argument(
         "--shadow-model",
@@ -192,25 +215,76 @@ def _resolve_device(torch_module: Any, name: str) -> Any:
     return torch_module.device("cpu")
 
 
-def _load_model(args: argparse.Namespace) -> tuple[Any | None, Any | None, str]:
-    """Load the base tokenizer/model and, when given, the shadow adapter."""
+def _load_model(
+    args: argparse.Namespace,
+) -> tuple[Any | None, Any | None, Any | None, Any | None, str]:
+    """Load the base model, tokenizer and optional shadow path.
 
-    if not args.model:
-        return None, None, "no --model supplied"
+    Returns ``(model, tokenizer, base_model, standalone_shadow, status)``:
+
+    - ``model`` is what the suites receive as their generator/scorer: the
+      joint ``ShadowForCausalLM`` for ``--shadow-ckpt``, the recovered shadow
+      for ``--shadow-model-dir``, or the plain base model;
+    - ``base_model`` is the unwrapped base LM only in standalone mode (it
+      supplies base logits/perplexity). RESTRAIN only needs the shadow, so it
+      may be ``None`` there;
+    - ``standalone_shadow`` is the exp16 export when ``--shadow-model-dir`` is
+      used and ``None`` on the adapter path.
+
+    A model/tokenizer that cannot be loaded returns a status string instead of
+    raising, so the caller can emit ``data_missing``.
+    """
+
+    standalone_dir = args.shadow_model_dir
+    if args.shadow_ckpt and not args.model:
+        return None, None, None, None, "no --model supplied"
+    if not args.model and not standalone_dir:
+        return None, None, None, None, "no --model supplied"
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     dtype = _resolve_dtype(torch, args.dtype)
     device = _resolve_device(torch, args.device)
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
-    if getattr(tokenizer, "pad_token_id", None) is None and tokenizer.eos_token_id is not None:
-        tokenizer.pad_token = tokenizer.eos_token
-    try:
-        base = AutoModelForCausalLM.from_pretrained(args.model, dtype=dtype)
-    except TypeError:  # pragma: no cover - older transformers
-        base = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dtype)
+    standalone = None
+    tokenizer = None
+    if standalone_dir:
+        from shadow_lab.real_eval import load_standalone_shadow
+
+        try:
+            standalone, tokenizer = load_standalone_shadow(
+                standalone_dir, device=device, dtype=dtype
+            )
+        except (OSError, ValueError) as exc:
+            return (
+                None,
+                None,
+                None,
+                None,
+                f"standalone shadow load failed: {type(exc).__name__}: {exc}",
+            )
+
+    base = None
+    if args.model:
+        if tokenizer is None:
+            tokenizer = AutoTokenizer.from_pretrained(args.model)
+            if (
+                getattr(tokenizer, "pad_token_id", None) is None
+                and tokenizer.eos_token_id is not None
+            ):
+                tokenizer.pad_token = tokenizer.eos_token
+        try:
+            base = AutoModelForCausalLM.from_pretrained(args.model, dtype=dtype)
+        except TypeError:  # pragma: no cover - older transformers
+            base = AutoModelForCausalLM.from_pretrained(
+                args.model, torch_dtype=dtype
+            )
+        base.eval().to(device)
+
     if args.shadow_ckpt:
-        from shadow_peft import AutoModelForCausalLMWithHiddenProjection, ShadowForCausalLM
+        from shadow_peft import (
+            AutoModelForCausalLMWithHiddenProjection,
+            ShadowForCausalLM,
+        )
 
         shadow_model = None
         if args.shadow_model_path:
@@ -223,10 +297,11 @@ def _load_model(args: argparse.Namespace) -> tuple[Any | None, Any | None, str]:
             shadow_model=shadow_model,
             inference_mode="base_shadow",
         )
-    else:
-        model = base
-    model.eval().to(device)
-    return model, tokenizer, "loaded"
+        model.eval().to(device)
+        return model, tokenizer, None, None, "loaded"
+    if standalone is not None:
+        return standalone, tokenizer, base, standalone, "loaded"
+    return base, tokenizer, None, None, "loaded"
 
 
 def _dataset_examples(
@@ -297,7 +372,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     selected = list(SUITES) if args.suite == "all" else [args.suite]
-    model, tokenizer, load_status = _load_model(args)
+    model, tokenizer, base_model, standalone, load_status = _load_model(args)
+    mode = "standalone" if args.shadow_model_dir else "adapter"
     # One flat option mapping feeds the shared dispatch; each suite picks the
     # keys it accepts and falls back to its own defaults.
     options = {
@@ -342,10 +418,18 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 suite, error, examples=len(examples)
             )
             continue
-        if suite == "s2t" and not args.shadow_ckpt:
+        if suite in ("gkd", "s2t") and standalone is not None and base_model is None:
+            reports[suite] = data_missing_report(
+                suite,
+                f"{suite} standalone needs --model as the base model "
+                "(base logits and base_ppl are scored on it).",
+                examples=len(examples),
+            )
+            continue
+        if suite == "s2t" and standalone is None and not args.shadow_ckpt:
             reports[suite] = data_missing_report(
                 "s2t",
-                "s2t needs --shadow-ckpt for shadow_logits.",
+                "s2t needs --shadow-ckpt (or --shadow-model-dir) for shadow_logits.",
                 examples=len(examples),
             )
             continue
@@ -356,6 +440,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             tokenizer=tokenizer,
             shadow_ckpt=args.shadow_ckpt,
             shadow_model_path=args.shadow_model_path,
+            base_model=base_model,
+            standalone_shadow=standalone,
             adapter=args.adapter or args.shadow_ckpt,
             memory=args.memory,
             backend=_build_jitrl_backend(args) if suite == "jitrl" else None,
@@ -377,8 +463,10 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             "experiment": EXPERIMENT,
             "spec": SPEC,
             "suite": args.suite,
+            "mode": mode,
             "model": args.model,
             "shadow_ckpt": args.shadow_ckpt,
+            "shadow_model_dir": args.shadow_model_dir,
             "shadow_model_path": args.shadow_model_path,
             "selector": args.selector,
             "token_budget": args.token_budget,
@@ -407,6 +495,17 @@ def main(argv: list[str] | None = None) -> int:
     _resolve_smoke(args)
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be >= 1")
+    if args.shadow_model_dir:
+        if args.shadow_model_path:
+            parser.error(
+                "--shadow-model applies to --shadow-ckpt only; standalone mode "
+                "loads --shadow-model-dir"
+            )
+        if args.selector:
+            parser.error(
+                "--selector requires a --shadow-ckpt adapter; standalone s2t "
+                "has no selector head"
+            )
     result = _run(args)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
     return 0
