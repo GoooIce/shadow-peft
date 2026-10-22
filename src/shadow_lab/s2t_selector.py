@@ -178,6 +178,64 @@ def select_candidate(scores: torch.Tensor, candidate_ids: torch.Tensor) -> torch
     return candidate_ids.gather(-1, best).squeeze(-1)
 
 
+def selector_agreement(
+    head: SelectorHead,
+    examples: Sequence[SelectorExample],
+    candidate_weight: torch.Tensor,
+) -> dict[str, Any]:
+    """Agree@1 for the selector and three reference baselines.
+
+    All rates are over the supplied examples, so callers must pass a held-out
+    split to make an out-of-sample claim. ``greedy_agree_at_1`` is the shadow
+    top-1 (candidate slot 0), ``random_agree_at_1`` is the chance-level pick
+    inside the same candidate set (hit/K), and ``oracle_agree_at_1`` is
+    coverage (the base top-1 is somewhere in the top-K). ``selector_gain`` is
+    selector minus greedy on exactly the same tokens.
+    """
+    if not examples:
+        return {
+            "selector_agree_at_1": None,
+            "greedy_agree_at_1": None,
+            "random_agree_at_1": None,
+            "oracle_agree_at_1": None,
+            "selector_gain": None,
+            "n_selector_tokens": 0,
+        }
+    weight = candidate_weight.detach()
+    if weight.ndim != 2:
+        raise ValueError(f"candidate_weight must be 2-D, got {tuple(weight.shape)}")
+    device = weight.device
+    head.to(device)
+    head.eval()
+    selector_agrees = 0
+    greedy_agrees = 0
+    random_agrees = 0.0
+    hits = 0
+    with torch.inference_mode():
+        for example in examples:
+            candidate_ids = example.candidate_ids.to(device)
+            hidden = example.h_t.to(device=device, dtype=weight.dtype)
+            scores = head.score(hidden, candidate_ids, weight)
+            selected = int(select_candidate(scores, candidate_ids).item())
+            selector_agrees += int(selected == example.base_top1)
+            greedy_agrees += int(example.shadow_top1 == example.base_top1)
+            n_candidates = int(candidate_ids.numel())
+            if bool(example.hit):
+                hits += 1
+                random_agrees += 1.0 / n_candidates
+    n_tokens = len(examples)
+    selector_rate = selector_agrees / n_tokens
+    greedy_rate = greedy_agrees / n_tokens
+    return {
+        "selector_agree_at_1": selector_rate,
+        "greedy_agree_at_1": greedy_rate,
+        "random_agree_at_1": random_agrees / n_tokens,
+        "oracle_agree_at_1": hits / n_tokens,
+        "selector_gain": selector_rate - greedy_rate,
+        "n_selector_tokens": n_tokens,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class SelectorLoss:
     """Decomposed training loss: ``total = sel + beta * reg``."""
@@ -765,6 +823,7 @@ __all__ = [
     "load_selector",
     "save_selector",
     "select_candidate",
+    "selector_agreement",
     "selector_loss",
     "split_selector_examples",
     "train_selector",

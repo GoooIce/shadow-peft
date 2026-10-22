@@ -1,8 +1,8 @@
 # exp16 shadow-only 恢复管线（issue #46）
 
-一句话收束：**完整的 shadow-only 指令 SFT 把 exp7 导出影子从 0% 恢复到了可用区间：2k GSM8K train × 3 epochs 后，`backbone` 臂 GSM8K test 36% / 格式 99% / 截断 1%，`all` 臂 40% / 格式 96% / 截断 4%；原生 Qwen3-0.6B baseline 是 47% / 94% / 0%。两臂都通过“格式 ≥80%、准确率 ≥原生 70%、截断 ≤20%”的门禁（ratio 0.766 / 0.851），round-trip 逐位通过（max diff 0.0）。**
+一句话收束：**完整的 shadow-only 指令 SFT 把 exp7 导出影子从 0% 恢复到了可用区间：2k GSM8K train × 3 epochs 后，`backbone` 臂 GSM8K test 36% / 格式 99% / 截断 1%，`all` 臂 40% / 格式 96% / 截断 4%；原生 Qwen3-0.6B baseline 是 47% / 94% / 0%。两臂都通过“格式 ≥80%、准确率 ≥原生 70%、截断 ≤20%”的门禁（ratio 0.766 / 0.851），round-trip 逐位通过（max diff 0.0）。`all` 臂 3 个训练 seed 在同一 100 条上是 40 / 39 / 36%（均值 38.3 ± 2.1 pp），三个 seed 都过门禁。**
 
-状态：**完整训练已在 goooinext 跑完（2026-10-22）**；GSM8K 恢复门禁通过，`all` 更准、`backbone` 格式更稳；产线 QA 16 没有改善，exp7 held-out ppl 未测，因此这是 GSM8K 恢复证据，不是通用能力结论。
+状态：**完整训练 + `all` 臂 3-seed 复核已在双机跑完（2026-10-22）**；GSM8K 恢复门禁通过，`all` 更准、`backbone` 格式更稳；产线 QA 16 没有改善，exp7 held-out ppl 未测，因此这是 GSM8K 恢复证据，不是通用能力结论。
 
 ## 实验设置
 
@@ -116,6 +116,22 @@ PYTHONPATH=/home/goooice/p4647-run/src \
 - **QA 16 没有改善**：pre 12.5% → backbone/all 6.25%。16 条 fixture 的 `quality_verdict`/`process_calc` 判分对标签写法敏感，且 512-token GSM8K SFT 不等于产线 QA 指令跟随；这只能当诊断，不能否定 GSM8K 恢复。
 - **耗时远低于 ticket 的 3–5 天估计**：两臂各 3000 步，训练 11–15 分钟；完整 pre/train/eval 流程不到 1 小时。ticket 的 3–5 天是含多 seed/多 checkpoint/真实数据的上限估计。
 
+### `all` 臂 3-seed 复核（2026-10-22）
+
+用完全相同的配置（2k GSM8K train、3 epoch、batch 2、seq 512、lr 1e-5、`train_scope=all`）在 goooinext（seed 1）和 gooo（seed 2）重跑，并统一用 `--seed 0` 的同一批 100 条 GSM8K test 评测（避免不同 shuffle 子集混淆）：
+
+| seed | GSM8K acc@512 | format | trunc | 原生 baseline | ratio | 训练机器 |
+|---|---|---|---|---|---|---|
+| 0 | 40.0% | 0.96 | 0.04 | 0.47 | 0.851 | goooinext |
+| 1 | 39.0% | 0.98 | 0.02 | 0.47 | 0.830 | goooinext |
+| 2 | 36.0% | 0.95 | 0.05 | 0.47 | 0.766 | gooo（权重从 goooinext 直连同步） |
+| 均值 ± 样本 std | **38.3 ± 2.1 pp** | — | — | 0.47 | 0.816 | — |
+
+- 三个 seed 都通过格式 ≥80%、截断 ≤20%、accuracy ratio ≥0.70 的门禁；`all` 臂的 40% 是三次里的高值，3-seed 均值约 38%。
+- 同一批模型在 exp17 GKD（200 条、256 token）上的准确率是 41.0 / 36.5 / 34.0%（均值 37.2%），排序与 512-token 一致（seed 0 > 1 > 2），说明差异来自训练而不是评测子集。
+- seed 1/2 的首次 eval 误用了各自 seed 的 shuffle（不同 100 条子集），数字未采用；上表是统一 `--seed 0` 的重跑结果。产物在 `runs-local/exp16/seeds/seed{1,2}/eval-seed0-report.json`。
+- 这仍是 GSM8K 单数据集、单 checkpoint 起点（exp7 E-arm）的重复；不代表通用能力稳定。
+
 ### 修复后的门禁与诊断口径
 
 | 输出 | 含义 |
@@ -133,19 +149,19 @@ PYTHONPATH=/home/goooice/p4647-run/src \
 
 1. **管线可用**：导出、保存、重载、tokenizer、SFT、生成评测都已跑通；round-trip 现在是逐位一致，不再是 bf16/fp32 RoPE 的假失败。
 2. **完整 SFT 恢复了 GSM8K 生成**：pre-SFT 0% 格式/0% 准确率，2k×3 SFT 后 `backbone` 36% / 99% 格式、`all` 40% / 96% 格式，均超过“原生 70%”（0.766 / 0.851）。2 步冒烟仍是链路检查，但完整训练已经不是 no-go。
-3. **选点建议**：质量优先选 `all`（40%，ratio 0.851）；格式/成本优先选 `backbone`（99% 格式，596M 可训练参数，训练 668s vs 917s）。两臂都满足门禁，没有出现熵塌缩或格式崩坏。
-4. **仍未覆盖**：产线 QA 16 没有改善（12.5% → 6.25%），exp7 held-out ppl 未测，只有 1 个 seed、100 条 GSM8K test。下一步应补 ppl 和 QA 指令数据，或用恢复后的影子重跑 #47 的 GKD/S2T；这不影响 GSM8K 恢复结论。
+3. **选点建议**：质量优先选 `all`（3-seed 均值 38.3%，单 seed 36–40%，ratio 0.766–0.851）；格式/成本优先选 `backbone`（99% 格式，596M 可训练参数，训练 668s vs 917s）。两臂都满足门禁，没有出现熵塌缩或格式崩坏。
+4. **仍未覆盖**：产线 QA 16 没有改善（12.5% → 6.25%），exp7 held-out ppl 未测；已补 `all` 臂 3-seed 重复（同一 100 条），但仍是 GSM8K 单数据集。下一步应补 ppl 和 QA 指令数据，或用恢复后的影子重跑 #47 的 GKD/S2T；这不影响 GSM8K 恢复结论。
 5. **2k×3 epochs 与默认冒烟的差异**：默认 `--smoke` 不传 `--epochs` 时仍是 `--steps 2`，只验证链路；`--epochs 3` 会按数据量重算步数并忽略 `--steps`，不能把两者混为同一个实验口径。
 
 ## 已知限制
 
-- 只测一个 checkpoint（exp7 E-arm `ckpt-final`）、一个 seed、100 条 GSM8K test；多 seed/全量 test 尚未跑。
+- 只测一个 checkpoint 起点（exp7 E-arm `ckpt-final`）和 GSM8K 数据集；`all` 臂有 3 个训练 seed（同一 100 条 test），但 `backbone` 仍只有 seed 0，全量 test 未跑。
 - 训练默认 bf16、无 autocast/fp32 master weights；更长训练/更高 lr 可能需要调整。
 - 训练数据是 GSM8K 完整 solution，模型可能先学格式而非推理；`all` 臂还训练了 4B head（389M），存在过拟合/容量混入的可能，需多 seed 复核。
 - baseline 与 shadow 共用同一批 **prompt 字符串**，但各自使用自己的 tokenizer 编码；Qwen3 系列 tokenizer 一致时口径才严格可比。
 - 产线 QA 当前只有 16 条且按关键词/结构化抽取判分（`process_calc` 用 `extract_answer` 的首个数字规则）；本轮 QA 反而从 12.5% 降到 6.25%，不能据此声称通用指令跟随恢复。
 - exp7 held-out ppl 尚未测；训练只做了 GSM8K 指令 SFT，不是 exp7 续训语料的 ppl 回归。
-- 本轮实际训练只有约 11–15 分钟/臂，远低于 ticket 的 3–5 天估计；不要把“跑通 2k×3”当成完整研究 campaign（多 seed、多 checkpoint、真实产线数据仍未做）。
+- 本轮实际训练只有约 11–15 分钟/臂（并发时更长），远低于 ticket 的 3–5 天估计；不要把“跑通 2k×3 + 3 seed”当成完整研究 campaign（多 checkpoint、`backbone` 多 seed、真实产线数据仍未做）。
 
 ## 产物
 
@@ -155,3 +171,4 @@ PYTHONPATH=/home/goooice/p4647-run/src \
 - 冒烟产物：`runs-local/exp16/`（`report.json`、`diagnose_generations.jsonl`、`generations.jsonl`、`baseline_generations.jsonl`、`qa_generations.jsonl`、`train_stats.json`、`model/`）
 - 完整产物：`runs-local/exp16/full/{pre,backbone,all}/`（report/generations/baseline/QA/train_stats；模型权重保留在 `goooinext:~/exp16-full/runs/{backbone,all}/model/`，未回传以节省本地空间）
 - 完整运行日志：`runs-local/exp16/full/logs/`（pre/train/eval 各阶段）
+- `all` 臂 seed 1/2：`runs-local/exp16/seeds/seed{1,2}/`（`eval-seed0-report.json`、各自 seed 的 `eval-seed{1,2}-report.json`、`train_stats.json`）；权重在 `goooinext:~/exp16-seeds/seed1/model`、`gooo:~/exp16-seeds/seed2/model`
