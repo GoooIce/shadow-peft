@@ -702,7 +702,7 @@ The synthetic run, λ sweep, per-task metrics, caveats and the replay evidence g
 ## Shadow-only recovery and real evaluation (exp16/exp17)
 
 - **exp16 shadow-only recovery**：export round-trip、可训练范围、shadow-only 指令 SFT 与 GSM8K 评测。2k×3 SFT 把影子从 0% 恢复到 **36–40%**（原生 0.6B 47%，ratio 0.766/0.851），格式 96–99%，GSM8K 恢复门禁通过；QA 16 未改善、exp7 ppl 未测。See [docs/exp16-shadow-only-recovery.md](docs/exp16-shadow-only-recovery.md).
-- **exp17 real-corpus eval**：GKD/S2T/RESTRAIN/JitRL 的统一复评 harness，支持 adapter 和 standalone recovered shadow（`--shadow-model-dir`）。GKD 100 条 GSM8K：shadow ppl **3.600**、准确率 **36.0%**（旧 adapter shadow ppl 167k）；S2T 20 prompts：Hit@8 **0.941**、Agree@1 **0.569**；RESTRAIN 仍 0 准确率 / skip 1.0。仍是 `evidence_insufficient`，完整 2–4 天复评未运行。See [docs/exp17-real-eval.md](docs/exp17-real-eval.md).
+- **exp17 real-corpus eval**：GKD/S2T/RESTRAIN/JitRL 的统一复评 harness，支持 adapter 和 standalone recovered shadow（`--shadow-model-dir`）。证据门槛规模：GKD 200 条 GSM8K 的 shadow ppl **3.524** / 准确率 **41.0%**（`backbone` 3.594 / 39.0%），S2T 200 prompts Hit@8 **0.923** / Agree@1 **0.562**，RESTRAIN 100 条 GSM8K 结构化题 accuracy **1.75%** / low consistency **98–100%**（no-go）。GKD/S2T/RESTRAIN 均 `evidence_collected`；JitRL 仍 `data_missing`，`claims_gain=false`。See [docs/exp17-real-eval.md](docs/exp17-real-eval.md).
 
 ```bash
 # Export round-trip + 2-step SFT smoke (goooinext; needs the 4B/H4B/exp7 assets)
