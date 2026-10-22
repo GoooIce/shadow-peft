@@ -38,16 +38,19 @@ from shadow_lab.real_eval import (
     SUMMARY_FILENAME,
     EvalExample,
     build_report,
+    evaluate_standalone_ppl,
     evidence_for,
     evidence_min_examples,
     load_gsm8k_examples,
     load_jsonl_examples,
+    load_standalone_shadow,
     run_gkd_suite,
     run_jitrl_suite,
     run_restrain_suite,
     run_s2t_suite,
     run_suite,
     run_suites,
+    standalone_s2t_diagnose,
     write_report,
 )
 
@@ -905,3 +908,631 @@ def test_run_s2t_suite_selector_gain_from_saved_selector(tmp_path: Path) -> None
             k=8,
             selector=str(tmp_path / "missing"),
         )
+
+
+# ---------------------------------------------------------------------------
+# Standalone recovered shadow (exp16 exports)
+# ---------------------------------------------------------------------------
+
+
+def _tiny_causal_lm(seed: int = 0, *, vocab_size: int = 128) -> Any:
+    """Random tiny standard HF causal LM (never the 0.6B/4B checkpoints)."""
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    torch.manual_seed(seed)
+    return LlamaForCausalLM(
+        LlamaConfig(
+            vocab_size=vocab_size,
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=256,
+        )
+    ).eval()
+
+
+def _save_wordlevel_tokenizer(directory: Path, *, vocab_size: int = 128) -> None:
+    """Write a minimal WordLevel tokenizer into an export directory."""
+
+    from tokenizers import Tokenizer
+    from tokenizers import models as tk_models
+    from tokenizers import pre_tokenizers as tk_pre
+    from transformers import PreTrainedTokenizerFast
+
+    tokenizer = Tokenizer(
+        tk_models.WordLevel(
+            vocab={f"w{index}": index for index in range(vocab_size)},
+            unk_token="w0",
+        )
+    )
+    tokenizer.pre_tokenizer = tk_pre.Whitespace()
+    PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        pad_token="w0",
+        eos_token="w1",
+        bos_token="w2",
+    ).save_pretrained(directory)
+
+
+def _save_tiny_export(
+    directory: Path, *, seed: int = 0, vocab_size: int = 128
+) -> Path:
+    """Save a tiny HF model + WordLevel tokenizer as an export directory."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    _tiny_causal_lm(seed, vocab_size=vocab_size).save_pretrained(directory)
+    _save_wordlevel_tokenizer(directory, vocab_size=vocab_size)
+    return directory
+
+
+def _projected_shadow_model(seed: int = 0, *, vocab_size: int = 128) -> Any:
+    """Tiny exp16-style export: shadow Llama backbone + projection + base head."""
+
+    from transformers import LlamaConfig
+
+    from shadow_peft import (
+        AutoModelForCausalLMWithHiddenProjection,
+        AutoModelForCausalLMWithHiddenProjectionConfig,
+    )
+
+    shadow_config = LlamaConfig(
+        vocab_size=vocab_size,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        max_position_embeddings=256,
+    )
+    config = AutoModelForCausalLMWithHiddenProjectionConfig(
+        shadow_model_class="transformers.models.llama.modeling_llama:LlamaModel",
+        shadow_model_config_class="transformers.LlamaConfig",
+        shadow_model_config=shadow_config.to_dict(),
+        base_hidden_size=32,
+        vocab_size=vocab_size,
+    )
+    torch.manual_seed(seed)
+    return AutoModelForCausalLMWithHiddenProjection(config).eval()
+
+
+class ScriptedLogitsModel:
+    """Deterministic logits double for standalone S2T (forward only)."""
+
+    def __init__(self, ranking: list[int], vocab_size: int = 128) -> None:
+        self.ranking = [int(token) for token in ranking]
+        self.vocab_size = vocab_size
+        self.device = torch.device("cpu")
+        self.training = False
+
+    def eval(self) -> ScriptedLogitsModel:
+        self.training = False
+        return self
+
+    def train(self, flag: bool = True) -> None:
+        self.training = flag
+
+    def parameters(self):
+        yield torch.zeros(1)
+
+    def __call__(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        del attention_mask, kwargs
+        batch, length = input_ids.shape
+        logits = torch.full((batch, length, self.vocab_size), -10.0)
+        for index, token in enumerate(self.ranking):
+            logits[:, :, token] = 10.0 - index
+        return types.SimpleNamespace(logits=logits)
+
+
+def _scripted_generate_model(seed: int, generated_ids: list[int]) -> Any:
+    """Tiny HF model whose ``generate`` always appends scripted token ids."""
+
+    model = _tiny_causal_lm(seed)
+
+    def generate(self: Any, *, input_ids: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+        del kwargs
+        suffix = torch.tensor(
+            [generated_ids], dtype=input_ids.dtype, device=input_ids.device
+        )
+        return torch.cat([input_ids, suffix], dim=1)
+
+    model.generate = types.MethodType(generate, model)
+    return model
+
+
+def test_load_standalone_shadow_loads_export_and_tokenizer(tmp_path: Path) -> None:
+    directory = _save_tiny_export(tmp_path / "shadow", seed=1)
+    expected = _tiny_causal_lm(1)
+    ids = torch.tensor([[4, 5, 6]])
+
+    model, tokenizer = load_standalone_shadow(
+        directory, device="cpu", dtype=torch.float32
+    )
+
+    assert model.training is False
+    assert next(model.parameters()).dtype == torch.float32
+    assert tokenizer.pad_token_id is not None
+    with torch.no_grad():
+        reference = expected(input_ids=ids).logits
+        loaded = model(input_ids=ids).logits
+    assert torch.allclose(reference, loaded, atol=1e-5)
+
+
+def test_load_standalone_shadow_loads_projected_exp16_export(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "projected"
+    directory.mkdir()
+    expected = _projected_shadow_model(0)
+    expected.save_pretrained(directory)
+    _save_wordlevel_tokenizer(directory)
+
+    model, tokenizer = load_standalone_shadow(
+        directory, device="cpu", dtype=torch.float32
+    )
+
+    assert type(model).__name__ == "AutoModelForCausalLMWithHiddenProjection"
+    ids = torch.tensor([[3, 4, 5]])
+    with torch.no_grad():
+        reference = expected(input_ids=ids).logits
+        loaded = model(input_ids=ids).logits
+    assert torch.allclose(reference, loaded, atol=1e-5)
+    assert tokenizer.pad_token_id is not None
+    generated = model.generate(
+        input_ids=ids,
+        max_new_tokens=2,
+        do_sample=False,
+        pad_token_id=tokenizer.pad_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+    )
+    assert generated.shape[-1] > ids.shape[-1]
+
+
+def test_load_standalone_shadow_rejects_missing_directory(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="standalone shadow"):
+        load_standalone_shadow(
+            tmp_path / "missing", device="cpu", dtype=torch.float32
+        )
+
+
+def test_evaluate_standalone_ppl_and_s2t_accept_projected_export() -> None:
+    base = _tiny_causal_lm(0)
+    shadow = _projected_shadow_model(1)
+
+    result = evaluate_standalone_ppl(
+        base, shadow, CharTokenizer(), ["abcdefgh"], seq_len=4, max_windows=1
+    )
+    records = standalone_s2t_diagnose(
+        base, shadow, CharTokenizer(), ["abcd"], k=4, max_new_tokens=2
+    )
+
+    assert result["base_ppl"] > 0
+    assert result["shadow_ppl"] > 0
+    assert result["joint_ppl"] == pytest.approx(
+        result["base_ppl"] * result["shadow_ppl"] ** 0.05, rel=1e-6
+    )
+    assert len(records) == 2
+    assert 0 <= records[0]["base_top1"] < 128
+
+
+def test_evaluate_standalone_ppl_combines_base_and_shadow_losses() -> None:
+    base = _tiny_causal_lm(0)
+    shadow = _tiny_causal_lm(1)
+
+    result = evaluate_standalone_ppl(
+        base,
+        shadow,
+        CharTokenizer(),
+        ["abcdefghij", "klmnopqrst"],
+        seq_len=4,
+        max_windows=3,
+    )
+
+    assert result["tokens"] == sum(result["window_tokens"]) > 0
+    assert (
+        len(result["base_losses"])
+        == len(result["shadow_losses"])
+        == len(result["joint_losses"])
+        == len(result["window_tokens"])
+    )
+    for base_loss, shadow_loss, joint_loss in zip(
+        result["base_losses"],
+        result["shadow_losses"],
+        result["joint_losses"],
+        strict=True,
+    ):
+        assert joint_loss == pytest.approx(base_loss + 0.05 * shadow_loss)
+    assert result["joint_ppl"] == pytest.approx(
+        result["base_ppl"] * result["shadow_ppl"] ** 0.05, rel=1e-6
+    )
+    assert result["base_ppl"] != pytest.approx(result["shadow_ppl"])
+
+
+def test_evaluate_standalone_ppl_zero_weight_and_identical_models() -> None:
+    base = _tiny_causal_lm(0)
+    same = _tiny_causal_lm(0)
+
+    identical = evaluate_standalone_ppl(
+        base,
+        same,
+        CharTokenizer(),
+        ["abcdefghij"],
+        seq_len=4,
+        max_windows=2,
+    )
+    weighted_out = evaluate_standalone_ppl(
+        base,
+        same,
+        CharTokenizer(),
+        ["abcdefghij"],
+        seq_len=4,
+        max_windows=2,
+        shadow_loss_weight=0.0,
+    )
+
+    assert identical["base_ppl"] == pytest.approx(identical["shadow_ppl"], rel=1e-6)
+    assert weighted_out["joint_ppl"] == pytest.approx(weighted_out["base_ppl"])
+    with pytest.raises(ValueError, match="shadow_loss_weight"):
+        evaluate_standalone_ppl(
+            base, same, CharTokenizer(), ["abcdefghij"], shadow_loss_weight=-0.1
+        )
+    with pytest.raises(ValueError, match="2\\+ tokens"):
+        evaluate_standalone_ppl(base, same, CharTokenizer(), ["a"], seq_len=4)
+
+
+def test_standalone_s2t_diagnose_records_base_top1_and_shadow_rank() -> None:
+    base = ScriptedLogitsModel([7, 8, 9])
+    shadow = ScriptedLogitsModel([11, 7, 12, 13, 14, 15, 16, 17])
+
+    records = standalone_s2t_diagnose(
+        base,
+        shadow,
+        CharTokenizer(),
+        [{"prompt_id": "p1", "prompt": "ab", "task": "toy"}],
+        k=4,
+        max_new_tokens=3,
+    )
+
+    assert len(records) == 3
+    record = records[0]
+    assert record["prompt_id"] == "p1"
+    assert record["task"] == "toy"
+    assert record["base_top1"] == 7
+    assert record["shadow_topk_ids"][:2] == [11, 7]
+    assert record["base_top1_rank_in_shadow"] == 2
+    assert record["shadow_hidden"] == "standalone"
+
+
+def test_run_s2t_suite_standalone_reports_hit_and_agree() -> None:
+    examples = [_example(prompt="a", task="quality_verdict")]
+    base = ScriptedLogitsModel([7, 8, 9])
+
+    report = run_s2t_suite(
+        None,
+        CharTokenizer(),
+        examples,
+        base_model=base,
+        standalone_shadow=ScriptedLogitsModel([11, 7, 12, 13, 14, 15, 16, 17]),
+        max_new_tokens=2,
+        k=8,
+        n_boot=5,
+    )
+
+    assert report.status == "ok"
+    assert report.metrics["mode"] == "standalone"
+    assert report.metrics["hit_at_k"] == 1.0
+    assert report.metrics["agree_at_1"] == 0.0
+    assert report.config["mode"] == "standalone"
+    assert report.per_example[0]["hit_at_k"] == 1.0
+
+    agreeing = run_s2t_suite(
+        None,
+        CharTokenizer(),
+        examples,
+        base_model=base,
+        standalone_shadow=ScriptedLogitsModel([7, 11, 12]),
+        max_new_tokens=2,
+        k=8,
+        n_boot=5,
+    )
+    assert agreeing.metrics["agree_at_1"] == 1.0
+
+    missing_base = run_s2t_suite(
+        None,
+        CharTokenizer(),
+        examples,
+        standalone_shadow=ScriptedLogitsModel([7, 11, 12]),
+        max_new_tokens=2,
+    )
+    assert missing_base.status == "data_missing"
+    assert "base" in missing_base.notes[0].lower()
+
+    with pytest.raises(ValueError, match="selector"):
+        run_s2t_suite(
+            None,
+            CharTokenizer(),
+            examples,
+            base_model=base,
+            standalone_shadow=ScriptedLogitsModel([7, 11, 12]),
+            selector="selector-dir",
+            max_new_tokens=1,
+        )
+
+
+def test_run_suites_passes_standalone_shadow_to_model_suites() -> None:
+    base = ScriptedLogitsModel([7, 8, 9])
+    reports = run_suites(
+        ["s2t"],
+        examples=[_example(prompt="a")],
+        model=base,
+        tokenizer=CharTokenizer(),
+        base_model=base,
+        standalone_shadow=ScriptedLogitsModel([7, 11, 12]),
+        s2t_options={"max_new_tokens": 2, "k": 8, "n_boot": 5},
+    )
+
+    assert reports["s2t"].metrics["mode"] == "standalone"
+    assert reports["s2t"].metrics["agree_at_1"] == 1.0
+
+
+def test_run_gkd_suite_standalone_scores_base_and_generates_with_shadow() -> None:
+    tokenizer = CharTokenizer()
+    base = _scripted_generate_model(0, [tokenizer.vocab["9"]])
+    shadow = _scripted_generate_model(1, [tokenizer.vocab["4"]])
+    examples = [_example(task="process_calc", expected="4", prompt="2+2=?")]
+
+    report = run_gkd_suite(
+        base,
+        tokenizer,
+        examples,
+        base_model=base,
+        standalone_shadow=shadow,
+        max_new_tokens=2,
+        seq_len=4,
+        max_windows=2,
+        n_boot=5,
+    )
+
+    assert report.status == "ok"
+    assert report.metrics["mode"] == "standalone"
+    assert report.config["mode"] == "standalone"
+    assert report.metrics["base_ppl"] > 0
+    assert report.metrics["joint_ppl"] == pytest.approx(
+        report.metrics["base_ppl"] * report.metrics["shadow_ppl"] ** 0.05, rel=1e-6
+    )
+    # Generation runs on the recovered shadow (``4``), not the scripted base.
+    assert report.metrics["task_accuracy"] == 1.0
+
+    missing_base = run_gkd_suite(
+        None,
+        tokenizer,
+        examples,
+        standalone_shadow=shadow,
+        max_new_tokens=2,
+    )
+    assert missing_base.status == "data_missing"
+    assert "base" in missing_base.notes[0].lower()
+
+
+def test_run_restrain_suite_accepts_standalone_shadow_as_generator() -> None:
+    report = run_restrain_suite(
+        _tiny_causal_lm(1),
+        FixedAnswerTokenizer("判定：返修。"),
+        [_example(expected="rework")],
+        n=2,
+        max_new_tokens=2,
+        temperature=0.0,
+        kappa=2,
+        n_boot=5,
+    )
+
+    assert report.status == "ok"
+    assert report.metrics["accuracy"] == 1.0
+    assert report.config["adapter"] is None
+
+
+def test_cli_standalone_flags_are_mutually_exclusive() -> None:
+    cli = _load_cli()
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "--model",
+                "m",
+                "--shadow-ckpt",
+                "s",
+                "--shadow-model-dir",
+                "d",
+            ]
+        )
+
+
+def test_cli_standalone_rejects_adapter_only_flags(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli = _load_cli()
+    out = tmp_path / "out"
+
+    with pytest.raises(SystemExit):
+        cli.main(
+            [
+                "--suite",
+                "gkd",
+                "--shadow-model-dir",
+                str(tmp_path / "shadow"),
+                "--shadow-model",
+                "sm",
+                "--out",
+                str(out),
+            ]
+        )
+    with pytest.raises(SystemExit):
+        cli.main(
+            [
+                "--suite",
+                "s2t",
+                "--shadow-model-dir",
+                str(tmp_path / "shadow"),
+                "--selector",
+                "selector-dir",
+                "--out",
+                str(out),
+            ]
+        )
+    capsys.readouterr()
+
+
+def test_cli_standalone_missing_dir_is_data_missing_and_records_config(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli = _load_cli()
+    examples = tmp_path / "examples.jsonl"
+    examples.write_text(
+        json.dumps({"id": "x", "prompt": "p", "task": "quality_verdict", "expected": "rework"}),
+        encoding="utf-8",
+    )
+    missing = tmp_path / "missing-shadow"
+    out = tmp_path / "out"
+
+    exit_code = cli.main(
+        [
+            "--suite",
+            "gkd",
+            "--dataset",
+            str(examples),
+            "--shadow-model-dir",
+            str(missing),
+            "--out",
+            str(out),
+            "--smoke",
+        ]
+    )
+    capsys.readouterr()
+
+    assert exit_code == 0
+    report = json.loads((out / REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert report["config"]["mode"] == "standalone"
+    assert report["config"]["shadow_model_dir"] == str(missing)
+    assert report["config"]["shadow_ckpt"] is None
+    suite = report["suites"]["gkd"]
+    assert suite["status"] == "data_missing"
+    assert "standalone" in suite["notes"][0].lower()
+
+
+def test_cli_standalone_gkd_uses_recovered_shadow_and_records_mode(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli = _load_cli()
+    base_dir = _save_tiny_export(tmp_path / "base", seed=0)
+    shadow_dir = _save_tiny_export(tmp_path / "shadow", seed=1)
+    examples = tmp_path / "examples.jsonl"
+    examples.write_text(
+        json.dumps(
+            {
+                "id": "x",
+                "prompt": "w3 w4 w5 w6 w7 w8",
+                "task": "process_calc",
+                "expected": "4",
+            }
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+
+    exit_code = cli.main(
+        [
+            "--suite",
+            "gkd",
+            "--dataset",
+            str(examples),
+            "--model",
+            str(base_dir),
+            "--shadow-model-dir",
+            str(shadow_dir),
+            "--limit",
+            "1",
+            "--smoke",
+            "--device",
+            "cpu",
+            "--dtype",
+            "float32",
+            "--out",
+            str(out),
+        ]
+    )
+    capsys.readouterr()
+
+    assert exit_code == 0
+    report = json.loads((out / REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert report["config"]["mode"] == "standalone"
+    assert report["config"]["shadow_model_dir"] == str(shadow_dir)
+    assert report["config"]["shadow_ckpt"] is None
+    suite = report["suites"]["gkd"]
+    assert suite["status"] == "ok"
+    assert suite["metrics"]["mode"] == "standalone"
+    assert suite["config"]["mode"] == "standalone"
+    assert suite["metrics"]["base_ppl"] > 0
+    assert suite["metrics"]["joint_ppl"] == pytest.approx(
+        suite["metrics"]["base_ppl"] * suite["metrics"]["shadow_ppl"] ** 0.05,
+        rel=1e-6,
+    )
+
+
+def test_cli_standalone_restrain_needs_only_shadow_model_dir(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli = _load_cli()
+    shadow_dir = _save_tiny_export(tmp_path / "shadow", seed=1)
+    heldout = tmp_path / "heldout.jsonl"
+    heldout.write_text(
+        json.dumps(
+            {
+                "id": "h1",
+                "prompt": "w3 w4 w5 w6",
+                "task": "quality_verdict",
+                "expected": "rework",
+            }
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+
+    exit_code = cli.main(
+        [
+            "--suite",
+            "restrain",
+            "--dataset",
+            str(heldout),
+            "--shadow-model-dir",
+            str(shadow_dir),
+            "--limit",
+            "1",
+            "--smoke",
+            "--n",
+            "1",
+            "--temperature",
+            "0.0",
+            "--device",
+            "cpu",
+            "--dtype",
+            "float32",
+            "--out",
+            str(out),
+        ]
+    )
+    capsys.readouterr()
+
+    assert exit_code == 0
+    report = json.loads((out / REPORT_FILENAME).read_text(encoding="utf-8"))
+    assert report["config"]["mode"] == "standalone"
+    suite = report["suites"]["restrain"]
+    assert suite["status"] == "ok"
+    assert suite["config"]["adapter"] is None

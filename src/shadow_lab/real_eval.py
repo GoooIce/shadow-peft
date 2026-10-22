@@ -34,6 +34,19 @@ Design rules
 The CLI's smoke path uses GSM8K test for GKD/S2T and
 ``runs/exp12/heldout.jsonl`` for RESTRAIN; JitRL needs a real feedback memory
 JSONL and reports ``data_missing`` when it is absent.
+
+Standalone recovered shadow
+---------------------------
+GKD/S2T/RESTRAIN also accept a standalone shadow exported by exp16
+(:class:`shadow_peft.AutoModelForCausalLMWithHiddenProjection`, for example
+``~/exp16-full/runs/all/model``) instead of an adapter checkpoint.
+:func:`load_standalone_shadow` loads it with the tokenizer saved beside it;
+:func:`evaluate_standalone_ppl` scores the base LM and the recovered shadow
+with independent forwards (``joint_loss = base_loss + 0.05 * shadow_loss``);
+:func:`standalone_s2t_diagnose` compares base top-1 against the shadow top-K
+without any injection. In that mode the base 4B is loaded separately via
+``--model`` and supplies ``base_ppl``/base logits, while generation and task
+accuracy run on the recovered shadow.
 """
 
 from __future__ import annotations
@@ -54,7 +67,7 @@ from edge_cloud.backends import Generation
 from edge_cloud.memory import ExperienceMemory
 from edge_cloud.protocol import CloudRequest, InferRequest
 from edge_cloud.rerank import Candidate, rerank
-from shadow_lab.onpolicy_eval import bootstrap_ci, evaluate_ppl, grade_task
+from shadow_lab.onpolicy_eval import _ppl_windows, bootstrap_ci, evaluate_ppl, grade_task
 from shadow_lab.restrain import cluster_answers, consistency
 from shadow_lab.restrain_eval import (
     answer_entropy,
@@ -67,7 +80,7 @@ from shadow_lab.restrain_eval import (
 )
 from shadow_lab.s2t import bootstrap_ci as s2t_bootstrap_ci
 from shadow_lab.s2t import build_report as build_s2t_report
-from shadow_lab.s2t_diagnose import diagnose
+from shadow_lab.s2t_diagnose import _normalize_prompts, _record_step, diagnose
 
 SCHEMA_VERSION = "real-eval/v1"
 REPORT_FILENAME = "report.json"
@@ -90,6 +103,10 @@ EVIDENCE_MIN_EXAMPLES_BY_SUITE: dict[str, int] = {
     "jitrl": 200,
 }
 DEFAULT_CI_BOOTSTRAP = 200
+MODE_ADAPTER = "adapter"
+MODE_STANDALONE = "standalone"
+DEFAULT_STANDALONE_SHADOW_LOSS_WEIGHT = 0.05
+STANDALONE_SHADOW_HIDDEN = "standalone"
 CLAIM_NOTE = (
     "claims_gain is false: this MVP harness evaluates a single model/path and "
     "does not run a baseline-vs-treatment campaign."
@@ -590,6 +607,300 @@ def _apply_limit(examples: Sequence[EvalExample], limit: int | None) -> list[Eva
 
 
 # ---------------------------------------------------------------------------
+# Standalone recovered shadow (exp16 exports)
+# ---------------------------------------------------------------------------
+
+
+def load_standalone_shadow(
+    model_dir: str | Path,
+    *,
+    device: Any,
+    dtype: Any,
+) -> tuple[Any, Any]:
+    """Load an exp16 exported standalone shadow and the tokenizer beside it.
+
+    ``model_dir`` is a directory written by the exp16 export path (for example
+    ``~/exp16-full/runs/all/model``): a
+    :class:`shadow_peft.AutoModelForCausalLMWithHiddenProjection` checkpoint
+    (shadow backbone -> hidden projection -> frozen base LM head) plus a
+    tokenizer. Importing :mod:`shadow_peft` registers the projected-CLM config
+    with the Transformers Auto classes, which is what lets a plain
+    ``AutoModelForCausalLM.from_pretrained`` resolve the saved model type.
+
+    ``dtype`` is a ``torch.dtype``; a dtype name is accepted as a convenience.
+    The returned model is in eval mode on ``device`` with non-persistent
+    buffers (e.g. rotary tables) cast to the same dtype, and the tokenizer has
+    a pad token so greedy generation can run without an adapter.
+    """
+
+    from transformers import AutoModelForCausalLM
+
+    import shadow_peft  # noqa: F401 - registers the projected-CLM config
+    from shadow_lab.shadow_only import load_shadow_tokenizer, resolve_dtype
+
+    path = Path(model_dir).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"standalone shadow model dir not found: {path}")
+    torch_dtype = resolve_dtype(dtype) if isinstance(dtype, str) else dtype
+    try:
+        model = AutoModelForCausalLM.from_pretrained(str(path), dtype=torch_dtype)
+    except TypeError:  # pragma: no cover - older transformers
+        model = AutoModelForCausalLM.from_pretrained(
+            str(path), torch_dtype=torch_dtype
+        )
+    model.eval().to(device=device, dtype=torch_dtype)
+    tokenizer = load_shadow_tokenizer(path)
+    return model, tokenizer
+
+
+def evaluate_standalone_ppl(
+    base_model: Any,
+    shadow_model: Any,
+    tokenizer: Any,
+    texts: Sequence[str],
+    *,
+    seq_len: int = 2048,
+    max_windows: int | None = 8,
+    shadow_loss_weight: float = DEFAULT_STANDALONE_SHADOW_LOSS_WEIGHT,
+) -> dict[str, Any]:
+    """Paired base/shadow perplexity for a standalone recovered shadow.
+
+    Windows come from the on-policy evaluator (:func:`_ppl_windows`), so GKD
+    numbers stay comparable with the adapter path. For each window both models
+    run one forward pass and their shifted next-token CE is computed
+    independently:
+
+    - ``base_loss``: base LM CE on the raw base model (no shadow injection or
+      update);
+    - ``shadow_loss``: recovered-shadow CE (shadow backbone + projection +
+      frozen base head);
+    - ``joint_loss = base_loss + shadow_loss_weight * shadow_loss``.
+
+    ``joint_ppl`` is ``exp`` of the token-weighted mean joint loss, i.e.
+    ``base_ppl * shadow_ppl ** shadow_loss_weight``. That is a reporting
+    convention for the recovery runs (a weighted geometric mean of the two
+    perplexities), not a mixture distribution. Both models must already be on
+    the same device; their train/eval flags are restored after the run.
+    """
+
+    if isinstance(texts, str):
+        raise TypeError("texts must be a sequence of strings, not a bare string")
+    if base_model is None or shadow_model is None:
+        raise ValueError(
+            "evaluate_standalone_ppl needs a base model and a shadow model"
+        )
+    weight = float(shadow_loss_weight)
+    if not math.isfinite(weight) or weight < 0.0:
+        raise ValueError(
+            f"shadow_loss_weight must be finite and >= 0, got {shadow_loss_weight!r}"
+        )
+    windows = _ppl_windows(
+        [str(text) for text in texts], tokenizer, seq_len, max_windows
+    )
+    if not windows:
+        raise ValueError(
+            "evaluate_standalone_ppl: held-out texts too short to score — need "
+            "at least one text with 2+ tokens"
+        )
+
+    device = _device_of(base_model)
+    shadow_device = _device_of(shadow_model)
+    if shadow_device != device:
+        raise ValueError(
+            "base_model and shadow_model must be on the same device, got "
+            f"{device} and {shadow_device}"
+        )
+
+    from shadow_peft.task_models import _shifted_ce_loss
+
+    torch = _import_torch()
+    was_training = {
+        "base": bool(getattr(base_model, "training", False)),
+        "shadow": bool(getattr(shadow_model, "training", False)),
+    }
+    if hasattr(base_model, "eval"):
+        base_model.eval()
+    if hasattr(shadow_model, "eval"):
+        shadow_model.eval()
+
+    totals = {"base": [0.0, 0], "shadow": [0.0, 0], "joint": [0.0, 0]}
+    losses: dict[str, list[float]] = {"base": [], "shadow": [], "joint": []}
+    window_tokens: list[int] = []
+    try:
+        with torch.no_grad():
+            for ids in windows:
+                x = torch.tensor([ids], dtype=torch.long, device=device)
+                base_logits = base_model(input_ids=x, use_cache=False).logits
+                shadow_logits = shadow_model(input_ids=x, use_cache=False).logits
+                base_loss = _shifted_ce_loss(base_logits, x)
+                shadow_loss = _shifted_ce_loss(shadow_logits, x)
+                joint_loss = base_loss + weight * shadow_loss
+                targets = x.size(1) - 1
+                for key, value in (
+                    ("base", base_loss),
+                    ("shadow", shadow_loss),
+                    ("joint", joint_loss),
+                ):
+                    totals[key][0] += float(value) * targets
+                    totals[key][1] += targets
+                    losses[key].append(float(value))
+                window_tokens.append(targets)
+    finally:
+        if hasattr(base_model, "train"):
+            base_model.train(was_training["base"])
+        if hasattr(shadow_model, "train"):
+            shadow_model.train(was_training["shadow"])
+
+    tokens = totals["base"][1]
+    if not tokens:
+        raise RuntimeError("evaluate_standalone_ppl: no target tokens were scored")
+    return {
+        "base_ppl": math.exp(totals["base"][0] / tokens),
+        "shadow_ppl": math.exp(totals["shadow"][0] / tokens),
+        "joint_ppl": math.exp(totals["joint"][0] / tokens),
+        "tokens": tokens,
+        "window_tokens": window_tokens,
+        "base_losses": losses["base"],
+        "shadow_losses": losses["shadow"],
+        "joint_losses": losses["joint"],
+    }
+
+
+def standalone_s2t_diagnose(
+    base_model: Any,
+    shadow_model: Any,
+    tokenizer: Any,
+    prompts: Sequence[str | Mapping[str, Any]],
+    *,
+    k: int = 8,
+    max_new_tokens: int = 32,
+    seed: int = 0,
+    task_key: str = "task",
+) -> list[dict[str, Any]]:
+    """Record base top-1 vs. standalone-shadow top-K during greedy decoding.
+
+    Same record contract as :func:`shadow_lab.s2t_diagnose.diagnose`, but the
+    two distributions come from independent models: the base LM supplies the
+    greedy next token and ``base_top1``; the recovered standalone shadow
+    supplies the candidate list, rank and Agree@1. Generation advances on the
+    base top-1, so the recovered shadow never changes the trajectory it is
+    scored against. The prefix is recomputed at every step (no KV cache), which
+    keeps the diagnostic independent of any deployment wrapper. Every record
+    carries ``shadow_hidden="standalone"`` to mark its source.
+
+    Prompts are strings or mappings with ``prompt`` plus an optional task under
+    ``task_key`` (default ``"task"``); blank prompts are skipped. Decoding stops
+    after ``max_new_tokens`` or when the base emits ``tokenizer.eos_token_id``
+    (the EOS token is recorded). ``seed`` seeds torch for auditability.
+    """
+
+    if base_model is None or shadow_model is None:
+        raise ValueError(
+            "standalone_s2t_diagnose needs a base model and a shadow model"
+        )
+    if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, int):
+        raise ValueError(
+            f"max_new_tokens must be a positive integer, got {max_new_tokens!r}"
+        )
+    if max_new_tokens < 1:
+        raise ValueError(
+            f"max_new_tokens must be a positive integer, got {max_new_tokens!r}"
+        )
+    if isinstance(k, bool) or not isinstance(k, int) or k < 1:
+        raise ValueError(f"k must be a positive integer, got {k!r}")
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise ValueError(f"seed must be an integer, got {seed!r}")
+
+    device = _device_of(base_model)
+    shadow_device = _device_of(shadow_model)
+    if shadow_device != device:
+        raise ValueError(
+            "base_model and shadow_model must be on the same device, got "
+            f"{device} and {shadow_device}"
+        )
+    specs = _normalize_prompts(prompts, task_key=task_key)
+
+    torch = _import_torch()
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    was_training = {
+        "base": bool(getattr(base_model, "training", False)),
+        "shadow": bool(getattr(shadow_model, "training", False)),
+    }
+    if hasattr(base_model, "eval"):
+        base_model.eval()
+    if hasattr(shadow_model, "eval"):
+        shadow_model.eval()
+    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    records: list[dict[str, Any]] = []
+    try:
+        with torch.inference_mode():
+            for spec in specs:
+                if not spec.text.strip():
+                    continue
+                input_ids, attention_mask = _encode_prompt(
+                    tokenizer, spec.text, torch
+                )
+                input_ids = input_ids.to(device)
+                attention_mask = attention_mask.to(device)
+                for position in range(max_new_tokens):
+                    base_logits = base_model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        use_cache=False,
+                    ).logits[0, -1]
+                    shadow_logits = shadow_model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        use_cache=False,
+                    ).logits[0, -1]
+                    record = _record_step(
+                        prompt=spec,
+                        position=position,
+                        base_logits=base_logits,
+                        shadow_logits=shadow_logits,
+                        k=k,
+                        torch_module=torch,
+                    )
+                    record["shadow_hidden"] = STANDALONE_SHADOW_HIDDEN
+                    records.append(record)
+                    next_token = record["base_top1"]
+                    if eos_token_id is not None and next_token == eos_token_id:
+                        break
+                    if position + 1 >= max_new_tokens:
+                        break
+                    input_ids = torch.cat(
+                        [
+                            input_ids,
+                            torch.tensor(
+                                [[next_token]],
+                                dtype=input_ids.dtype,
+                                device=device,
+                            ),
+                        ],
+                        dim=1,
+                    )
+                    attention_mask = torch.cat(
+                        [
+                            attention_mask,
+                            torch.ones(
+                                (1, 1),
+                                dtype=attention_mask.dtype,
+                                device=device,
+                            ),
+                        ],
+                        dim=1,
+                    )
+    finally:
+        if hasattr(base_model, "train"):
+            base_model.train(was_training["base"])
+        if hasattr(shadow_model, "train"):
+            shadow_model.train(was_training["shadow"])
+    return records
+
+
+# ---------------------------------------------------------------------------
 # GKD suite
 # ---------------------------------------------------------------------------
 
@@ -612,6 +923,8 @@ def run_gkd_suite(
     examples: Sequence[EvalExample],
     *,
     shadow_ckpt: str | None = None,
+    base_model: Any = None,
+    standalone_shadow: Any = None,
     seq_len: int = 2048,
     max_windows: int | None = None,
     token_budget: int | None = None,
@@ -622,17 +935,32 @@ def run_gkd_suite(
 ) -> SuiteReport:
     """Joint/shadow perplexity plus structured task accuracy (issue #2).
 
-    Perplexity is measured on ``prompt + reference`` with
-    :func:`evaluate_ppl`; task accuracy comes from greedy/sampled answers
-    graded by :func:`grade_task`. ``token_budget`` caps the scored target
-    tokens by mapping to ``ceil(token_budget / seq_len)`` windows (whichever of
-    ``token_budget``/``max_windows`` is tighter wins); the actual
-    ``ppl_tokens``/``ppl_windows`` are reported. A model or tokenizer that
-    cannot score the corpus yields ``data_missing`` rather than a made-up
+    Perplexity is measured on ``prompt + reference``; task accuracy comes from
+    greedy/sampled answers graded by :func:`grade_task`. ``token_budget`` caps
+    the scored target tokens by mapping to ``ceil(token_budget / seq_len)``
+    windows (whichever of ``token_budget``/``max_windows`` is tighter wins); the
+    actual ``ppl_tokens``/``ppl_windows`` are reported. A model or tokenizer
+    that cannot score the corpus yields ``data_missing`` rather than a made-up
     number.
+
+    The adapter path (default) reads ``joint_ppl``/``shadow_ppl`` from
+    :func:`evaluate_ppl` and generates with ``model``. Passing
+    ``standalone_shadow`` switches to the recovered-shadow path: perplexity
+    comes from :func:`evaluate_standalone_ppl` (``base_ppl`` plus the weighted
+    ``joint_ppl``), generation runs on ``standalone_shadow``, and ``base_model``
+    must supply the unwrapped base logits.
     """
 
-    if model is None or tokenizer is None:
+    standalone = standalone_shadow is not None
+    if standalone:
+        if base_model is None or tokenizer is None:
+            return data_missing_report(
+                "gkd",
+                "gkd standalone needs a base model (--model) and a tokenizer; "
+                "standalone_shadow supplies the recovered shadow.",
+                examples=len(examples),
+            )
+    elif model is None or tokenizer is None:
         return data_missing_report(
             "gkd",
             "gkd needs a loaded model and tokenizer (--model/--shadow-ckpt).",
@@ -651,6 +979,8 @@ def run_gkd_suite(
         "n_boot": int(n_boot),
         "seed": int(seed),
     }
+    if standalone:
+        config["mode"] = MODE_STANDALONE
     notes: list[str] = []
     metrics: dict[str, Any] = {
         "n_examples": len(items),
@@ -665,6 +995,20 @@ def run_gkd_suite(
         "task_accuracy": None,
         "task_accuracy_ci": None,
     }
+    if standalone:
+        metrics["mode"] = MODE_STANDALONE
+        metrics["base_ppl"] = None
+        metrics["base_ppl_ci"] = None
+        notes.append(
+            "standalone joint_ppl = exp(token-weighted mean(base CE + "
+            f"{DEFAULT_STANDALONE_SHADOW_LOSS_WEIGHT} * shadow CE)) = "
+            "base_ppl * shadow_ppl ** "
+            f"{DEFAULT_STANDALONE_SHADOW_LOSS_WEIGHT}; base_ppl is the raw base "
+            "LM with no injection or shadow update."
+        )
+        notes.append(
+            "task_accuracy generations run on the standalone recovered shadow."
+        )
 
     if token_budget is not None:
         budget_windows = _max_windows_for_token_budget(token_budget, seq_len)
@@ -676,13 +1020,23 @@ def run_gkd_suite(
         config["max_windows"] = max_windows
     texts = [_reference_text(example) for example in items]
     try:
-        ppl = evaluate_ppl(
-            model,
-            tokenizer,
-            texts,
-            seq_len=seq_len,
-            max_windows=max_windows,
-        )
+        if standalone:
+            ppl = evaluate_standalone_ppl(
+                base_model,
+                standalone_shadow,
+                tokenizer,
+                texts,
+                seq_len=seq_len,
+                max_windows=max_windows,
+            )
+        else:
+            ppl = evaluate_ppl(
+                model,
+                tokenizer,
+                texts,
+                seq_len=seq_len,
+                max_windows=max_windows,
+            )
     except (TypeError, ValueError) as exc:
         notes.append(f"perplexity unavailable: {exc}")
     else:
@@ -708,9 +1062,18 @@ def run_gkd_suite(
             n_boot=n_boot,
             seed=seed,
         )
+        if standalone:
+            metrics["base_ppl"] = float(ppl["base_ppl"])
+            metrics["base_ppl_ci"] = _ppl_interval(
+                ppl["base_losses"],
+                ppl["window_tokens"],
+                n_boot=n_boot,
+                seed=seed,
+            )
 
     torch = _import_torch()
     torch.manual_seed(seed)
+    generator = standalone_shadow if standalone else model
     per_example: list[dict[str, Any]] = []
     graded: list[bool] = []
     for example in items:
@@ -718,7 +1081,7 @@ def run_gkd_suite(
         error: str | None = None
         try:
             prediction = _generate_response(
-                model,
+                generator,
                 tokenizer,
                 example.prompt,
                 max_new_tokens=max_new_tokens,
@@ -885,6 +1248,8 @@ def run_s2t_suite(
     *,
     shadow_ckpt: str | None = None,
     shadow_model_path: str | None = None,
+    base_model: Any = None,
+    standalone_shadow: Any = None,
     max_new_tokens: int = 32,
     k: int = 8,
     use_cache: bool = False,
@@ -901,9 +1266,30 @@ def run_s2t_suite(
     alias when ``k == 8``. A saved selector head (``selector=``) adds
     ``selector_gain``, measured against the shadow-greedy Agree@1 on the same
     base-prefix tokens.
+
+    Passing ``standalone_shadow`` switches to the recovered-shadow path:
+    :func:`standalone_s2t_diagnose` compares the base model's top-1 with an
+    independent forward of the exported shadow, so no adapter/injection is
+    involved. ``base_model`` is required and ``selector`` is not supported
+    (a selector scores injected shadow hiddens).
     """
 
-    if model is None or tokenizer is None:
+    standalone = standalone_shadow is not None
+    if standalone:
+        if tokenizer is None or base_model is None:
+            return data_missing_report(
+                "s2t",
+                "s2t standalone needs a base model (--model) and a tokenizer; "
+                "the recovered shadow comes from --shadow-model-dir.",
+                examples=len(examples),
+                metrics={"k": int(k)},
+            )
+        if selector is not None:
+            raise ValueError(
+                "s2t standalone does not support --selector: selector heads "
+                "score injected shadow hiddens from a ShadowForCausalLM."
+            )
+    elif model is None or tokenizer is None:
         return data_missing_report(
             "s2t",
             "s2t needs a loaded base_shadow model and tokenizer.",
@@ -932,6 +1318,8 @@ def run_s2t_suite(
         "n_boot": int(n_boot),
         "seed": int(seed),
     }
+    if standalone:
+        config["mode"] = MODE_STANDALONE
     prompts = [
         {
             "prompt_id": example.id,
@@ -942,7 +1330,17 @@ def run_s2t_suite(
     ]
     selector_head = None
     selector_examples: list[Any] = []
-    if selector is None:
+    if standalone:
+        records = standalone_s2t_diagnose(
+            base_model,
+            standalone_shadow,
+            tokenizer,
+            prompts,
+            max_new_tokens=max_new_tokens,
+            k=k,
+            seed=seed,
+        )
+    elif selector is None:
         records = diagnose(
             model,
             tokenizer,
@@ -996,12 +1394,26 @@ def run_s2t_suite(
         row["hit_at_k"] = row["hit_at_k"] / tokens
         row["agree_at_1"] = row["agree_at_1"] / tokens
 
-    notes = [
-        "Hit@K/Agree@1 come from the initial shadow hidden state, not the "
-        "injected deployment path.",
-        f"hit_at_k is the hit rate at the configured k={int(k)}.",
-        CLAIM_NOTE,
-    ]
+    if standalone:
+        notes = [
+            "Hit@K/Agree@1 compare the base top-1 with the recovered standalone "
+            "shadow's top-K from an independent forward, not the injected "
+            "adapter path.",
+            f"hit_at_k is the hit rate at the configured k={int(k)}.",
+            CLAIM_NOTE,
+        ]
+        if use_cache:
+            notes.append(
+                "use_cache is ignored in standalone mode: the diagnostic "
+                "recomputes the prefix at every step."
+            )
+    else:
+        notes = [
+            "Hit@K/Agree@1 come from the initial shadow hidden state, not the "
+            "injected deployment path.",
+            f"hit_at_k is the hit rate at the configured k={int(k)}.",
+            CLAIM_NOTE,
+        ]
     metrics: dict[str, Any] = {
         "n_examples": len(items),
         "n_prompts_with_tokens": int(report.get("n_prompts") or 0),
@@ -1018,6 +1430,8 @@ def run_s2t_suite(
         "greedy_agree_at_1": None,
         "n_selector_tokens": 0,
     }
+    if standalone:
+        metrics["mode"] = MODE_STANDALONE
     if int(k) == 8:
         metrics["hit_at_8"] = metrics["hit_at_k"]
         metrics["hit_at_8_ci"] = metrics["hit_at_k_ci"]
@@ -1627,6 +2041,8 @@ def run_suite(
     tokenizer: Any = None,
     shadow_ckpt: str | None = None,
     shadow_model_path: str | None = None,
+    base_model: Any = None,
+    standalone_shadow: Any = None,
     adapter: str | None = None,
     memory: ExperienceMemory | str | Path | None = None,
     backend: Any = None,
@@ -1640,6 +2056,10 @@ def run_suite(
     Unknown or ``None`` keys are ignored so the CLI can pass one flat option
     mapping to every suite. Missing model/tokenizer still yields a
     ``data_missing`` report from the suite itself.
+
+    ``base_model``/``standalone_shadow`` select the recovered-shadow path for
+    ``gkd`` and ``s2t``; ``restrain`` uses ``standalone_shadow`` as its
+    generator when one is supplied.
     """
 
     if suite not in SUITES:
@@ -1659,6 +2079,8 @@ def run_suite(
             tokenizer,
             examples,
             shadow_ckpt=shadow_ckpt,
+            base_model=base_model,
+            standalone_shadow=standalone_shadow,
             **kwargs,
         )
     if suite == "s2t":
@@ -1668,11 +2090,14 @@ def run_suite(
             examples,
             shadow_ckpt=shadow_ckpt,
             shadow_model_path=shadow_model_path,
+            base_model=base_model,
+            standalone_shadow=standalone_shadow,
             **kwargs,
         )
     if suite == "restrain":
+        generator = standalone_shadow if standalone_shadow is not None else model
         return run_restrain_suite(
-            model,
+            generator,
             tokenizer,
             examples,
             adapter=adapter,
@@ -1695,6 +2120,8 @@ def run_suites(
     tokenizer: Any = None,
     shadow_ckpt: str | None = None,
     shadow_model_path: str | None = None,
+    base_model: Any = None,
+    standalone_shadow: Any = None,
     adapter: str | None = None,
     memory: ExperienceMemory | str | Path | None = None,
     backend: Any = None,
@@ -1711,6 +2138,8 @@ def run_suites(
     every suite; ``<suite>_options`` override it per suite. Missing
     model/tokenizer for the model-backed suites becomes a ``data_missing``
     report, so ``--suite all`` can still run the data-driven JitRL arm.
+    ``base_model``/``standalone_shadow`` select the recovered-shadow path (see
+    :func:`run_suite`).
     """
 
     requested = [suites] if isinstance(suites, str) else list(suites)
@@ -1737,6 +2166,8 @@ def run_suites(
             tokenizer=tokenizer,
             shadow_ckpt=shadow_ckpt,
             shadow_model_path=shadow_model_path,
+            base_model=base_model,
+            standalone_shadow=standalone_shadow,
             adapter=adapter,
             memory=memory,
             backend=backend,
@@ -1837,8 +2268,10 @@ _SUMMARY_FIELDS: tuple[str, ...] = (
     "status",
     "evidence",
     "claims_gain",
+    "mode",
     "n_examples",
     "k",
+    "base_ppl",
     "joint_ppl",
     "shadow_ppl",
     "ppl_tokens",
@@ -1935,13 +2368,17 @@ __all__ = [
     "CLAIM_NOTE",
     "DEFAULT_CI_BOOTSTRAP",
     "DEFAULT_RESTRAIN_DATASET",
+    "DEFAULT_STANDALONE_SHADOW_LOSS_WEIGHT",
     "EVIDENCE_COLLECTED",
     "EVIDENCE_INSUFFICIENT",
     "EVIDENCE_MIN_EXAMPLES_BY_SUITE",
     "EvalExample",
+    "MODE_ADAPTER",
+    "MODE_STANDALONE",
     "PER_EXAMPLE_FILENAME",
     "REPORT_FILENAME",
     "SCHEMA_VERSION",
+    "STANDALONE_SHADOW_HIDDEN",
     "STATUS_DATA_MISSING",
     "STATUS_OK",
     "SUITES",
@@ -1953,15 +2390,18 @@ __all__ = [
     "build_report",
     "data_missing_report",
     "dataset_fingerprint",
+    "evaluate_standalone_ppl",
     "evidence_for",
     "evidence_min_examples",
     "load_gsm8k_examples",
     "load_jsonl_examples",
+    "load_standalone_shadow",
     "run_gkd_suite",
     "run_jitrl_suite",
     "run_restrain_suite",
     "run_s2t_suite",
     "run_suite",
     "run_suites",
+    "standalone_s2t_diagnose",
     "write_report",
 ]
