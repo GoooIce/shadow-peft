@@ -701,7 +701,7 @@ The synthetic run, λ sweep, per-task metrics, caveats and the replay evidence g
 
 ## Shadow-only recovery and real evaluation (exp16/exp17)
 
-- **exp16 shadow-only recovery**：export round-trip、可训练范围、shadow-only 指令 SFT 与 GSM8K 评测。MVP 管线已跑通；完整 3–5 天 SFT 未运行。See [docs/exp16-shadow-only-recovery.md](docs/exp16-shadow-only-recovery.md).
+- **exp16 shadow-only recovery**：export round-trip、可训练范围、shadow-only 指令 SFT 与 GSM8K 评测。2k×3 SFT 把影子从 0% 恢复到 **36–40%**（原生 0.6B 47%，ratio 0.766/0.851），格式 96–99%，GSM8K 恢复门禁通过；QA 16 未改善、exp7 ppl 未测。See [docs/exp16-shadow-only-recovery.md](docs/exp16-shadow-only-recovery.md).
 - **exp17 real-corpus eval**：GKD/S2T/RESTRAIN/JitRL 的统一复评 harness；真实 GSM8K/exp12 数据优先，缺数据时明确 `data_missing`。MVP 冒烟为 `evidence_insufficient`；完整 2–4 天复评未运行。See [docs/exp17-real-eval.md](docs/exp17-real-eval.md).
 
 ```bash

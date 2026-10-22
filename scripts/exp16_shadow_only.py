@@ -12,7 +12,10 @@ Four commands share one export path:
 Note: this is the revision for issue #46.  ``eval``/``run`` now require a
 native baseline (e.g. ``~/models/Qwen3-0.6B``) before the accuracy gate can
 pass; without ``--baseline-model`` the report says ``status="not_run"`` and
-``recovery_ready`` stays false.  ``--epochs`` replaces ``--steps`` when set.
+``recovery_ready`` stays false.  ``eval`` reports ``eval_ready`` (post-SFT
+format/truncation/empty/accuracy) separately from ``recovery_ready``, which
+also requires the round-trip that only ``run`` executes.  ``--epochs`` replaces
+``--steps`` when set.
 
 Every command writes ``report.json`` under ``--out``; generation commands also
 write ``generations.jsonl`` and training writes ``train_stats.json``.  The
@@ -53,6 +56,14 @@ ACCURACY_RATIO_MIN = 0.70
 
 RECOVERY_GATE_KEYS = (
     "roundtrip_passed",
+    "eval_format_ok",
+    "eval_truncation_ok",
+    "eval_empty_ok",
+    "accuracy_gate_passed",
+)
+# ``eval`` runs no round-trip, so it can report post-SFT readiness without
+# claiming the full recovery gate (which also requires a round-trip).
+EVAL_GATE_KEYS = (
     "eval_format_ok",
     "eval_truncation_ok",
     "eval_empty_ok",
@@ -364,8 +375,10 @@ def _gate_summary(
 
     ``recovery_ready`` requires *every* key in :data:`RECOVERY_GATE_KEYS`:
     round-trip, eval format, truncation, empty, and a native-baseline accuracy
-    ratio of at least 0.70.  A missing key (e.g. ``eval`` never runs a
-    round-trip) keeps it false rather than silently dropping the gate.
+    ratio of at least 0.70.  ``eval_ready`` is the same without the round-trip,
+    so an ``eval``-only run can report post-SFT readiness without claiming the
+    round-trip gate it did not execute.  A missing eval key keeps both false
+    rather than silently dropping the gate.
     """
     gates: dict[str, Any] = {}
     if roundtrip is not None:
@@ -385,8 +398,11 @@ def _gate_summary(
             float(evaluation.get("empty_rate", 1.0)) <= PRODUCT_MAX_EMPTY
         )
     gates.update(_accuracy_gate(evaluation, baseline))
-    gates["recovery_ready"] = all(
-        key in gates and bool(gates[key]) for key in RECOVERY_GATE_KEYS
+    gates["eval_ready"] = all(
+        key in gates and bool(gates[key]) for key in EVAL_GATE_KEYS
+    )
+    gates["recovery_ready"] = (
+        bool(gates.get("roundtrip_passed", False)) and gates["eval_ready"]
     )
     return gates
 
@@ -656,6 +672,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
                 "baseline_status": baseline["status"],
                 "accuracy_ratio": report["gates"]["accuracy_ratio"],
                 "qa_accuracy": qa["summary"]["accuracy"],
+                "eval_ready": report["gates"]["eval_ready"],
                 "recovery_ready": report["gates"]["recovery_ready"],
                 "out": str(out),
             },
@@ -713,6 +730,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "baseline_status": baseline["status"],
                 "accuracy_ratio": report["gates"]["accuracy_ratio"],
                 "qa_accuracy": qa["summary"]["accuracy"],
+                "eval_ready": report["gates"]["eval_ready"],
                 "recovery_ready": report["gates"]["recovery_ready"],
                 "out": str(out),
             },

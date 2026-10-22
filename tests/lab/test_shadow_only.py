@@ -969,7 +969,27 @@ def test_exp16_gate_summary_never_recovers_without_roundtrip():
     )
 
     assert gates["accuracy_gate_passed"] is True
+    assert gates["eval_ready"] is True
     assert gates["recovery_ready"] is False
+
+
+def test_exp16_gate_summary_recovers_with_roundtrip_and_eval_ready():
+    evaluation = {
+        "accuracy": 0.4,
+        "format_rate": 0.9,
+        "truncation_rate": 0.1,
+        "empty_rate": 0.0,
+    }
+    gates = exp16._gate_summary(
+        {"passed": True},
+        None,
+        evaluation,
+        {"status": "ok", "accuracy": 0.5},
+    )
+
+    assert gates["roundtrip_passed"] is True
+    assert gates["eval_ready"] is True
+    assert gates["recovery_ready"] is True
 
 
 def test_exp16_load_qa_rows_reads_the_repo_fixture():
