@@ -1507,6 +1507,7 @@ def run_restrain_suite(
     examples: Sequence[EvalExample],
     *,
     adapter: str | None = None,
+    mode: str = MODE_ADAPTER,
     n: int = 4,
     max_new_tokens: int = 32,
     temperature: float = 1.0,
@@ -1536,6 +1537,7 @@ def run_restrain_suite(
         return data_missing_report("restrain", "restrain received no examples.", examples=0)
     config = {
         "adapter": adapter,
+        "mode": mode,
         "n": int(n),
         "max_new_tokens": int(max_new_tokens),
         "temperature": float(temperature),
@@ -1620,6 +1622,7 @@ def run_restrain_suite(
     )
     report.update(
         {
+            "mode": mode,
             "n_examples": len(items),
             "n_rollouts": sum(len(row["answers"]) for row in per_example),
             "generation_failures": failures,
@@ -2101,6 +2104,11 @@ def run_suite(
             tokenizer,
             examples,
             adapter=adapter,
+            mode=(
+                MODE_STANDALONE
+                if standalone_shadow is not None
+                else MODE_ADAPTER
+            ),
             **kwargs,
         )
     return run_jitrl_suite(

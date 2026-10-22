@@ -1,8 +1,8 @@
 # exp17 真实语料/真实模型复评 harness（issue #47）
 
-一句话收束：**统一的 real-eval harness 已能在真实 GSM8K test 上跑 GKD/S2T、在 exp12 held-out 上跑 RESTRAIN，并在缺数据时对 JitRL 明确返回 `data_missing`；但本轮是 8/4 条样本、16 token、2-step/exp10 adapter 的冒烟，全部 `claims_gain=false`、`evidence=insufficient`，不能当作真实收益结论。完整 2–4 天复评未运行。**
+一句话收束：**real-eval harness 现在支持两条路径：adapter（`ShadowForCausalLM`）和 standalone（直接加载 exp16 导出的 recovered shadow）。在真实 GSM8K test 上，recovered `all` 模型的 shadow ppl 从旧 adapter 的 167,148 降到 3.771，S2T Hit@8 0.938 / Agree@1 0.516；但样本只有 8/4 条、16 token，全部 `claims_gain=false`、`evidence=insufficient`，不能当作真实收益结论。**
 
-状态：**MVP harness + goooinext 冒烟已跑通（2026-10-22）**；#2–#5 的完整真实复评（3 seeds、≥200 held-out、≥100 hard-case、真实反馈日志）未启动。
+状态：**MVP harness + adapter/standalone 冒烟已跑通（2026-10-22）**；#2–#5 的完整真实复评（3 seeds、≥200 held-out、≥100 hard-case、真实反馈日志）未启动。
 
 ## 修复后的评测口径（2026-10-22 code review）
 
@@ -17,6 +17,49 @@
 | 统一入口 | CLI 与 `run_suites` 共用 `shadow_lab.real_eval.run_suite` 与 `data_missing_report`；新增 suite 只需改 `real_eval`（`SUITES`/默认值/选项键/数据集映射/一个分支），CLI 不再维护第二套分派 |
 
 修复后已用同一批真实数据在 goooinext 重跑 GKD/S2T/RESTRAIN/JitRL；指标与修复前一致，报告现在包含 `hit_at_k`、`ppl_tokens/ppl_windows`、`memory_latency_ms_*`（JitRL data_missing 时为 null）。下表是修复后产物；S2T 的 `hit_at_8` 仅在 k=8 时作为弃用别名保留。
+
+## Standalone recovered shadow（2026-10-22）
+
+`--shadow-model-dir` 直接加载 exp16 导出的独立 shadow（例如 `~/exp16-full/runs/all/model`），不需要 repack 成 adapter。`--model` 仍是 base（GKD/S2T 用）；RESTRAIN 只需要 shadow。
+
+### 命令
+
+```bash
+# GKD：base 4B + recovered shadow
+PYTHONPATH=src python scripts/exp17_real_eval.py --suite gkd --dataset gsm8k \
+  --model ~/models/Qwen3-4B \
+  --shadow-model-dir ~/exp16-full/runs/all/model \
+  --limit 8 --smoke --device cuda --dtype bfloat16 \
+  --out runs-local/exp17/gkd-standalone
+
+# S2T：base 4B + recovered shadow
+PYTHONPATH=src python scripts/exp17_real_eval.py --suite s2t --dataset gsm8k \
+  --model ~/models/Qwen3-4B \
+  --shadow-model-dir ~/exp16-full/runs/all/model \
+  --limit 4 --smoke --k 8 --device cuda --dtype bfloat16 \
+  --out runs-local/exp17/s2t-standalone
+
+# RESTRAIN：只需要 recovered shadow
+PYTHONPATH=src python scripts/exp17_real_eval.py --suite restrain \
+  --dataset runs/exp12/heldout.jsonl \
+  --shadow-model-dir ~/exp16-full/runs/all/model \
+  --limit 8 --smoke --n 2 --device cuda --dtype bfloat16 \
+  --out runs-local/exp17/restrain-standalone
+```
+
+### 结果（goooinext，16 token 冒烟）
+
+| suite | adapter 冒烟 | recovered standalone | 说明 |
+|---|---|---|---|
+| GKD | joint 5.567 / shadow 167,148 / acc 0/8 | base ppl **4.891**、shadow ppl **3.771**、joint **5.222**、acc 0/8 | shadow ppl 从 167k 降到 3.77；acc 仍 0 是 16-token 预算太短 |
+| S2T | Hit@8 0.922 / Agree@1 0.500 | Hit@8 **0.938** / Agree@1 **0.516** | 64 token；提升很小，仍需 selector |
+| RESTRAIN | acc 0 / low consistency 1.0 / skip 0.875 | acc 0 / low consistency 1.0 / skip 0.875 | 16 token + 8 条，未改善 |
+| JitRL | data_missing | 未跑 | 仍缺真实反馈/记忆/n-best 后端 |
+
+- **GKD joint 口径不同**：standalone 的 `joint_ppl = exp(token-weighted mean(base CE + 0.05 * shadow CE)) = base_ppl * shadow_ppl ** 0.05`，base 是纯 4B，不经过 injection/update；不要和 adapter 路径的 `base_shadow` joint 直接横比。`shadow_ppl` 才是 recovered shadow 的关键指标。
+- **S2T 仍是 base-prefix 诊断**：Hit@K 高、Agree@1 约 0.5，和 exp11 的结论一致；recovered shadow 让覆盖略升，但没有解决选择问题。
+- **RESTRAIN 没有改善**：production QA 的 16 条 fixture 与 GSM8K 指令 SFT 不同分布；16 token 下 87.5% examples 仍不可聚类。
+- 所有结果仍是 `claims_gain=false`、`evidence=insufficient`；这是 smoke，不是 2–4 天 campaign。
 
 ## 实验设置
 

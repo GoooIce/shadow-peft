@@ -1326,6 +1326,7 @@ def test_run_restrain_suite_accepts_standalone_shadow_as_generator() -> None:
         _tiny_causal_lm(1),
         FixedAnswerTokenizer("判定：返修。"),
         [_example(expected="rework")],
+        mode="standalone",
         n=2,
         max_new_tokens=2,
         temperature=0.0,
@@ -1335,7 +1336,9 @@ def test_run_restrain_suite_accepts_standalone_shadow_as_generator() -> None:
 
     assert report.status == "ok"
     assert report.metrics["accuracy"] == 1.0
+    assert report.metrics["mode"] == "standalone"
     assert report.config["adapter"] is None
+    assert report.config["mode"] == "standalone"
 
 
 def test_cli_standalone_flags_are_mutually_exclusive() -> None:
