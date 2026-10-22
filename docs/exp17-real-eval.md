@@ -1,8 +1,8 @@
 # exp17 真实语料/真实模型复评 harness（issue #47）
 
-一句话收束：**real-eval harness 现在支持两条路径：adapter（`ShadowForCausalLM`）和 standalone（直接加载 exp16 导出的 recovered shadow）。在真实 GSM8K test 上，recovered `all` 模型的 shadow ppl 从旧 adapter 的 167,148 降到 3.771，S2T Hit@8 0.938 / Agree@1 0.516；但样本只有 8/4 条、16 token，全部 `claims_gain=false`、`evidence=insufficient`，不能当作真实收益结论。**
+一句话收束：**real-eval harness 现在支持两条路径：adapter（`ShadowForCausalLM`）和 standalone（直接加载 exp16 导出的 recovered shadow）。在真实 GSM8K test 上，recovered `all` 模型 100 条评测：shadow ppl **3.600**（旧 adapter 167,148）、任务准确率 **36.0%**；S2T 20 prompts / 320 token：Hit@8 **0.941**、Agree@1 **0.569**；RESTRAIN 8 条 ×4 rollouts 仍是 accuracy 0 / skip 1.0。全部 `claims_gain=false`、`evidence=insufficient`，不能当作完整 campaign 结论。**
 
-状态：**MVP harness + adapter/standalone 冒烟已跑通（2026-10-22）**；#2–#5 的完整真实复评（3 seeds、≥200 held-out、≥100 hard-case、真实反馈日志）未启动。
+状态：**adapter/standalone 路径 + 100/20/8 条中等规模评测已跑通（2026-10-22）**；#2–#5 的完整真实复评（3 seeds、≥200 held-out、≥100 hard-case、真实反馈日志、baseline 对照）未启动。
 
 ## 修复后的评测口径（2026-10-22 code review）
 
@@ -60,6 +60,20 @@ PYTHONPATH=src python scripts/exp17_real_eval.py --suite restrain \
 - **S2T 仍是 base-prefix 诊断**：Hit@K 高、Agree@1 约 0.5，和 exp11 的结论一致；recovered shadow 让覆盖略升，但没有解决选择问题。
 - **RESTRAIN 没有改善**：production QA 的 16 条 fixture 与 GSM8K 指令 SFT 不同分布；16 token 下 87.5% examples 仍不可聚类。
 - 所有结果仍是 `claims_gain=false`、`evidence=insufficient`；这是 smoke，不是 2–4 天 campaign。
+
+### 结果（中等规模：GKD 100 / S2T 20 / RESTRAIN 8×4）
+
+| suite | 规模 | 指标 |
+|---|---|---|
+| GKD | GSM8K test 100 条，18,360 ppl token / 100 窗口，256 token 生成 | base ppl **4.523**、shadow ppl **3.600**、joint **4.820**、task accuracy **36.0%** [26.0, 44.0]，n_graded=100 |
+| S2T | 20 prompts / 320 token，K=8 | Hit@8 **0.941** [0.909, 0.966]、Agree@1 **0.569** [0.516, 0.622]、`selector_gain=null` |
+| RESTRAIN | exp12 held-out 8 条 ×4 rollouts，32 token | accuracy **0.0**、low consistency **1.0**、skip rate **1.0**、mean consistency 0.162、answer entropy 2.0、top1 share 0.25 |
+| JitRL | 未跑 | 仍缺真实反馈/记忆/n-best 后端 |
+
+- GKD 的 36.0% 是 **256 token** 预算；exp16 eval 的 40% 是 **512 token**，两者不能直接横比。shadow ppl 3.600 仍明显低于 base ppl 4.523，说明 recovered shadow 已拟合 GSM8K 分布。
+- S2T 从 4 prompts 的 0.938/0.516 变成 20 prompts 的 0.941/0.569；覆盖稳定在 0.94，Agree@1 仍只有约 0.57，选择问题没有解决。
+- RESTRAIN 在 32 token 下 **8/8 不可聚类**，skip rate 从 0.875 升到 1.0；16 条产线 QA 仍然不能靠这个 shadow 修复。
+- 证据门槛：GKD 100 < 200、S2T 20 < 200、RESTRAIN 8 < 100，所以全部 `evidence=insufficient`；没有 3 seeds、baseline-vs-treatment 或真实反馈日志。
 
 ## 实验设置
 
@@ -127,36 +141,7 @@ PYTHONPATH=/home/goooice/p4647-run/src \
 ... --suite s2t ... --selector runs/exp11/s2t-selector
 ```
 
-## Standalone recovered shadow（exp16 导出）
-
-给 harness 增加了一条不需要把 exp16 导出的 shadow repack 成 adapter 的路径：直接加载
-`AutoModelForCausalLMWithHiddenProjection`（例如 `~/exp16-full/runs/all/model`），base 4B
-单独加载，只负责 base logits / base perplexity。GKD/S2T/RESTRAIN 支持 standalone；JitRL
-不受影响。
-
-### 命令
-
-```bash
-# GKD：--model 是 base（Qwen3-4B），--shadow-model-dir 是 recovered shadow
-PYTHONPATH=src python scripts/exp17_real_eval.py \
-  --suite gkd --dataset gsm8k \
-  --model /path/Qwen3-4B \
-  --shadow-model-dir ~/exp16-full/runs/all/model \
-  --limit 50 --token-budget 8192 --out runs-local/exp17/gkd-standalone
-
-# S2T：同一组 base + recovered shadow；Hit@K/Agree@1 来自两次独立前向
-PYTHONPATH=src python scripts/exp17_real_eval.py \
-  --suite s2t --dataset gsm8k \
-  --model /path/Qwen3-4B \
-  --shadow-model-dir ~/exp16-full/runs/all/model \
-  --limit 50 --k 8 --out runs-local/exp17/s2t-standalone
-
-# RESTRAIN：只需要 recovered shadow 作为生成模型，不需要 --model
-PYTHONPATH=src python scripts/exp17_real_eval.py \
-  --suite restrain --dataset runs/exp12/heldout.jsonl \
-  --shadow-model-dir ~/exp16-full/runs/all/model \
-  --limit 8 --n 4 --out runs-local/exp17/restrain-standalone
-```
+## Standalone metric semantics and adapter comparison
 
 `--shadow-model-dir` 与 `--shadow-ckpt` 互斥（argparse 直接拒绝）；`--selector` 和
 `--shadow-model` 只适用于 adapter 路径，standalone 下会报参数错误。JitRL 仍走
@@ -182,9 +167,6 @@ PYTHONPATH=src python scripts/exp17_real_eval.py \
 | S2T | `diagnose`：一次前向同时取 `logits` 与初始 `shadow_logits` | `standalone_s2t_diagnose`：base/shadow 独立前向 |
 | 显存 | base + shadow 包装 | base 4B 与 shadow 4B 同时驻留，单卡需放得下两份权重 |
 | 吞吐 | 单次前向 | S2T 无 KV cache，每 token 两次前向；200 prompt × 32 token 明显慢于 adapter 路径，先用 `--limit`/`--max-new-tokens` 冒烟 |
-
-本轮只加入代码与 tiny-model 单测（`tests/lab/test_real_eval.py`），**没有在 GB10 上用真实
-recovered 模型跑过**，因此这里不给出 standalone 的任何指标数字。
 
 ## 结果
 
