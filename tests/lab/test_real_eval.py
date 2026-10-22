@@ -1254,16 +1254,88 @@ def test_run_s2t_suite_standalone_reports_hit_and_agree() -> None:
     assert missing_base.status == "data_missing"
     assert "base" in missing_base.notes[0].lower()
 
-    with pytest.raises(ValueError, match="selector"):
+    class _NeverScored:
+        def score(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("selector must not be scored without a projection")
+
+    with pytest.raises(ValueError, match="capture_selector"):
         run_s2t_suite(
             None,
             CharTokenizer(),
             examples,
             base_model=base,
             standalone_shadow=ScriptedLogitsModel([7, 11, 12]),
-            selector="selector-dir",
+            selector=_NeverScored(),
             max_new_tokens=1,
         )
+
+
+def test_run_s2t_suite_standalone_selector_gain_from_saved_selector(
+    tmp_path: Path,
+) -> None:
+    from shadow_lab.s2t_selector import SelectorHead, save_selector
+
+    base = _tiny_causal_lm(0)
+    shadow = _projected_shadow_model(1)
+    head = SelectorHead(shadow.lm_head.weight.shape[1], mlp_hidden=8)
+    save_selector(head, tmp_path / "selector", k=8)
+
+    report = run_s2t_suite(
+        None,
+        CharTokenizer(),
+        [_example(prompt="a")],
+        base_model=base,
+        standalone_shadow=shadow,
+        selector=str(tmp_path / "selector"),
+        max_new_tokens=1,
+        k=8,
+        n_boot=5,
+    )
+
+    assert report.status == "ok"
+    assert report.metrics["mode"] == "standalone"
+    assert report.metrics["n_selector_tokens"] == 1
+    assert report.metrics["selector_gain"] == pytest.approx(
+        report.metrics["selector_agree_at_1"] - report.metrics["greedy_agree_at_1"]
+    )
+    assert report.metrics["random_agree_at_1"] <= report.metrics["oracle_agree_at_1"]
+    assert "post-projection" in " ".join(report.notes)
+
+
+def test_standalone_s2t_diagnose_captures_post_projection_hidden() -> None:
+    base = _tiny_causal_lm(0)
+    shadow = _projected_shadow_model(1)
+    tokenizer = CharTokenizer()
+
+    records, collected = standalone_s2t_diagnose(
+        base,
+        shadow,
+        tokenizer,
+        [{"prompt_id": "p1", "prompt": "ab", "task": "toy"}],
+        k=8,
+        max_new_tokens=2,
+        capture_selector=True,
+    )
+
+    assert len(records) == len(collected) == 2
+    example = collected[0]
+    assert example.h_t.shape == (shadow.lm_head.weight.shape[1],)
+    assert example.h_t.dtype == torch.float32
+    assert example.candidate_ids.shape == (8,)
+    assert example.base_top1 == records[0]["base_top1"]
+    assert example.shadow_top1 == records[0]["shadow_topk_ids"][0]
+    assert example.hit == (example.base_top1 in example.candidate_ids.tolist())
+
+    encoded = tokenizer("ab", return_tensors="pt")
+    with torch.no_grad():
+        outputs = shadow(
+            input_ids=encoded["input_ids"],
+            attention_mask=encoded.get("attention_mask"),
+            use_cache=False,
+            output_hidden_states=True,
+        )
+        expected = shadow.shadow_hidden_projection(outputs.hidden_states[-1])[0, -1]
+    assert torch.allclose(example.h_t, expected.float().cpu(), atol=1e-6)
 
 
 def test_run_suites_passes_standalone_shadow_to_model_suites() -> None:
@@ -1381,7 +1453,7 @@ def test_cli_standalone_rejects_adapter_only_flags(
         cli.main(
             [
                 "--suite",
-                "s2t",
+                "gkd",
                 "--shadow-model-dir",
                 str(tmp_path / "shadow"),
                 "--selector",
@@ -1390,6 +1462,23 @@ def test_cli_standalone_rejects_adapter_only_flags(
                 str(out),
             ]
         )
+    capsys.readouterr()
+
+    # standalone s2t accepts --selector; the missing shadow dir is reported as
+    # data_missing rather than a parser error.
+    exit_code = cli.main(
+        [
+            "--suite",
+            "s2t",
+            "--shadow-model-dir",
+            str(tmp_path / "missing-shadow"),
+            "--selector",
+            "selector-dir",
+            "--out",
+            str(out),
+        ]
+    )
+    assert exit_code == 0
     capsys.readouterr()
 
 

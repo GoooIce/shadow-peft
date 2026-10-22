@@ -776,7 +776,8 @@ def standalone_s2t_diagnose(
     max_new_tokens: int = 32,
     seed: int = 0,
     task_key: str = "task",
-) -> list[dict[str, Any]]:
+    capture_selector: bool = False,
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], list[Any]]:
     """Record base top-1 vs. standalone-shadow top-K during greedy decoding.
 
     Same record contract as :func:`shadow_lab.s2t_diagnose.diagnose`, but the
@@ -792,6 +793,12 @@ def standalone_s2t_diagnose(
     ``task_key`` (default ``"task"``); blank prompts are skipped. Decoding stops
     after ``max_new_tokens`` or when the base emits ``tokenizer.eos_token_id``
     (the EOS token is recorded). ``seed`` seeds torch for auditability.
+
+    ``capture_selector=True`` additionally returns ``SelectorExample`` rows
+    carrying the post-projection shadow hidden (the vector the exported
+    ``lm_head`` consumes), so a selector can be trained or scored on the same
+    base-prefix tokens. It needs an exported shadow with
+    ``shadow_hidden_projection`` and ``output_hidden_states`` support.
     """
 
     if base_model is None or shadow_model is None:
@@ -834,6 +841,7 @@ def standalone_s2t_diagnose(
         shadow_model.eval()
     eos_token_id = getattr(tokenizer, "eos_token_id", None)
     records: list[dict[str, Any]] = []
+    selector_examples: list[Any] = []
     try:
         with torch.inference_mode():
             for spec in specs:
@@ -850,11 +858,32 @@ def standalone_s2t_diagnose(
                         attention_mask=attention_mask,
                         use_cache=False,
                     ).logits[0, -1]
-                    shadow_logits = shadow_model(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        use_cache=False,
-                    ).logits[0, -1]
+                    hidden_t = None
+                    if capture_selector:
+                        shadow_outputs = shadow_model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            use_cache=False,
+                            output_hidden_states=True,
+                        )
+                        shadow_logits = shadow_outputs.logits[0, -1]
+                        hidden_states = getattr(shadow_outputs, "hidden_states", None)
+                        projection = getattr(
+                            shadow_model, "shadow_hidden_projection", None
+                        )
+                        if not hidden_states or projection is None:
+                            raise ValueError(
+                                "capture_selector needs an exported shadow with "
+                                "output_hidden_states and shadow_hidden_projection"
+                            )
+                        # Post-projection hidden: the vector lm_head consumes.
+                        hidden_t = projection(hidden_states[-1])[0, -1]
+                    else:
+                        shadow_logits = shadow_model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            use_cache=False,
+                        ).logits[0, -1]
                     record = _record_step(
                         prompt=spec,
                         position=position,
@@ -865,6 +894,30 @@ def standalone_s2t_diagnose(
                     )
                     record["shadow_hidden"] = STANDALONE_SHADOW_HIDDEN
                     records.append(record)
+                    if capture_selector:
+                        from shadow_lab.s2t_selector import SelectorExample
+
+                        candidate_ids = torch.tensor(
+                            record["shadow_topk_ids"], dtype=torch.long
+                        )
+                        candidate_logits = torch.topk(
+                            shadow_logits.float(), k=int(candidate_ids.numel())
+                        ).values
+                        selector_examples.append(
+                            SelectorExample(
+                                prompt_id=spec.prompt_id,
+                                task=spec.task,
+                                position=position,
+                                h_t=hidden_t.detach().to("cpu", torch.float32),
+                                candidate_ids=candidate_ids,
+                                candidate_logits=candidate_logits.detach().to(
+                                    "cpu", torch.float32
+                                ),
+                                base_top1=int(record["base_top1"]),
+                                shadow_top1=int(candidate_ids[0]),
+                                hit=bool(int(record["base_top1"]) in record["shadow_topk_ids"]),
+                            )
+                        )
                     next_token = record["base_top1"]
                     if eos_token_id is not None and next_token == eos_token_id:
                         break
@@ -897,6 +950,8 @@ def standalone_s2t_diagnose(
             base_model.train(was_training["base"])
         if hasattr(shadow_model, "train"):
             shadow_model.train(was_training["shadow"])
+    if capture_selector:
+        return records, selector_examples
     return records
 
 
@@ -1199,46 +1254,31 @@ def _selector_gain(
     model: Any,
     selector: Any,
     collected: Sequence[Any],
+    *,
+    candidate_weight: Any = None,
 ) -> dict[str, Any]:
-    """Selector vs. shadow-greedy Agree@1 on the same base-prefix tokens."""
+    """Selector vs. shadow-greedy Agree@1 on the same base-prefix tokens.
 
-    from shadow_lab.s2t_selector import select_candidate
+    ``candidate_weight`` defaults to ``model.shadow_lm_head.weight`` (adapter
+    path); the standalone path passes the exported shadow's
+    ``lm_head.weight``. ``random_agree_at_1`` is the chance-level pick inside
+    the same candidate set (hit/K) and ``oracle_agree_at_1`` is coverage (the
+    base top-1 is in the shadow top-K), so selection can be read against both
+    a chance and a coverage ceiling.
+    """
 
-    weight = getattr(getattr(model, "shadow_lm_head", None), "weight", None)
-    if weight is None or getattr(weight, "ndim", None) != 2:
-        raise ValueError("selector scoring needs model.shadow_lm_head.weight")
-    device = weight.device
-    if callable(getattr(selector, "to", None)):
-        selector.to(device)
-    if callable(getattr(selector, "eval", None)):
-        selector.eval()
-    torch = _import_torch()
-    selector_agrees = 0
-    greedy_agrees = 0
-    with torch.inference_mode():
-        for example in collected:
-            candidate_ids = example.candidate_ids.to(device)
-            hidden = example.h_t.to(device=device, dtype=weight.dtype)
-            scores = selector.score(hidden, candidate_ids, weight)
-            selected = int(select_candidate(scores, candidate_ids).item())
-            selector_agrees += int(selected == example.base_top1)
-            greedy_agrees += int(example.shadow_top1 == example.base_top1)
-    n_tokens = len(collected)
-    if not n_tokens:
-        return {
-            "selector_agree_at_1": None,
-            "greedy_agree_at_1": None,
-            "selector_gain": None,
-            "n_selector_tokens": 0,
-        }
-    selector_rate = selector_agrees / n_tokens
-    greedy_rate = greedy_agrees / n_tokens
-    return {
-        "selector_agree_at_1": selector_rate,
-        "greedy_agree_at_1": greedy_rate,
-        "selector_gain": selector_rate - greedy_rate,
-        "n_selector_tokens": n_tokens,
-    }
+    from shadow_lab.s2t_selector import selector_agreement
+
+    if candidate_weight is None:
+        candidate_weight = getattr(
+            getattr(model, "shadow_lm_head", None), "weight", None
+        )
+    if candidate_weight is None or getattr(candidate_weight, "ndim", None) != 2:
+        raise ValueError(
+            "selector scoring needs a 2-D candidate weight table "
+            "(model.shadow_lm_head.weight or an explicit candidate_weight)"
+        )
+    return selector_agreement(selector, collected, candidate_weight)
 
 
 def run_s2t_suite(
@@ -1270,8 +1310,9 @@ def run_s2t_suite(
     Passing ``standalone_shadow`` switches to the recovered-shadow path:
     :func:`standalone_s2t_diagnose` compares the base model's top-1 with an
     independent forward of the exported shadow, so no adapter/injection is
-    involved. ``base_model`` is required and ``selector`` is not supported
-    (a selector scores injected shadow hiddens).
+    involved. ``base_model`` is required. ``selector`` scores the exported
+    shadow's post-projection hidden against ``lm_head.weight``; on the adapter
+    path it scores the injected shadow hidden against ``shadow_lm_head.weight``.
     """
 
     standalone = standalone_shadow is not None
@@ -1283,11 +1324,6 @@ def run_s2t_suite(
                 "the recovered shadow comes from --shadow-model-dir.",
                 examples=len(examples),
                 metrics={"k": int(k)},
-            )
-        if selector is not None:
-            raise ValueError(
-                "s2t standalone does not support --selector: selector heads "
-                "score injected shadow hiddens from a ShadowForCausalLM."
             )
     elif model is None or tokenizer is None:
         return data_missing_report(
@@ -1331,15 +1367,30 @@ def run_s2t_suite(
     selector_head = None
     selector_examples: list[Any] = []
     if standalone:
-        records = standalone_s2t_diagnose(
-            base_model,
-            standalone_shadow,
-            tokenizer,
-            prompts,
-            max_new_tokens=max_new_tokens,
-            k=k,
-            seed=seed,
-        )
+        if selector is None:
+            records = standalone_s2t_diagnose(
+                base_model,
+                standalone_shadow,
+                tokenizer,
+                prompts,
+                max_new_tokens=max_new_tokens,
+                k=k,
+                seed=seed,
+            )
+        else:
+            selector_head = _load_selector_head(
+                selector, device=_device_of(standalone_shadow)
+            )
+            records, selector_examples = standalone_s2t_diagnose(
+                base_model,
+                standalone_shadow,
+                tokenizer,
+                prompts,
+                max_new_tokens=max_new_tokens,
+                k=k,
+                seed=seed,
+                capture_selector=True,
+            )
     elif selector is None:
         records = diagnose(
             model,
@@ -1428,6 +1479,8 @@ def run_s2t_suite(
         "selector_gain": None,
         "selector_agree_at_1": None,
         "greedy_agree_at_1": None,
+        "random_agree_at_1": None,
+        "oracle_agree_at_1": None,
         "n_selector_tokens": 0,
     }
     if standalone:
@@ -1437,10 +1490,29 @@ def run_s2t_suite(
         metrics["hit_at_8_ci"] = metrics["hit_at_k_ci"]
         notes.append("hit_at_8 is a deprecated alias of hit_at_k (k == 8).")
     if selector_head is not None:
-        metrics.update(_selector_gain(model, selector_head, selector_examples))
+        if standalone:
+            metrics.update(
+                _selector_gain(
+                    None,
+                    selector_head,
+                    selector_examples,
+                    candidate_weight=standalone_shadow.lm_head.weight,
+                )
+            )
+            notes.append(
+                "selector_gain = selector Agree@1 - shadow-greedy Agree@1 on "
+                "the same base-prefix tokens; the scorer sees the exported "
+                "shadow's post-projection hidden and lm_head rows."
+            )
+        else:
+            metrics.update(_selector_gain(model, selector_head, selector_examples))
+            notes.append(
+                "selector_gain = selector Agree@1 - shadow-greedy Agree@1 on the "
+                "same base-prefix tokens; scorer sees the initial shadow hidden."
+            )
         notes.append(
-            "selector_gain = selector Agree@1 - shadow-greedy Agree@1 on the "
-            "same base-prefix tokens; scorer sees the initial shadow hidden."
+            "random_agree_at_1 is the chance-level pick inside the same "
+            "candidate set (hit/K); oracle_agree_at_1 is coverage (hit rate)."
         )
         notes.append(
             "selector mode keeps only captured candidates, so rank_all_* is "
@@ -1448,7 +1520,7 @@ def run_s2t_suite(
         )
         if use_cache:
             notes.append(
-                "use_cache is ignored with selector: collect_selector_examples "
+                "use_cache is ignored with selector: the diagnostic "
                 "recomputes the prefix each step."
             )
     else:

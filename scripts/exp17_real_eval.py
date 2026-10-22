@@ -141,7 +141,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "S2T saved selector directory (selector.safetensors + "
-            "selector_config.json); adds selector_gain."
+            "selector_config.json); adds selector_gain on both the adapter and "
+            "the standalone recovered-shadow path."
         ),
     )
     parser.add_argument(
@@ -501,11 +502,8 @@ def main(argv: list[str] | None = None) -> int:
                 "--shadow-model applies to --shadow-ckpt only; standalone mode "
                 "loads --shadow-model-dir"
             )
-        if args.selector:
-            parser.error(
-                "--selector requires a --shadow-ckpt adapter; standalone s2t "
-                "has no selector head"
-            )
+        if args.selector and args.suite not in ("s2t", "all"):
+            parser.error("--selector only applies to the s2t suite")
     result = _run(args)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
     return 0

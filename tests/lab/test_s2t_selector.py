@@ -39,6 +39,7 @@ from shadow_lab.s2t_selector import (  # noqa: E402
     load_selector,
     save_selector,
     select_candidate,
+    selector_agreement,
     selector_loss,
     train_selector,
 )
@@ -561,3 +562,47 @@ def test_load_selector_rejects_an_unknown_config_version(tmp_path):
 
     with pytest.raises(ValueError, match="version"):
         load_selector(tmp_path)
+
+
+def test_selector_agreement_reports_greedy_random_and_oracle() -> None:
+    head = SelectorHead(hidden_size=4, mlp_hidden=8)
+    for parameter in head.parameters():
+        parameter.data.zero_()
+    examples = [
+        SelectorExample(
+            prompt_id="p0",
+            task="synthetic",
+            position=0,
+            h_t=torch.zeros(4),
+            candidate_ids=torch.tensor([1, 2, 3, 4]),
+            candidate_logits=torch.linspace(1.0, 0.0, 4),
+            base_top1=1,
+            shadow_top1=1,
+            hit=True,
+        ),
+        SelectorExample(
+            prompt_id="p0",
+            task="synthetic",
+            position=1,
+            h_t=torch.zeros(4),
+            candidate_ids=torch.tensor([5, 6, 7, 8]),
+            candidate_logits=torch.linspace(1.0, 0.0, 4),
+            base_top1=9,
+            shadow_top1=5,
+            hit=False,
+        ),
+    ]
+    weight = torch.randn(16, 4)
+
+    agreement = selector_agreement(head, examples, weight)
+
+    assert agreement["n_selector_tokens"] == 2
+    assert agreement["selector_agree_at_1"] == pytest.approx(0.5)
+    assert agreement["greedy_agree_at_1"] == pytest.approx(0.5)
+    assert agreement["selector_gain"] == pytest.approx(0.0)
+    assert agreement["random_agree_at_1"] == pytest.approx(0.125)
+    assert agreement["oracle_agree_at_1"] == pytest.approx(0.5)
+
+    empty = selector_agreement(head, [], weight)
+    assert empty["n_selector_tokens"] == 0
+    assert empty["selector_agree_at_1"] is None

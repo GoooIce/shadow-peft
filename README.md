@@ -699,10 +699,11 @@ The synthetic run, λ sweep, per-task metrics, caveats and the replay evidence g
 
 ---
 
-## Shadow-only recovery and real evaluation (exp16/exp17)
+## Shadow-only recovery and real evaluation (exp16/exp17/exp18)
 
-- **exp16 shadow-only recovery**：export round-trip、可训练范围、shadow-only 指令 SFT 与 GSM8K 评测。2k×3 SFT 把影子从 0% 恢复到 **36–40%**（原生 0.6B 47%，ratio 0.766/0.851），格式 96–99%，GSM8K 恢复门禁通过；QA 16 未改善、exp7 ppl 未测。See [docs/exp16-shadow-only-recovery.md](docs/exp16-shadow-only-recovery.md).
-- **exp17 real-corpus eval**：GKD/S2T/RESTRAIN/JitRL 的统一复评 harness，支持 adapter 和 standalone recovered shadow（`--shadow-model-dir`）。证据门槛规模：GKD 200 条 GSM8K 的 shadow ppl **3.524** / 准确率 **41.0%**（`backbone` 3.594 / 39.0%），S2T 200 prompts Hit@8 **0.923** / Agree@1 **0.562**，RESTRAIN 100 条 GSM8K 结构化题 accuracy **1.75%** / low consistency **98–100%**（no-go）。GKD/S2T/RESTRAIN 均 `evidence_collected`；JitRL 仍 `data_missing`，`claims_gain=false`。See [docs/exp17-real-eval.md](docs/exp17-real-eval.md).
+- **exp16 shadow-only recovery**：export round-trip、可训练范围、shadow-only 指令 SFT 与 GSM8K 评测。2k×3 SFT 把影子从 0% 恢复到 **36–40%**（原生 0.6B 47%，ratio 0.766/0.851），格式 96–99%，GSM8K 恢复门禁通过；`all` 臂 3 个训练 seed 在同一 100 条上为 **40/39/36%**（均值 38.3 ± 2.1 pp）。QA 16 未改善、exp7 ppl 未测。See [docs/exp16-shadow-only-recovery.md](docs/exp16-shadow-only-recovery.md).
+- **exp17 real-corpus eval**：GKD/S2T/RESTRAIN/JitRL 的统一复评 harness，支持 adapter 和 standalone recovered shadow（`--shadow-model-dir`）。证据门槛规模（`all` 臂 3 个 SFT seed）：GKD 200 条 GSM8K 的 shadow ppl **3.524 / 3.515 / 3.546**、准确率 **41.0 / 36.5 / 34.0%**（均值 37.2%）；S2T 200 prompts Hit@8 **0.923 / 0.927 / 0.923**、Agree@1 **0.562 / 0.568 / 0.550**；RESTRAIN 100 条 GSM8K 结构化题 accuracy **1.75%** / low consistency **98–100%**（no-go）。GKD/S2T/RESTRAIN 均 `evidence_collected`；JitRL 仍 `data_missing`，`claims_gain=false`。See [docs/exp17-real-eval.md](docs/exp17-real-eval.md).
+- **exp18 S2T selector**：在 recovered standalone shadow 上重训 selector（GSM8K train 100 prompts / 1,600 token，327,809 参数），3 个训练 seed 在 200 条 held-out 上全部为负（Agree@1 0.543/0.525/0.521 vs greedy 0.562，gain 均值 −0.032）；**no-go，不部署**。See [docs/exp18-s2t-selector.md](docs/exp18-s2t-selector.md).
 
 ```bash
 # Export round-trip + 2-step SFT smoke (goooinext; needs the 4B/H4B/exp7 assets)
@@ -716,6 +717,15 @@ PYTHONPATH=src python scripts/exp16_shadow_only.py run \
 PYTHONPATH=src python scripts/exp17_real_eval.py --suite gkd --dataset gsm8k \
   --model ~/models/Qwen3-0.6B --shadow-ckpt runs/exp10/smoke/fresh-adapter \
   --limit 8 --smoke --device cuda --dtype bfloat16 --out runs-local/exp17/gkd
+
+# S2T selector: collect GSM8K-train, train, then evaluate on GSM8K test
+PYTHONPATH=src python scripts/exp18_s2t_selector.py \
+  --model ~/models/Qwen3-4B --shadow-model-dir ~/exp16-full/runs/all/model \
+  --train-limit 100 --max-new-tokens 16 --epochs 50 --out runs-local/exp18/selector
+PYTHONPATH=src python scripts/exp17_real_eval.py --suite s2t --dataset gsm8k \
+  --model ~/models/Qwen3-4B --shadow-model-dir ~/exp16-full/runs/all/model \
+  --selector runs-local/exp18/selector/selector --limit 200 --max-new-tokens 16 \
+  --k 8 --out runs-local/exp18/eval-200
 ```
 
 ---
