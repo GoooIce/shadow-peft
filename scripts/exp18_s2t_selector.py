@@ -11,10 +11,13 @@ its post-projection hidden and reports the same four references:
 - ``selector_agree_at_1``: the trained head's pick,
 - ``oracle_agree_at_1``: coverage (base top-1 anywhere in top-K).
 
-Training prompts come from the GSM8K **train** split; the exp17 S2T evaluation
-scores the **test** split, so the two never share a prompt. Collection advances
-on the base top-1 exactly like the diagnostic, and the selector sees only the
-shadow hidden + candidate embeddings at inference time.
+Training prompts come from the GSM8K **train** split by default. A larger,
+deployment-like source is the exp7 corpus (``--source exp7-corpus``): the
+script samples QA documents from the local parquet archive, truncates each to
+``--prompt-tokens`` and holds out a disjoint slice (``--eval-limit``) that is
+written as ``eval_prompts.jsonl`` for exp17. Collection advances on the base
+top-1 exactly like the diagnostic, and the selector sees only the shadow
+hidden + candidate embeddings at inference time.
 
 Example (GB10)::
 
@@ -37,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 import time
 from pathlib import Path
@@ -50,9 +54,9 @@ REPORT_FILENAME = "train_report.json"
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Collect GSM8K-train selector examples from the recovered "
-            "standalone shadow, train a SelectorHead, and write it beside the "
-            "run metadata."
+            "Collect selector examples from the recovered standalone shadow, "
+            "train a SelectorHead, and write it beside the run metadata. "
+            "Supports GSM8K train and the larger exp7 parquet corpus."
         )
     )
     parser.add_argument("--model", required=True, help="Base model path (Qwen3-4B).")
@@ -60,6 +64,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--shadow-model-dir",
         required=True,
         help="exp16 exported standalone shadow (e.g. ~/exp16-full/runs/all/model).",
+    )
+    parser.add_argument(
+        "--source",
+        choices=("gsm8k", "exp7-corpus"),
+        default="gsm8k",
+        help="Training prompt source (default: gsm8k).",
+    )
+    parser.add_argument(
+        "--corpus-root",
+        default="~/data/exp7-corpus/main",
+        help="exp7-corpus directory containing manifest.json and shard-*.parquet.",
+    )
+    parser.add_argument(
+        "--corpus-subsets",
+        default="en_qa,zh_qa",
+        help="Comma-separated exp7-corpus subsets to sample (default: en_qa,zh_qa).",
+    )
+    parser.add_argument(
+        "--prompt-tokens",
+        type=int,
+        default=64,
+        help="Truncate each corpus document to this many prompt tokens.",
+    )
+    parser.add_argument(
+        "--eval-limit",
+        type=int,
+        default=0,
+        help=(
+            "Held-out prompts written to eval_prompts.jsonl (exp7-corpus "
+            "requires >0; GSM8K can use its own test split instead)."
+        ),
     )
     parser.add_argument(
         "--train-split",
@@ -96,8 +131,105 @@ def _resolve_smoke(args: argparse.Namespace) -> None:
     if not args.smoke:
         return
     args.train_limit = min(args.train_limit, 4)
+    if args.eval_limit:
+        args.eval_limit = min(args.eval_limit, 2)
     args.max_new_tokens = min(args.max_new_tokens, 4)
     args.epochs = min(args.epochs, 2)
+
+
+def _load_corpus_examples(
+    root: str | Path,
+    subsets: list[str],
+    tokenizer: Any,
+    *,
+    train_limit: int,
+    eval_limit: int,
+    prompt_tokens: int,
+    seed: int,
+) -> tuple[list[Any], list[Any]]:
+    """Sample train/eval prompts from the exp7 parquet corpus.
+
+    Documents are selected by ``subset`` and shuffled with ``seed``; the first
+    ``train_limit`` become training prompts and the next ``eval_limit`` are a
+    disjoint held-out slice. Each document is truncated to ``prompt_tokens``
+    (after a cheap character cap so a 1k-token doc is not tokenized whole).
+    The split is by document, so no held-out prompt appears in training.
+    """
+
+    import pyarrow.parquet as pq
+
+    from shadow_lab.real_eval import EvalExample
+
+    root_path = Path(root).expanduser()
+    manifest_path = root_path / "manifest.json"
+    if not manifest_path.is_file():
+        raise SystemExit(f"corpus manifest not found: {manifest_path}")
+    if prompt_tokens < 1:
+        raise SystemExit("--prompt-tokens must be >= 1")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    shards = [
+        shard
+        for shard in manifest.get("shards", [])
+        if str(shard.get("subset")) in set(subsets)
+    ]
+    if not shards:
+        raise SystemExit(
+            f"no shards for subsets {subsets} under {root_path}"
+        )
+
+    docs: list[tuple[str, str, str]] = []
+    for shard in sorted(shards, key=lambda item: str(item.get("path"))):
+        table = pq.read_table(shard["path"], columns=["subset", "uid", "text"])
+        for row in table.to_pylist():
+            text = str(row.get("text") or "").strip()
+            if not text:
+                continue
+            docs.append((str(row.get("subset")), str(row.get("uid")), text))
+    random.Random(seed).shuffle(docs)
+
+    needed = train_limit + eval_limit
+    if len(docs) < needed:
+        raise SystemExit(
+            f"corpus has {len(docs)} documents for subsets {subsets}, "
+            f"need {needed} (train {train_limit} + eval {eval_limit})"
+        )
+
+    def make_example(row: tuple[str, str, str]) -> Any:
+        subset, uid, text = row
+        # Cap characters first; Chinese docs can be close to one token/char.
+        capped = text[: max(512, prompt_tokens * 8)]
+        ids = tokenizer(capped, add_special_tokens=False)["input_ids"][
+            :prompt_tokens
+        ]
+        prompt = tokenizer.decode(ids, skip_special_tokens=True).strip()
+        return EvalExample(
+            id=f"exp7-{subset}-{uid}",
+            prompt=prompt,
+            task=f"corpus_{subset}",
+            metadata={
+                "source": "exp7-corpus",
+                "subset": subset,
+                "uid": uid,
+            },
+        )
+
+    selected = docs[:needed]
+    train: list[Any] = []
+    for row in selected[:train_limit]:
+        example = make_example(row)
+        if len(example.prompt) >= 16:
+            train.append(example)
+    held_out: list[Any] = []
+    for row in selected[train_limit:needed]:
+        example = make_example(row)
+        if len(example.prompt) >= 16:
+            held_out.append(example)
+    if not train or not held_out:
+        raise SystemExit(
+            "corpus sampling produced an empty train or eval slice; "
+            "raise --prompt-tokens or lower --train-limit/--eval-limit"
+        )
+    return train, held_out
 
 
 def _run(args: argparse.Namespace) -> dict[str, Any]:
@@ -133,11 +265,47 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         base = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=dtype)
     base.eval().to(device)
 
-    examples = load_gsm8k_examples(
-        limit=args.train_limit, seed=args.train_seed, split=args.train_split
-    )
+    eval_examples: list[Any] = []
+    if args.source == "exp7-corpus":
+        if args.eval_limit < 1:
+            raise SystemExit(
+                "--source exp7-corpus needs --eval-limit >0 so the held-out "
+                "slice can be written to eval_prompts.jsonl"
+            )
+        subsets = [
+            part.strip()
+            for part in args.corpus_subsets.split(",")
+            if part.strip()
+        ]
+        examples, eval_examples = _load_corpus_examples(
+            args.corpus_root,
+            subsets,
+            tokenizer,
+            train_limit=args.train_limit,
+            eval_limit=args.eval_limit,
+            prompt_tokens=args.prompt_tokens,
+            seed=args.train_seed,
+        )
+        dataset_name = "exp7-corpus"
+        dataset_split = ",".join(subsets)
+    else:
+        examples = load_gsm8k_examples(
+            limit=args.train_limit,
+            seed=args.train_seed,
+            split=args.train_split,
+        )
+        dataset_name = "gsm8k"
+        dataset_split = args.train_split
+        if args.eval_limit > 0:
+            eval_examples = load_gsm8k_examples(
+                limit=args.eval_limit,
+                seed=args.train_seed,
+                split="test",
+            )
     if not examples:
-        raise SystemExit("no GSM8K prompts loaded; check --train-split/--train-limit")
+        raise SystemExit(
+            f"no {dataset_name} prompts loaded; check --train-limit/source options"
+        )
     prompts = [
         {
             "prompt_id": example.id,
@@ -204,6 +372,25 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 + "\n"
             )
 
+    eval_path = None
+    if eval_examples:
+        eval_path = out / "eval_prompts.jsonl"
+        with eval_path.open("w", encoding="utf-8") as handle:
+            for example in eval_examples:
+                handle.write(
+                    json.dumps(
+                        {
+                            "id": example.id,
+                            "task": example.task,
+                            "prompt": example.prompt,
+                            "expected": example.expected,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+
     report = {
         "schema_version": SCHEMA_VERSION,
         "experiment": EXPERIMENT,
@@ -212,6 +399,19 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         "config": {
             "model": args.model,
             "shadow_model_dir": str(Path(args.shadow_model_dir).expanduser()),
+            "source": args.source,
+            "corpus_root": (
+                str(Path(args.corpus_root).expanduser())
+                if args.source == "exp7-corpus"
+                else None
+            ),
+            "corpus_subsets": (
+                args.corpus_subsets if args.source == "exp7-corpus" else None
+            ),
+            "prompt_tokens": (
+                args.prompt_tokens if args.source == "exp7-corpus" else None
+            ),
+            "eval_limit": args.eval_limit,
             "train_split": args.train_split,
             "train_limit": args.train_limit,
             "train_seed": args.train_seed,
@@ -228,13 +428,22 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             "dtype": args.dtype,
         },
         "data": {
-            "dataset": "gsm8k",
-            "split": args.train_split,
+            "dataset": dataset_name,
+            "split": dataset_split,
             "n_prompts": len(examples),
             "fingerprint": dataset_fingerprint(examples),
             "prompt_ids": [example.id for example in examples],
             "n_tokens": len(collected),
             "n_hit_tokens": sum(1 for example in collected if example.hit),
+            "eval": (
+                {
+                    "path": str(eval_path),
+                    "n_prompts": len(eval_examples),
+                    "fingerprint": dataset_fingerprint(eval_examples),
+                }
+                if eval_examples
+                else None
+            ),
         },
         "train": {
             "steps": result.steps,
