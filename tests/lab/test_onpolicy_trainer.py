@@ -537,3 +537,150 @@ def test_checkpoint_roundtrip_preserves_joint_and_shadow_ppl(tmp_path):
     assert after["joint_ppl"] == pytest.approx(before["joint_ppl"], rel=1e-10)
     assert after["shadow_ppl"] == pytest.approx(before["shadow_ppl"], rel=1e-10)
     assert after["tokens"] == before["tokens"]
+
+
+# ---------------------------------------------------------------------------
+# Dynamic mass-adaptive top-k support
+# ---------------------------------------------------------------------------
+
+
+def test_dynamic_topk_mass_one_matches_fixed_topk():
+    torch.manual_seed(31)
+    student = torch.randn(2, 6, 32)
+    teacher = torch.randn(2, 6, 32)
+    labels = _labels(batch=2, seq=6)
+
+    fixed = _shifted_kd_loss(
+        student, teacher, labels, 1.0, divergence="jsd", topk=8
+    )
+    dynamic, stats = _shifted_kd_loss(
+        student,
+        teacher,
+        labels,
+        1.0,
+        divergence="jsd",
+        topk=8,
+        topk_mass=1.0,
+        topk_min=1,
+        return_stats=True,
+    )
+
+    assert torch.allclose(fixed, dynamic, atol=1e-6)
+    assert stats["support_k_mean"] == 8.0
+    assert stats["support_k_min"] == 8
+    assert stats["support_k_max"] == 8
+    assert stats["support_k_max_fraction"] == 1.0
+
+
+def test_dynamic_topk_mass_adapts_width_and_reports_valid_tokens():
+    # Row 0 is peaked at token 0 for every position; row 1 is flat.
+    teacher = torch.zeros(2, 6, 32)
+    teacher[0, :, 0] = 20.0
+    labels = _labels(batch=2, seq=6)
+
+    _, stats = _shifted_kd_loss(
+        torch.zeros_like(teacher),
+        teacher,
+        labels,
+        1.0,
+        divergence="jsd",
+        topk=8,
+        topk_mass=0.9,
+        topk_min=2,
+        return_stats=True,
+    )
+
+    # Peak rows stop at topk_min; flat rows need the full max k.
+    assert stats["support_tokens"] == 8  # 2 rows x 4 loss-participating positions
+    assert stats["support_k_min"] == 2
+    assert stats["support_k_max"] == 8
+    assert 2.0 < stats["support_k_mean"] < 8.0
+
+
+def test_dynamic_topk_rejects_missing_max_k_and_bad_bounds():
+    student = torch.randn(1, 4, 32)
+    teacher = torch.randn(1, 4, 32)
+    labels = _labels(batch=1, seq=4)
+
+    with pytest.raises(ValueError, match="topk_mass requires topk"):
+        _shifted_kd_loss(
+            student, teacher, labels, 1.0, topk=None, topk_mass=0.9
+        )
+    with pytest.raises(ValueError, match="topk_mass must be in"):
+        _shifted_kd_loss(
+            student, teacher, labels, 1.0, topk=8, topk_mass=0.0
+        )
+    with pytest.raises(ValueError, match="topk_min"):
+        _shifted_kd_loss(
+            student,
+            teacher,
+            labels,
+            1.0,
+            topk=8,
+            topk_mass=0.9,
+            topk_min=9,
+        )
+
+
+def test_onpolicy_gkd_loss_exposes_dynamic_support_stats():
+    torch.manual_seed(32)
+    student = torch.randn(2, 6, 32)
+    teacher = torch.randn(2, 6, 32)
+    labels = _labels(batch=2, seq=6)
+
+    out = onpolicy_gkd_loss(
+        student,
+        teacher,
+        None,
+        labels,
+        source="onpolicy",
+        lambda_onpolicy=1.0,
+        divergence="jsd",
+        topk=8,
+        topk_mass=0.9,
+        topk_min=1,
+    )
+    expected = _shifted_kd_loss(
+        student,
+        teacher,
+        labels,
+        1.0,
+        divergence="jsd",
+        topk=8,
+        topk_mass=0.9,
+        topk_min=1,
+    )
+
+    assert out["kd_stats"]["support_tokens"] > 0
+    assert torch.allclose(out["kd"], expected)
+
+
+def test_trainer_accumulates_dynamic_support_stats():
+    trainer = object.__new__(OnPolicyGKDTrainer)
+    trainer._support_accum = None
+
+    trainer._accumulate_support_stats(
+        {
+            "support_tokens": 2,
+            "support_k_mean": 3.0,
+            "support_k_min": 2,
+            "support_k_max": 5,
+            "support_k_max_fraction": 0.5,
+        }
+    )
+    trainer._accumulate_support_stats(
+        {
+            "support_tokens": 2,
+            "support_k_mean": 5.0,
+            "support_k_min": 4,
+            "support_k_max": 6,
+            "support_k_max_fraction": 0.0,
+        }
+    )
+
+    summary = trainer.support_summary()
+    assert summary["tokens"] == 4
+    assert summary["k_mean"] == pytest.approx(4.0)
+    assert summary["k_min"] == 2
+    assert summary["k_max"] == 6
+    assert summary["k_max_fraction"] == pytest.approx(0.25)

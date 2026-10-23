@@ -8,6 +8,7 @@ canonical generation-based loop); the GSM8K trainer takes an
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -1019,9 +1020,11 @@ def onpolicy_gkd_loss(
     lambda_onpolicy: float = 0.5,
     divergence: str = "forward_kl",
     topk: int | None = None,
+    topk_mass: float | None = None,
+    topk_min: int = 1,
     shadow_aux_weight: float = 0.0,
     temperature: float = 1.0,
-) -> dict[str, torch.Tensor]:
+) -> dict[str, Any]:
     """Compose one on-policy GKD batch into its loss terms.
 
     ``total = (1 - lambda) * CE_supervised + lambda * KD_onpolicy
@@ -1039,13 +1042,18 @@ def onpolicy_gkd_loss(
       or only the on-policy rows.
     - Vocabulary mismatches surface from ``_shifted_kd_loss`` with both
       vocabulary sizes.
+    - ``topk_mass`` (with ``topk`` as the maximum k, ``topk_min`` as the
+      minimum) makes the teacher support width per-position dynamic; the
+      returned ``kd_stats`` records its mean/min/max width over the positions
+      that participate in the loss.
 
     The model's own ``outputs.loss`` is deliberately not used here: it
     stacks ``shadow_loss_weight`` and ``distill_weight``, which would
     double-count the shadow and teacher terms composed explicitly below.
 
-    Returns ``{"ce", "kd", "aux", "total"}``; terms that do not participate
-    are zero scalars.
+    Returns ``{"ce", "kd", "aux", "total", "kd_stats"}``; terms that do not
+    participate are zero scalars and ``kd_stats`` is ``None`` unless the run
+    is dynamic.
     """
     if student_logits.dim() != 3:
         raise ValueError(
@@ -1084,6 +1092,7 @@ def onpolicy_gkd_loss(
     kd = zero
     aux = zero
     total = zero
+    kd_stats: dict[str, Any] | None = None
     has_term = False
 
     if lambda_onpolicy < 1.0 and bool(supervised.any()):
@@ -1107,14 +1116,21 @@ def onpolicy_gkd_loss(
                 f"on-policy element; got {teacher_logits.size(0)} rows for "
                 f"{batch_size} rows ({int(onpolicy.sum())} on-policy)."
             )
-        kd = _shifted_kd_loss(
+        kd_result = _shifted_kd_loss(
             student_logits[onpolicy],
             teacher_for_kd,
             labels[onpolicy],
             temperature,
             divergence=divergence,
             topk=topk,
+            topk_mass=topk_mass,
+            topk_min=topk_min,
+            return_stats=topk_mass is not None,
         )
+        if topk_mass is not None:
+            kd, kd_stats = kd_result
+        else:
+            kd = kd_result
         total = total + lambda_onpolicy * kd
         has_term = True
 
@@ -1128,7 +1144,7 @@ def onpolicy_gkd_loss(
         # batch with lambda=0 (or an empty branch) stays backprop-safe.
         total = student_logits.sum() * 0.0
 
-    return {"ce": ce, "kd": kd, "aux": aux, "total": total}
+    return {"ce": ce, "kd": kd, "aux": aux, "total": total, "kd_stats": kd_stats}
 
 
 def _model_vocab_size(model, role: str) -> int:
@@ -1201,6 +1217,11 @@ class OnPolicyGKDTrainer(ShadowSFTTrainer):
     ``teacher_temperature=1.0``; ``shadow_lr_multiplier`` and
     ``teacher_model`` pass through to ``ShadowSFTTrainer``. The teacher is
     frozen and put in eval mode.
+
+    ``topk_mass`` (with ``topk`` as the maximum k and ``topk_min`` as the
+    minimum) enables the mass-adaptive per-position support. The trainer
+    accumulates its width stats across microbatches and exposes them through
+    :meth:`support_summary`.
     """
 
     def __init__(
@@ -1209,6 +1230,8 @@ class OnPolicyGKDTrainer(ShadowSFTTrainer):
         lambda_onpolicy: float = 0.5,
         divergence: str = "forward_kl",
         topk: int | None = None,
+        topk_mass: float | None = None,
+        topk_min: int = 1,
         shadow_aux_weight: float = 0.0,
         teacher_temperature: float = 1.0,
         shadow_lr_multiplier: float = 1.0,
@@ -1223,6 +1246,19 @@ class OnPolicyGKDTrainer(ShadowSFTTrainer):
             raise ValueError(
                 f"teacher_temperature must be > 0, got {teacher_temperature}."
             )
+        if topk_mass is not None:
+            if topk is None:
+                raise ValueError("topk_mass requires topk (the maximum k).")
+            if not 0.0 < float(topk_mass) <= 1.0:
+                raise ValueError(
+                    f"topk_mass must be in (0, 1], got {topk_mass!r}."
+                )
+            if topk_min < 1 or topk_min > topk:
+                raise ValueError(
+                    f"topk_min must be in [1, topk={topk}], got {topk_min}."
+                )
+        elif topk_min != 1:
+            raise ValueError("topk_min only applies with topk_mass.")
         model = kwargs.get("model")
         if model is None and args:
             model = args[0]
@@ -1231,6 +1267,9 @@ class OnPolicyGKDTrainer(ShadowSFTTrainer):
         self.lambda_onpolicy = float(lambda_onpolicy)
         self.divergence = divergence
         self.topk = topk
+        self.topk_mass = topk_mass
+        self.topk_min = int(topk_min)
+        self._support_accum: dict[str, Any] | None = None
         self.shadow_aux_weight = float(shadow_aux_weight)
         self.teacher_temperature = float(teacher_temperature)
         if teacher_model is not None:
@@ -1283,6 +1322,8 @@ class OnPolicyGKDTrainer(ShadowSFTTrainer):
             if teacher_logits is None:
                 raise TypeError("Teacher forward returned no `logits`.")
 
+        topk_mass = getattr(self, "topk_mass", None)
+        topk_min = getattr(self, "topk_min", 1)
         losses = onpolicy_gkd_loss(
             outputs.logits,
             teacher_logits,
@@ -1292,13 +1333,54 @@ class OnPolicyGKDTrainer(ShadowSFTTrainer):
             lambda_onpolicy=self.lambda_onpolicy,
             divergence=self.divergence,
             topk=self.topk,
+            topk_mass=topk_mass,
+            topk_min=topk_min,
             shadow_aux_weight=self.shadow_aux_weight,
             temperature=self.teacher_temperature,
         )
+        if topk_mass is not None:
+            self._accumulate_support_stats(losses.get("kd_stats"))
         loss = losses["total"]
         if return_outputs:
             return loss, outputs
         return loss
+
+    def _accumulate_support_stats(self, stats: dict[str, Any] | None) -> None:
+        """Fold one microbatch's dynamic support width into the run summary."""
+        if not stats or not stats.get("support_tokens"):
+            return
+        acc = getattr(self, "_support_accum", None)
+        if acc is None:
+            acc = {
+                "tokens": 0,
+                "k_sum": 0.0,
+                "k_min": None,
+                "k_max": None,
+                "max_count": 0,
+            }
+        tokens = int(stats["support_tokens"])
+        acc["tokens"] += tokens
+        acc["k_sum"] += float(stats["support_k_mean"]) * tokens
+        k_min = int(stats["support_k_min"])
+        k_max = int(stats["support_k_max"])
+        acc["k_min"] = k_min if acc["k_min"] is None else min(acc["k_min"], k_min)
+        acc["k_max"] = k_max if acc["k_max"] is None else max(acc["k_max"], k_max)
+        acc["max_count"] += int(round(float(stats["support_k_max_fraction"]) * tokens))
+        self._support_accum = acc
+
+    def support_summary(self) -> dict[str, Any] | None:
+        """Mean/min/max dynamic support width over loss-participating tokens."""
+        acc = getattr(self, "_support_accum", None)
+        if not acc or not acc["tokens"]:
+            return None
+        tokens = acc["tokens"]
+        return {
+            "tokens": tokens,
+            "k_mean": acc["k_sum"] / tokens,
+            "k_min": acc["k_min"],
+            "k_max": acc["k_max"],
+            "k_max_fraction": acc["max_count"] / tokens,
+        }
 
     @staticmethod
     def _strip_source(loader):

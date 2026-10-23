@@ -46,7 +46,7 @@ from .onpolicy import normalize_token_ids
 
 ROLLOUT_MODES = ("base_shadow", "shadow_only")
 DIVERGENCES = ("forward_kl", "reverse_kl", "jsd")
-TEACHER_SUPPORTS = ("full", "topk")
+TEACHER_SUPPORTS = ("full", "topk", "dynamic_topk")
 BRANCH_SOURCES = ("supervised", "onpolicy")
 IGNORE_INDEX = -100
 
