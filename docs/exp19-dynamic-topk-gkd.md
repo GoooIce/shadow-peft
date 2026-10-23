@@ -1,8 +1,8 @@
 # exp19 GKD 动态稀疏 teacher support（issue #54）
 
-一句话收束：**在 GSM8K 1k prompts、2 个训练 seed、1,000 条 test 上，mass-adaptive top-k（mass=0.99，平均 k 1.55）的 joint ppl 在两个 seed 上都显著低于固定 `k=2`（4.468 / 4.423 vs 4.744 / 4.686，95% CI 不重叠），但 task accuracy 平均低 **2.05 pp**（固定 − 动态，配对 bootstrap 95% CI **[+0.1, +4.0]**）；分 seed 看，seed 0 是 −3.6 pp（CI [+1.0, +6.2]），seed 1 是 −0.5 pp（CI [−1.9, +3.0]）。结论：**动态 support 换来 ppl 增益，但代价是 task accuracy 的小幅、seed 依赖的减益；不是可部署的免费胜利，阶段 2 松弛不开启。****
+一句话收束：**4 个训练 seed × mass 网格 {0.5, 0.9, 0.99, 0.999} 的结果是：固定 `k=2` 的 task accuracy 在所有 mass 上都不差于动态 support。** 200 条上，mass 0.5 / 0.9 显著更差（固定 − 动态 **+9.25 / +5.88 pp**，95% CI 分别 [+5.37,+13.25] / [+2.25,+9.63]），0.99 是 +2.13 pp（CI [−1.25,+5.50]），0.999 基本持平（+0.38 pp，CI [−2.38,+3.13]）。1,000 条上 mass 0.99 的 2-seed 平均是 **+2.05 pp**（CI **[+0.1,+4.0]**），与 200 条网格一致。ppl 方面，0.5/0.9 大幅变差（7.30/5.60 vs 4.69），0.99/0.999 更好（4.42/4.50 vs 4.69）。结论：**动态 support 是一个随稀疏度恶化的 ppl/accuracy trade-off；没有哪个 mass 给出 accuracy 增益，阶段 2 松弛不开启。****
 
-状态：**结题（2026-10-23）**。最初 200 条 seed 0 的 −7.5 pp 在 1,000 条上缩到 −3.6 pp；seed 1 的 200 条反向（+3.5 pp）在 1,000 条上变成 −0.5 pp。200 条筛查会误导，最终口径是 2 seeds × 1,000 条 + 配对 bootstrap。
+状态：**结题（2026-10-23）**。4 seeds × 4 masses × 200 条 + 2 seeds × 1,000 条（mass 0.99）+ 配对 bootstrap；越稀疏（mass 0.5/0.9）accuracy 和 ppl 都显著更差，越接近固定（0.999）越接近持平，最好也只是 neutral。
 
 ## 动机
 
@@ -60,6 +60,22 @@ teacher 在 GSM8K 上非常 peaked，0.99 质量平均只需 1.5 个 token；正
   - 两个 seed 的 per-example 平均：**+2.05 pp**，95% CI **[+0.1, +4.0]**，141 胜 / 107 负。
 - 平均 CI 只是勉强排除 0，而且 seed 0 贡献了大部分效应；这是**名义 95%**、未做多重比较校正的结果。更准确的说法是“有可分辨的、约 2 pp 的 accuracy 减益，但证据强度中等”。
 
+### 4-seed mass 网格（200 条）
+
+固定臂始终 `k=2`；每个 mass 4 个训练 seed（0–3），共用同一份 rollouts；配对 bootstrap（固定 − 动态），正数表示固定更准。
+
+| mass | mean k | 固定 − 动态 acc | 95% CI | 固定 ppl | 动态 ppl |
+|---|---|---|---|---|---|
+| 0.5 | 1.02 | **+9.25 pp** | **[+5.37, +13.25]** | 4.691 | **7.301** |
+| 0.9 | 1.24 | **+5.88 pp** | **[+2.25, +9.63]** | 4.691 | **5.603** |
+| 0.99 | 1.55 | +2.13 pp | [−1.25, +5.50] | 4.691 | **4.415** |
+| 0.999 | 1.94 | +0.38 pp | [−2.38, +3.13] | 4.691 | **4.497** |
+
+- **accuracy 随稀疏度单调恶化。** mass 0.5（平均 1.02 个 token）比固定 k=2 低 **9.25 pp**，0.9 低 **5.88 pp**，两者的 CI 都排除 0；0.99 低 2.13 pp（200 条上不显著，1,000 条上 +2.05 pp CI [+0.1,+4.0]）；0.999 基本持平（+0.38 pp）。
+- **ppl 不是单调的。** 过度稀疏（0.5/0.9）把 ppl 从 4.69 抬到 7.30/5.60，属于 accuracy 和 ppl 双输；0.99/0.999 把 ppl 降到 4.42/4.50，但没有转化为 accuracy。
+- **最好的 mass 也只是 neutral。** 0.999 的 mean k 1.94 已经接近固定 k=2，既没有 accuracy 增益，也没有明显的 support 节省。
+- 结论：**没有任何 mass 给出可分辨的 accuracy 增益；0.5/0.9 是可分辨的减益，0.99 是小幅减益，0.999 是持平。** 动态 support 不是免费增益。
+
 ### 200 条筛查 vs 1,000 条（为什么不能停在 200）
 
 | seed | 固定 acc (200) | 动态 acc (200) | 固定 − 动态 |
@@ -82,17 +98,18 @@ fresh adapter、未训练：joint ppl 4.615 [4.418, 4.844]，task acc 52.0% [46.
 
 ## 结论
 
-- **可分辨减益**：固定 k=2 在 2-seed 平均上高 **2.05 pp** task accuracy（配对 95% CI [+0.1, +4.0]），动态 support 不是更好的部署选择。
-- **可分辨增益**：动态 support 的 joint ppl 在两个 seed 上都显著更低；但它没有转化为 task accuracy。
+- **可分辨减益**：4-seed 网格上，mass 0.5 比固定 k=2 低 **9.25 pp**（CI [+5.37,+13.25]），mass 0.9 低 **5.88 pp**（CI [+2.25,+9.63]）；mass 0.99 在 1,000 条上低 **2.05 pp**（CI [+0.1,+4.0]）。
+- **没有可分辨增益**：mass 0.999 只是持平（+0.38 pp，CI [−2.38,+3.13]），而且 mean k 1.94 已接近固定 k=2，没有明显的 support 节省。
+- **ppl 不是替代指标**：0.99/0.999 的 joint ppl 显著更低，但没有转化为 accuracy；0.5/0.9 则是 accuracy 和 ppl 双输。
 - **阶段 2 不开启**：Gumbel/ST 松弛只有在动态 hard-k 已经出现 accuracy 增益时才值得做；本轮是反向的。当前不建议把 dynamic top-k 设为默认，也不建议先移植 MiTA attention。
 
-如果还要继续，下一步应是 **3–4 个训练 seed**（检验 2 pp 的平均减益是否稳）和 mass ∈ {0.5, 0.9, 0.99, 0.999} 网格；不建议只加评测条数，因为方差主要来自训练 seed。
+如果还要继续，方向不是再加评测条数，而是换一个真正能改变选择的机制（例如可学习 selector 或 token-level 蒸馏），而不是只调 mass。
 
 ## 限制
 
-- 2 个训练 seed、1,000 steps、32-token rollout；平均 accuracy CI 只是勉强排除 0，未做多重比较校正。
-- 只测了 mass 0.99（主臂）和 0.9（pilot）；没有 mass 0.5/0.999 的网格。
-- 固定臂 k=2 与动态臂平均 k=1.55 只是近似匹配；实际 union support 大小没有逐位置统计。
+- 4 个训练 seed（0–3）、1,000 steps、32-token rollout；200 条网格的 CI 是名义 95%，未做多重比较校正；1,000 条只做了 mass 0.99。
+- 网格包含 mass 0.5/0.9/0.99/0.999；mass 0.999 的 mean k 1.94，接近固定 k=2，因此它更像是“固定 support 的噪声版本”，不是真正的稀疏化。
+- 固定臂 k=2 与动态臂的 mean k 只是近似匹配；实际 union support 大小没有逐位置统计。
 - 只有 Qwen3-0.6B/4B 一组模型；没有 SFT（λ=0）或 full-vocab JSD 对照。
 - 没有端到端生产 QA 数据；GSM8K task accuracy 是 256-token 生成，不是产线指标。
 
@@ -133,8 +150,8 @@ PYTHONPATH=src python scripts/exp17_real_eval.py --suite gkd --dataset gsm8k \
 
 ## 产物
 
-- 代码：`src/shadow_peft/task_models.py`（dynamic union mask/stats）、`src/shadow_lab/trainers.py`（`topk_mass`/`topk_min`、support 统计）、`scripts/exp10_onpolicy_gkd.py`（CLI/summary）、`scripts/exp19_prepare_gkd_data.py`
+- 代码：`src/shadow_peft/task_models.py`（dynamic union mask/stats）、`src/shadow_lab/trainers.py`（`topk_mass`/`topk_min`、support 统计）、`scripts/exp10_onpolicy_gkd.py`（CLI/summary）、`scripts/exp19_prepare_gkd_data.py`、`scripts/exp19_analyze_grid.py`（配对 bootstrap 分析）
 - 测试：`tests/lab/test_onpolicy_trainer.py`（动态 support 用例）
-- 本地：`runs-local/exp19/{data,pilot-m0.9,pilot-m0.99,baseline,fixed-k2,dynamic-m099-k32,fixed-k2-seed1,dynamic-m099-k32-seed1}/`（含 `gkd-1000/report.json`）
+- 本地：`runs-local/exp19/{data,pilot-m0.9,pilot-m0.99,baseline,arms}/`（`arms/*/gkd-200/report.json`、`arms/*/gkd-1000/report.json`、`train_stats.json`、`grid_200.json`）
 - 远端：`goooinext:~/exp19-gkd/`、`gooo:~/exp19-gkd/arms/`
 - 相关：`docs/exp10-onpolicy-gkd.md`、`docs/specs/gkd-on-policy-flywheel.md`
