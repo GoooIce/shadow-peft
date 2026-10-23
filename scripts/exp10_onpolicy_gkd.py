@@ -449,6 +449,9 @@ def cmd_train(args: argparse.Namespace) -> dict[str, Any]:
         data_seed=args.seed,
         bf16=use_bf16,
     )
+    topk_mass = getattr(args, "topk_mass", None)
+    if topk_mass is not None and args.topk is None:
+        args.topk = 64
     trainer = OnPolicyGKDTrainer(
         model=model,
         args=training_args,
@@ -459,6 +462,8 @@ def cmd_train(args: argparse.Namespace) -> dict[str, Any]:
         lambda_onpolicy=args.lambda_onpolicy,
         divergence=args.divergence,
         topk=args.topk,
+        topk_mass=topk_mass,
+        topk_min=getattr(args, "topk_min", 1),
         shadow_aux_weight=args.shadow_aux_weight,
         teacher_temperature=args.teacher_temperature,
         shadow_lr_multiplier=args.shadow_lr_multiplier,
@@ -486,7 +491,12 @@ def cmd_train(args: argparse.Namespace) -> dict[str, Any]:
         "lambda": args.lambda_onpolicy,
         "divergence": args.divergence,
         "topk": args.topk,
-        "teacher_support": "topk" if args.topk else "full",
+        "topk_mass": topk_mass,
+        "topk_min": getattr(args, "topk_min", 1),
+        "teacher_support": (
+            "dynamic_topk" if topk_mass is not None else "topk" if args.topk else "full"
+        ),
+        "support_stats": trainer.support_summary(),
         "shadow_aux_weight": args.shadow_aux_weight,
         "teacher": str(args.teacher),
         "discard_rate": getattr(args, "discard_rate", 0.0),
@@ -614,7 +624,13 @@ def cmd_run(args: argparse.Namespace) -> dict[str, Any]:
     eval_args.token_budget = train_summary["token_budget"]
     eval_args.token_budget_overflow = train_summary["token_budget_overflow"]
     eval_args.discard_rate = train_args.discard_rate
-    eval_args.teacher_support = "topk" if args.topk else "full"
+    eval_args.teacher_support = (
+        "dynamic_topk"
+        if getattr(args, "topk_mass", None) is not None
+        else "topk"
+        if args.topk
+        else "full"
+    )
     eval_args.wall_clock_base = (
         rollout_summary["wall_clock"] + train_summary["wall_clock"]
     )
@@ -748,6 +764,23 @@ def _add_train_args(
         default="forward_kl",
     )
     _add(parser, "--topk", type=int, default=None)
+    _add(
+        parser,
+        "--topk-mass",
+        type=float,
+        default=None,
+        help=(
+            "per-position dynamic top-k: smallest k whose teacher top-k mass "
+            "reaches this value; --topk is the maximum k"
+        ),
+    )
+    _add(
+        parser,
+        "--topk-min",
+        type=int,
+        default=1,
+        help="minimum k for --topk-mass (default: 1)",
+    )
     _add(parser, "--shadow-aux-weight", type=float, default=0.0)
     _add(
         parser,
@@ -825,7 +858,10 @@ def _add_eval_args(parser: argparse.ArgumentParser) -> None:
         default="forward_kl",
     )
     _add(
-        parser, "--teacher-support", choices=("full", "topk"), default="full"
+        parser,
+        "--teacher-support",
+        choices=("full", "topk", "dynamic_topk"),
+        default="full",
     )
     _add(parser, "--teacher-version", default="")
     _add(parser, "--tokens-seen", type=int, default=0)

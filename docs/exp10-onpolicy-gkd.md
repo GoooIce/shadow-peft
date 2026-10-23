@@ -4,6 +4,8 @@
 
 状态：**smoke 管线已跑通（2026-10-20）；2 步 smoke 无信号/未验证**；结论级实验（1k prompts、更长训练、λ/divergence 网格、真实 FeedbackStore）未跑。`--token-budget 448` 的 λ=0/0.5/1 已按 #23 新口径重跑，数字见下表。
 
+后续：1k prompts 的固定 top-k vs 质量自适应 top-k 对照见 [docs/exp19-dynamic-topk-gkd.md](exp19-dynamic-topk-gkd.md)（2026-10-23，动态 support no-go）。
+
 ## 实验设置
 
 | 项 | 值 |

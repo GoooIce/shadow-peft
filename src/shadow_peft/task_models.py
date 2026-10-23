@@ -119,6 +119,119 @@ def _validate_topk_arg(topk: int | None, vocab_size: int) -> None:
         raise ValueError(f"topk={topk} exceeds the vocab size {vocab_size}.")
 
 
+def _validate_dynamic_topk_args(
+    topk: int | None,
+    topk_mass: float | None,
+    topk_min: int,
+    vocab_size: int,
+) -> None:
+    """Validate the mass-adaptive top-k knobs.
+
+    ``topk`` is the maximum k, so a dynamic run still records a bounded
+    support and can be compared with a fixed top-k at the same budget.
+    """
+    if topk_mass is None:
+        return
+    if topk is None:
+        raise ValueError("topk_mass requires topk (the maximum k).")
+    _validate_topk_arg(topk, vocab_size)
+    if isinstance(topk_mass, bool) or not isinstance(topk_mass, (int, float)):
+        raise ValueError(
+            f"topk_mass must be a number in (0, 1], got {topk_mass!r}."
+        )
+    if not 0.0 < float(topk_mass) <= 1.0:
+        raise ValueError(
+            f"topk_mass must be in (0, 1], got {topk_mass!r}."
+        )
+    if isinstance(topk_min, bool) or not isinstance(topk_min, int):
+        raise ValueError(f"topk_min must be a positive int, got {topk_min!r}.")
+    if topk_min < 1:
+        raise ValueError(f"topk_min must be >= 1, got {topk_min}.")
+    if topk_min > topk:
+        raise ValueError(
+            f"topk_min={topk_min} exceeds topk (max k)={topk}."
+        )
+
+
+def _teacher_mass_topk(
+    teacher_logits: torch.Tensor,
+    max_k: int,
+    mass: float,
+    min_k: int,
+) -> torch.Tensor:
+    """Smallest k per position whose teacher top-k mass reaches ``mass``.
+
+    The probabilities are computed over the full teacher row (not over a
+    pre-truncated support), so the k reflects the teacher's own distribution.
+    A flat row returns ``max_k``; a peaked row returns ``min_k`` or 1.
+    """
+    teacher_probs = F.softmax(teacher_logits.float(), dim=-1)
+    sorted_probs = teacher_probs.topk(max_k, dim=-1).values
+    cumulative = sorted_probs.cumsum(dim=-1)
+    k = (cumulative < mass).sum(dim=-1) + 1
+    return k.clamp(min=min_k, max=max_k)
+
+
+def _mask_to_dynamic_topk_union(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    max_k: int,
+    mass: float,
+    min_k: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Union of per-position student/teacher top-k_t, with k_t from mass.
+
+    Returns ``(student_masked, teacher_masked, k)`` where ``k`` has shape
+    ``student_logits.shape[:-1]``. Non-candidates become ``-inf`` exactly as
+    in :func:`_mask_to_topk_union`; only the support width varies per row.
+    """
+    k = _teacher_mass_topk(teacher_logits, max_k, mass, min_k)
+    student_top = student_logits.topk(max_k, dim=-1).indices
+    teacher_top = teacher_logits.topk(max_k, dim=-1).indices
+
+    positions = torch.arange(max_k, device=student_logits.device).unsqueeze(0)
+    allowed = positions < k.unsqueeze(-1)
+    last = (k - 1).clamp(min=0).unsqueeze(-1)
+    # Padding with the last allowed slot cannot add a candidate: that token is
+    # already inside the row's top-k_t on the same side.
+    student_idx = torch.where(allowed, student_top, student_top.gather(-1, last))
+    teacher_idx = torch.where(allowed, teacher_top, teacher_top.gather(-1, last))
+
+    candidate = torch.zeros_like(student_logits, dtype=torch.bool)
+    candidate.scatter_(-1, student_idx, True)
+    candidate.scatter_(-1, teacher_idx, True)
+    student = student_logits.masked_fill(~candidate, float("-inf"))
+    teacher = teacher_logits.masked_fill(~candidate, float("-inf"))
+    student_empty = ~torch.isfinite(student).any(dim=-1, keepdim=True)
+    teacher_empty = ~torch.isfinite(teacher).any(dim=-1, keepdim=True)
+    student = torch.where(student_empty & candidate, torch.zeros_like(student), student)
+    teacher = torch.where(teacher_empty & candidate, torch.zeros_like(teacher), teacher)
+    return student, teacher, k
+
+
+def _dynamic_topk_stats(
+    k: torch.Tensor, shift_labels: torch.Tensor, max_k: int
+) -> dict[str, Any]:
+    """Support-width summary over positions that participate in the loss."""
+    valid = shift_labels.reshape(-1) != -100
+    if not bool(valid.any()):
+        return {
+            "support_tokens": 0,
+            "support_k_mean": None,
+            "support_k_min": None,
+            "support_k_max": None,
+            "support_k_max_fraction": None,
+        }
+    valid_k = k.reshape(-1)[valid]
+    return {
+        "support_tokens": int(valid_k.numel()),
+        "support_k_mean": float(valid_k.float().mean()),
+        "support_k_min": int(valid_k.min()),
+        "support_k_max": int(valid_k.max()),
+        "support_k_max_fraction": float((valid_k == max_k).float().mean()),
+    }
+
+
 def _mask_to_topk_union(
     student_logits: torch.Tensor, teacher_logits: torch.Tensor, topk: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -199,7 +312,10 @@ def _shifted_kd_loss(
     *,
     divergence: str = "forward_kl",
     topk: int | None = None,
-) -> torch.Tensor:
+    topk_mass: float | None = None,
+    topk_min: int = 1,
+    return_stats: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, dict[str, Any] | None]:
     """Token-level KD divergence with the same shift/ignore_index alignment as
     ``_shifted_ce_loss``.
 
@@ -210,12 +326,20 @@ def _shifted_kd_loss(
     ``topk`` truncates both distributions to the union of their per-position
     top-k candidates and renormalizes before computing the divergence; ``None``
     keeps the full-vocabulary path.
+
+    ``topk_mass`` switches to a per-position dynamic support: ``topk`` is the
+    maximum k, and each position uses the smallest ``k >= topk_min`` whose
+    teacher top-k mass reaches ``topk_mass``. ``return_stats=True`` returns
+    ``(loss, stats)`` for support-width reporting; stats are ``None`` when the
+    run is not dynamic.
     """
     if divergence not in _KD_DIVERGENCES:
         raise ValueError(
             f"Unknown KD divergence {divergence!r}; expected one of {', '.join(_KD_DIVERGENCES)}."
         )
-    _validate_topk_arg(topk, student_logits.size(-1))
+    vocab_size = student_logits.size(-1)
+    _validate_topk_arg(topk, vocab_size)
+    _validate_dynamic_topk_args(topk, topk_mass, topk_min, vocab_size)
     if teacher_logits.size(-1) != student_logits.size(-1):
         raise ValueError(
             f"Teacher/student vocab mismatch: teacher has vocab {teacher_logits.size(-1)}, "
@@ -225,8 +349,16 @@ def _shifted_kd_loss(
     shift_student = student_logits[..., :-1, :].contiguous()
     shift_teacher = teacher_logits[..., :-1, :].contiguous().to(dtype=shift_student.dtype)
     shift_labels = labels[..., 1:].contiguous()
+    dynamic_k = None
     if topk is not None:
-        shift_student, shift_teacher = _mask_to_topk_union(shift_student, shift_teacher, topk)
+        if topk_mass is None:
+            shift_student, shift_teacher = _mask_to_topk_union(
+                shift_student, shift_teacher, topk
+            )
+        else:
+            shift_student, shift_teacher, dynamic_k = _mask_to_dynamic_topk_union(
+                shift_student, shift_teacher, topk, float(topk_mass), topk_min
+            )
 
     # Keep the legacy forward-KL full-vocabulary path byte-for-byte identical:
     # existing runs (and GRACE's DKD anchor) depend on these exact values.
@@ -243,13 +375,21 @@ def _shifted_kd_loss(
         return kd * temperature * temperature
 
     valid = shift_labels.view(-1) != -100
-    return _divergence_over_valid(
+    loss = _divergence_over_valid(
         shift_student.view(-1, shift_student.size(-1)),
         shift_teacher.view(-1, shift_teacher.size(-1)),
         valid,
         temperature,
         divergence,
     )
+    if return_stats:
+        stats = (
+            _dynamic_topk_stats(dynamic_k, shift_labels, topk)
+            if dynamic_k is not None
+            else None
+        )
+        return loss, stats
+    return loss
 
 
 def _hidden_mse_loss(
