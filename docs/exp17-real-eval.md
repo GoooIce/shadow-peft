@@ -1,8 +1,8 @@
 # exp17 真实语料/真实模型复评 harness（issue #47）
 
-一句话收束：**real-eval harness 支持 adapter（`ShadowForCausalLM`）和 standalone（直接加载 exp16 导出的 recovered shadow）。达到证据门槛的评测结果：GKD 200 条 GSM8K、`all` 臂 3 个 SFT seed 的 shadow ppl **3.524 / 3.515 / 3.546**、准确率 **41.0% / 36.5% / 34.0%**（均值 37.2%，旧 adapter shadow ppl 167,148；512-token 同 100 条为 40/39/36%）；S2T 200 prompts / 3200 token，Hit@8 **0.923 / 0.927 / 0.923**、Agree@1 **0.562 / 0.568 / 0.550**；RESTRAIN 100 条 GSM8K 结构化题 ×3 生成 seeds，accuracy **1.75%** / low consistency **98–100%** / skip **73–84%**（no-go）。S2T selector 在恢复后的 shadow 上重训 3 seeds，held-out **全部为负**（gain 均值 −0.032），no-go。GKD/S2T/RESTRAIN 均 `evidence_collected`，但 `claims_gain=false`（无完整 baseline-vs-treatment），JitRL 仍 `data_missing`。**
+一句话收束：**real-eval harness 支持 adapter（`ShadowForCausalLM`）和 standalone（直接加载 exp16 导出的 recovered shadow）。达到证据门槛的评测结果：GKD 200 条 GSM8K、`all` 臂 3 个 SFT seed 的 shadow ppl **3.524 / 3.515 / 3.546**、准确率 **41.0% / 36.5% / 34.0%**（均值 37.2%，旧 adapter shadow ppl 167,148；512-token 同 100 条为 40/39/36%）；S2T 200 prompts / 3200 token，Hit@8 **0.923 / 0.927 / 0.923**、Agree@1 **0.562 / 0.568 / 0.550**；RESTRAIN 100 条 GSM8K 结构化题 ×3 生成 seeds，accuracy **1.75%** / low consistency **98–100%** / skip **73–84%**（no-go）。S2T selector 在恢复后的 shadow 上重训：100 prompts 时 no-go（gain −0.032），扩到 1k GSM8K prompts 后 3 seeds 翻正（**+0.086 ± 0.002**，1,000 test），2k prompts 到 **+0.103**；但 2k 条 exp7 异质 QA 语料仍 no-go（**−0.234**）。GKD/S2T/RESTRAIN 均 `evidence_collected`，但 `claims_gain=false`（无完整 baseline-vs-treatment），JitRL 仍 `data_missing`。**
 
-状态：**adapter/standalone 路径、证据门槛规模评测、训练侧 3-seed 重复与 S2T selector 对照均已完成（2026-10-22）**。仍缺 JitRL 真实反馈日志/记忆/n-best 后端；#47 保持 ready-for-human。
+状态：**adapter/standalone 路径、证据门槛规模评测、训练侧 3-seed 重复、S2T selector 数据规模（100/1k/2k + 异质语料对照）均已完成（2026-10-23）**。仍缺 JitRL 真实反馈日志/记忆/n-best 后端；#47 保持 ready-for-human。
 
 ## 修复后的评测口径（2026-10-22 code review）
 
@@ -91,18 +91,21 @@ PYTHONPATH=src python scripts/exp17_real_eval.py --suite restrain \
 - **RESTRAIN**：在 100 条 GSM8K 结构化题上 accuracy 只有 1.75%，low consistency 98–100%，skip 73–84%；这是明确的 no-go。影子是在 GSM8K solution 上 SFT 的，但 64 token 内很少产出可解析的最终数字，`process_calc` 的 first-number 判分也会放大误差。生产 QA 16 条仍是 0% / 1.0 / 0.875，两个域都没有改善。
 - 证据门槛已满足（GKD/S2T 200、RESTRAIN 100），但 `claims_gain` 仍为 false：没有完整 baseline-vs-treatment campaign；JitRL 仍缺真实反馈日志/记忆/n-best 后端。
 
-### S2T selector 重训（exp18，2026-10-22）
+### S2T selector 重训与数据规模（exp18，2026-10-22/23）
 
-exp11 的 selector 训练在 exp7 adapter 的注入 hidden 上，held-out 已 no-go。本实验在恢复后的 standalone shadow 上重新采集/训练 selector（GSM8K train 100 prompts / 1,600 token，post-projection hidden），3 个训练 seed 在 200 条 GSM8K test prompt / 3,200 token 上**全部为负**：
+exp11 的 selector 训练在 exp7 adapter 的注入 hidden 上，held-out 已 no-go。本轮在恢复后的 standalone shadow 上重新采集/训练 selector（post-projection hidden），并把 GSM8K train 从 100 条扩到 1k/2k，另跑 2k 条 exp7 异质 QA 语料作对照：
 
-| seed | selector Agree@1 | greedy Agree@1 | gain |
-|---|---|---|---|
-| 0 | 0.5428 | 0.5616 | −0.0188 |
-| 1 | 0.5250 | 0.5616 | −0.0366 |
-| 2 | 0.5206 | 0.5616 | −0.0409 |
-| 均值 ± std | 0.5295 ± 0.0119 | 0.5616 | **−0.0321 ± 0.0118** |
+| 训练数据 | 训练 token | held-out | selector Agree@1 | greedy Agree@1 | gain |
+|---|---|---|---|---|---|
+| GSM8K 100 prompts（旧） | 1,600 | 200 test | 0.5295 ± 0.0119 | 0.5616 | **−0.0321 ± 0.0118**（3 seeds） |
+| GSM8K 1,000 prompts | 16,000 | 1,000 test | **0.6505 ± 0.0020** | 0.5645 | **+0.0860 ± 0.0021**（3 seeds） |
+| GSM8K 1,000 prompts（同一 200） | 16,000 | 200 test | **0.6566** | 0.5616 | **+0.0950**（seed 0） |
+| GSM8K 2,000 prompts | 32,000 | 1,000 test | **0.6672** | 0.5645 | **+0.1027**（seed 0） |
+| exp7-corpus 2,000 文档 | 32,000 | 500 held-out | 0.3463 ± 0.0041 | 0.5806 | **−0.2343 ± 0.0041**（3 seeds） |
 
-参考：random 0.115、oracle/coverage 0.923。训练集 in-sample +0.151，但验证 split −0.028，held-out 3/3 为负；**selector no-go，不部署**。细节、命令与限制见 [docs/exp18-s2t-selector.md](exp18-s2t-selector.md)。
+- **in-domain 数据量是主因**：100 → 1k 把 −3.2 pp 翻到 +8.6 pp，2k 到 +10.3 pp；1k 的 3 个 seed 稳定（std 0.2 pp），val 与 test 一致。
+- **更大的异质语料不行**：同样是 32k token，exp7 2k 文档 held-out −23.4 pp，且 400-prompt val 会误导（seed 0 −0.226、seed 1/2 +0.18/+0.19，held-out 3/3 −0.23）；selector 没有迁移到 GSM8K（−0.2294）。
+- 参考：random 0.115、oracle/coverage 0.9225（GSM8K）/ 0.8955（corpus）。**同质任务上 selector 可用（Agree@1 +8.6~10.3 pp）；产线 QA 仍需 ≥1k 条同分布 prompt，不能直接搬 GSM8K selector。** 细节、命令与限制见 [docs/exp18-s2t-selector.md](exp18-s2t-selector.md)。
 
 ### 训练侧 3-seed 重复（exp16 `all` 臂）
 
@@ -231,7 +234,7 @@ hidden。JitRL 仍走 `--backend-config`/`--memory`，缺数据时 `data_missing
 1. **Harness 可用**：四个 suite 的统一入口、数据指纹、per-example、summary/report 都能跑；缺数据时不会伪造结果。
 2. **recovered standalone 的结论**：GKD 200 条上 `all` 三个 SFT seed 的 shadow ppl 3.524 / 3.515 / 3.546，acc@256 41.0 / 36.5 / 34.0%（均值 37.2%）；512-token 同 100 条 40 / 39 / 36%（均值 38.3%）。S2T 200 prompts 上 Hit@8 0.923 / 0.927 / 0.923、Agree@1 0.562 / 0.568 / 0.550。RESTRAIN 100 条 GSM8K 结构化题 ×3 生成 seeds 只有 1.75% accuracy、98–100% low consistency、73–84% skip。**GKD/S2T 可用但有训练方差，RESTRAIN no-go。**
 3. **GKD 两臂对比**：seed 0 的 `all` 比 `backbone` 的 shadow ppl 低约 1.9%、准确率高 2.0 pp，但 CI 重叠；不能声称显著。`all` 训练了 4B head，成本更高；如果只需要格式/成本，`backbone` 仍是合理选择。3-seed 重复只覆盖 `all` 臂。
-4. **S2T 仍是选择瓶颈**：Hit@8 稳定在 0.92，Agree@1 只有 0.56；在恢复后的 shadow 上重训 selector 后 3/3 seed 仍为负（gain 均值 −0.032）。selector 路线在本轮配置下 no-go，不应继续靠小 MLP 解决选择问题。
+4. **S2T 选择瓶颈可以被同质数据缓解**：Hit@8 稳定在 0.92，greedy Agree@1 只有 0.56；在恢复后的 shadow 上重训 selector，100 prompts 时 3/3 seed 为负（−0.032），扩到 1k GSM8K prompts 后 3 seeds 变成 **+0.086 ± 0.002**，2k 到 +0.103。但 2k 条异质 QA 文档仍 −0.234，且 val split 会误导。结论不是“selector 不行”，而是“selector 需要 ≥1k 条同分布 prompt”；产线 QA 仍需自己的同分布数据。
 5. **仍未做**：JitRL 缺真实反馈日志/记忆/n-best 后端（`data_missing`）；没有用真实产线 QA 重跑 RESTRAIN；没有 SFT baseline（原生 0.6B SFT on 同一 2k 数据）；`claims_gain=false` 仍然成立。
 
 ## 已知限制
@@ -243,7 +246,7 @@ hidden。JitRL 仍走 `--backend-config`/`--memory`，缺数据时 `data_missing
 - S2T selector_gain 只在显式传 `--selector` 时计算；selector 模式忽略 `--use-cache`。adapter 路径的 metrics 基于初始注入前 hidden；standalone 路径基于导出模型的 post-projection hidden。两者都不是生产部署 wrapper。
 - JitRL 的 cloud 升级是简化阈值，不是完整生产 Router；本轮没有真实记忆/后端，直接 `data_missing`，latency 字段为 null。
 - `claims_gain=false` 是设计使然：harness 没有 baseline-vs-treatment 对照臂；GKD `all` vs `backbone`、3-seed 重复和 selector 对照都是补充实验，不是完整 campaign。
-- S2T selector 只用 100 条 GSM8K train prompt 训练；不能据此断言“任何 selector 都失败”，只能断言本轮配置在 held-out 上失败。没有 SFT baseline（原生 0.6B 用同一 2k 数据 SFT）对照，因此不能把恢复效果归因于 ShadowPEFT 结构本身。
+- S2T selector 的 1k/2k 结果只在 GSM8K 同质题上成立；2k 条 exp7 异质 QA 文档 held-out −0.234，说明不能把“更多数据”直接外推到产线。2k GSM8K 只有 seed 0；1k 有 3 seeds。Agree@1 也不是端到端答案正确率。没有 SFT baseline（原生 0.6B 用同一 2k 数据 SFT）对照，因此不能把恢复效果归因于 ShadowPEFT 结构本身。
 - JitRL 真实数据仍未接入，因此不能声称 #2–#5 的完整真实收益或失败。
 
 ## 产物
